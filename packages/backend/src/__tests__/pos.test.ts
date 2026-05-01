@@ -94,7 +94,7 @@ beforeAll(async () => {
   // Run migrations
   const { execSync } = require('child_process');
   execSync('npx prisma migrate deploy', {
-    cwd: '/home/runner/work/jingles-pos/jingles-pos/packages/backend',
+    cwd: require('path').resolve(__dirname, '../..'),
     env: { ...process.env, DATABASE_URL: 'file:./test.db' },
     stdio: 'pipe',
   });
