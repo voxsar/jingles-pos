@@ -1,0 +1,13 @@
+{
+  "name": "@jingles/shared",
+  "version": "1.0.0",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "test": "echo 'no tests in shared'"
+  },
+  "devDependencies": {
+    "typescript": "^5.3.3"
+  }
+}

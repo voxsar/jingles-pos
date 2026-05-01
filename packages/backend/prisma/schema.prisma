@@ -1,0 +1,151 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model Product {
+  id          String      @id @default(uuid())
+  sku         String      @unique
+  name        String
+  barcode     String?     @unique
+  price       Float
+  description String?
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+  batchPrices BatchPrice[]
+  inventory   Inventory[]
+  saleLines   SaleLine[]
+  returnLines ReturnLine[]
+}
+
+model BatchPrice {
+  id        String   @id @default(uuid())
+  productId String
+  minQty    Int
+  price     Float
+  createdAt DateTime @default(now())
+  product   Product  @relation(fields: [productId], references: [id])
+}
+
+model Inventory {
+  id        String   @id @default(uuid())
+  productId String
+  state     String   @default("ShelfReady")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  product   Product  @relation(fields: [productId], references: [id])
+}
+
+model InventoryEvent {
+  id          String   @id @default(uuid())
+  productId   String
+  eventType   String
+  quantity    Int
+  reference   String?
+  notes       String?
+  createdAt   DateTime @default(now())
+}
+
+model Customer {
+  id        String   @id @default(uuid())
+  name      String
+  email     String?  @unique
+  phone     String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  sales     Sale[]
+}
+
+model POSShift {
+  id            String    @id @default(uuid())
+  terminalId    String
+  branchId      String?
+  userId        String
+  status        String    @default("OPEN")
+  openingFloat  Float     @default(0)
+  closingFloat  Float?
+  openedAt      DateTime  @default(now())
+  closedAt      DateTime?
+  notes         String?
+  sales         Sale[]
+}
+
+model Sale {
+  id              String     @id @default(uuid())
+  receiptNumber   String     @unique
+  terminalId      String
+  branchId        String?
+  userId          String
+  customerId      String?
+  shiftId         String?
+  status          String     @default("COMPLETED")
+  subtotal        Float
+  discountTotal   Float      @default(0)
+  taxTotal        Float      @default(0)
+  total           Float
+  offlineId       String?    @unique
+  synced          Boolean    @default(true)
+  createdAt       DateTime   @default(now())
+  updatedAt       DateTime   @updatedAt
+  customer        Customer?  @relation(fields: [customerId], references: [id])
+  shift           POSShift?  @relation(fields: [shiftId], references: [id])
+  lines           SaleLine[]
+  payments        Payment[]
+  returns         Return[]
+}
+
+model SaleLine {
+  id             String       @id @default(uuid())
+  saleId         String
+  productId      String
+  sku            String
+  name           String
+  barcode        String?
+  quantity       Int
+  unitPrice      Float
+  discountAmount Float        @default(0)
+  lineTotal      Float
+  sale           Sale         @relation(fields: [saleId], references: [id])
+  product        Product      @relation(fields: [productId], references: [id])
+  returnLines    ReturnLine[]
+}
+
+model Payment {
+  id           String   @id @default(uuid())
+  saleId       String
+  method       String
+  amount       Float
+  cashReceived Float?
+  changeDue    Float?
+  reference    String?
+  createdAt    DateTime @default(now())
+  sale         Sale     @relation(fields: [saleId], references: [id])
+}
+
+model Return {
+  id          String       @id @default(uuid())
+  saleId      String
+  userId      String
+  terminalId  String
+  reason      String?
+  totalRefund Float
+  createdAt   DateTime     @default(now())
+  sale        Sale         @relation(fields: [saleId], references: [id])
+  lines       ReturnLine[]
+}
+
+model ReturnLine {
+  id           String   @id @default(uuid())
+  returnId     String
+  saleLineId   String
+  productId    String
+  quantity     Int
+  refundAmount Float
+  return       Return   @relation(fields: [returnId], references: [id])
+  saleLine     SaleLine @relation(fields: [saleLineId], references: [id])
+  product      Product  @relation(fields: [productId], references: [id])
+}
