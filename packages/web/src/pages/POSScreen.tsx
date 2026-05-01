@@ -32,12 +32,16 @@ interface Sale {
   payments: any[];
 }
 
+type ShiftModalMode = 'open' | 'close' | null;
+
 export default function POSScreen() {
   const [query, setQuery] = useState('');
   const [results, setResults] = useState<Product[]>([]);
   const [cart, setCart] = useState<CartLine[]>([]);
   const [payMethod, setPayMethod] = useState<PaymentMethod>(PaymentMethod.CASH);
   const [cashReceived, setCashReceived] = useState('');
+  const [shiftModalMode, setShiftModalMode] = useState<ShiftModalMode>(null);
+  const [shiftFloat, setShiftFloat] = useState('0');
   const [isSearching, setIsSearching] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
   const [successMsg, setSuccessMsg] = useState('');
@@ -198,26 +202,26 @@ export default function POSScreen() {
     }
   }
 
-  async function handleOpenShift() {
-    const float = parseFloat(prompt('Enter opening float amount:', '0') ?? '0') || 0;
-    try {
-      const s = await openShift({ terminalId: TERMINAL_ID, userId: USER_ID, openingFloat: float });
-      setShift(s);
-      setSuccessMsg('Shift opened');
-    } catch (err: any) {
-      setErrorMsg(err.message || 'Failed to open shift');
-    }
-  }
-
-  async function handleCloseShift() {
-    if (!shift) return;
-    const float = parseFloat(prompt('Enter closing float amount:', '0') ?? '0') || 0;
-    try {
-      await closeShift(shift.id, { closingFloat: float });
-      setShift(null);
-      setSuccessMsg('Shift closed');
-    } catch (err: any) {
-      setErrorMsg(err.message || 'Failed to close shift');
+  async function handleConfirmShift() {
+    const float = parseFloat(shiftFloat) || 0;
+    setShiftModalMode(null);
+    setShiftFloat('0');
+    if (shiftModalMode === 'open') {
+      try {
+        const s = await openShift({ terminalId: TERMINAL_ID, userId: USER_ID, openingFloat: float });
+        setShift(s);
+        setSuccessMsg('Shift opened');
+      } catch (err: any) {
+        setErrorMsg(err.message || 'Failed to open shift');
+      }
+    } else if (shiftModalMode === 'close' && shift) {
+      try {
+        await closeShift(shift.id, { closingFloat: float });
+        setShift(null);
+        setSuccessMsg('Shift closed');
+      } catch (err: any) {
+        setErrorMsg(err.message || 'Failed to close shift');
+      }
     }
   }
 
@@ -272,10 +276,10 @@ export default function POSScreen() {
             {errorMsg && <span className="error-msg">{errorMsg}</span>}
             {successMsg && <span className="success-msg">{successMsg}</span>}
             {!shift ? (
-              <button className="shift-btn open-btn" onClick={handleOpenShift}>Open Shift</button>
+              <button className="shift-btn open-btn" onClick={() => { setShiftFloat('0'); setShiftModalMode('open'); }}>Open Shift</button>
             ) : (
               <>
-                <button className="shift-btn close-btn" onClick={handleCloseShift}>Close Shift</button>
+                <button className="shift-btn close-btn" onClick={() => { setShiftFloat('0'); setShiftModalMode('close'); }}>Close Shift</button>
                 <button className="btn btn-secondary" style={{ fontSize: '0.8rem', padding: '0.35rem 0.7rem' }} onClick={() => { setShowReturn(true); setErrorMsg(''); }}>Returns</button>
               </>
             )}
@@ -560,6 +564,37 @@ export default function POSScreen() {
             {!returnSale && (
               <div style={{ color: 'var(--text-light)', fontSize: '0.9rem' }}>Enter a Sale ID to load the sale for return.</div>
             )}
+          </div>
+        </div>
+      )}
+      {/* Shift Float Modal */}
+      {shiftModalMode && (
+        <div className="modal-overlay" onClick={() => setShiftModalMode(null)}>
+          <div className="modal-box" style={{ maxWidth: 340 }} onClick={(e) => e.stopPropagation()}>
+            <h2 style={{ marginBottom: '1rem', fontSize: '1.1rem' }}>
+              {shiftModalMode === 'open' ? '🟢 Open Shift' : '🔴 Close Shift'}
+            </h2>
+            <div className="cash-row" style={{ marginBottom: '1rem' }}>
+              <label style={{ width: 130 }}>{shiftModalMode === 'open' ? 'Opening Float' : 'Closing Float'}</label>
+              <input
+                className="cash-input"
+                type="number"
+                min={0}
+                step={0.01}
+                value={shiftFloat}
+                onChange={(e) => setShiftFloat(e.target.value)}
+                autoFocus
+                onKeyDown={(e) => e.key === 'Enter' && handleConfirmShift()}
+              />
+            </div>
+            <div style={{ display: 'flex', gap: '0.5rem' }}>
+              <button className="btn btn-primary" style={{ flex: 1 }} onClick={handleConfirmShift}>
+                Confirm
+              </button>
+              <button className="btn btn-secondary" style={{ flex: 1 }} onClick={() => setShiftModalMode(null)}>
+                Cancel
+              </button>
+            </div>
           </div>
         </div>
       )}
