@@ -1,31 +1,7 @@
-export enum InventoryState {
-  ShelfReady = 'ShelfReady',
-  Reserved = 'Reserved',
-  Sold = 'Sold',
-  Returned = 'Returned',
-}
-
-export enum InventoryEventType {
-  RECEIVED = 'RECEIVED',
-  ADJUSTED = 'ADJUSTED',
-  SALE_DEDUCTED = 'SALE_DEDUCTED',
-  RETURNED = 'RETURNED',
-  RESERVED = 'RESERVED',
-  RELEASED = 'RELEASED',
-}
-
-export enum PaymentMethod {
-  CASH = 'CASH',
-  CARD = 'CARD',
-  MIXED = 'MIXED',
-}
-
-export enum SaleStatus {
-  DRAFT = 'DRAFT',
-  COMPLETED = 'COMPLETED',
-  VOIDED = 'VOIDED',
-  RETURNED = 'RETURNED',
-  PARTIALLY_RETURNED = 'PARTIALLY_RETURNED',
+export enum UserRole {
+  CASHIER = 'CASHIER',
+  SALESPERSON = 'SALESPERSON',
+  MANAGER = 'MANAGER',
 }
 
 export enum ShiftStatus {
@@ -33,16 +9,52 @@ export enum ShiftStatus {
   CLOSED = 'CLOSED',
 }
 
-export enum SyncOperationType {
-  CREATE_SALE = 'CREATE_SALE',
-  CREATE_RETURN = 'CREATE_RETURN',
-  OPEN_SHIFT = 'OPEN_SHIFT',
-  CLOSE_SHIFT = 'CLOSE_SHIFT',
+export enum SaleStatus {
+  HELD = 'HELD',
+  COMPLETED = 'COMPLETED',
+  VOIDED = 'VOIDED',
+  REFUNDED = 'REFUNDED',
+  RECALLED = 'RECALLED',
 }
 
-export enum SyncStatus {
+export enum PaymentMethod {
+  CASH = 'CASH',
+  VISA = 'VISA',
+  MASTER = 'MASTER',
+  AMEX = 'AMEX',
+  CREDIT = 'CREDIT',
+  GIFT = 'GIFT',
+  SPLIT = 'SPLIT',
+}
+
+export enum CashCountMode {
+  OPENING = 'OPENING',
+  CLOSING = 'CLOSING',
+}
+
+export enum SyncEventType {
+  SHIFT_OPENED = 'SHIFT_OPENED',
+  SHIFT_CLOSED = 'SHIFT_CLOSED',
+  CASH_DECLARED = 'CASH_DECLARED',
+  HELD_SALE_SAVED = 'HELD_SALE_SAVED',
+  HELD_SALE_RECALLED = 'HELD_SALE_RECALLED',
+  SALE_COMPLETED = 'SALE_COMPLETED',
+  SALE_VOIDED = 'SALE_VOIDED',
+  RETURN_CREATED = 'RETURN_CREATED',
+}
+
+export enum SyncEventState {
   PENDING = 'PENDING',
-  IN_PROGRESS = 'IN_PROGRESS',
-  SYNCED = 'SYNCED',
+  CONFIRMED = 'CONFIRMED',
   FAILED = 'FAILED',
+}
+
+export enum SyncConflictPolicy {
+  LAST_WRITE_WINS = 'LAST_WRITE_WINS',
+  SERVER_WINS = 'SERVER_WINS',
+}
+
+export enum SyncConflictStatus {
+  OPEN = 'OPEN',
+  RESOLVED = 'RESOLVED',
 }

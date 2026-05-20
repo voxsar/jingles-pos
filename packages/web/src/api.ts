@@ -1,89 +1,163 @@
-const BASE = '/api';
+import {
+  CompleteSaleInput,
+  Product,
+  SaleSummary,
+  HeldSaleSummary,
+  HoldSaleInput,
+  POSBootstrap,
+  ReturnInput,
+  ShiftSummary,
+  ShiftCloseInput,
+  ShiftOpenInput,
+  SyncStatusSummary,
+  ZReportSummary,
+} from '@jingles/shared';
 
-export async function searchProducts(q: string) {
-  const r = await fetch(`${BASE}/pos/products/search?q=${encodeURIComponent(q)}`);
-  if (!r.ok) throw new Error('Search failed');
-  return r.json();
+const BASE = '/api/pos';
+
+function hasBridge() {
+  return typeof window !== 'undefined' && typeof window.posAPI !== 'undefined';
 }
 
-export async function scanBarcode(barcode: string) {
-  const r = await fetch(`${BASE}/pos/products/barcode/${encodeURIComponent(barcode)}`);
-  if (!r.ok) throw new Error('Product not found');
-  return r.json();
-}
-
-export async function createSale(payload: any) {
-  const r = await fetch(`${BASE}/pos/sales`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
-  });
-  if (!r.ok) {
-    const err = await r.json().catch(() => ({ error: 'Unknown error' }));
-    throw new Error(err.error || 'Sale failed');
+async function getJson<T>(path: string): Promise<T> {
+  const response = await fetch(`${BASE}${path}`);
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ error: `HTTP ${response.status}` })) as { error?: string };
+    throw new Error(error.error || `HTTP ${response.status}`);
   }
-  return r.json();
+  return response.json() as Promise<T>;
 }
 
-export async function listSales() {
-  const r = await fetch(`${BASE}/pos/sales`);
-  if (!r.ok) throw new Error('Failed to load sales');
-  return r.json();
-}
-
-export async function getSale(id: string) {
-  const r = await fetch(`${BASE}/pos/sales/${id}`);
-  if (!r.ok) throw new Error('Sale not found');
-  return r.json();
-}
-
-export async function voidSale(id: string) {
-  const r = await fetch(`${BASE}/pos/sales/${id}/void`, { method: 'POST' });
-  if (!r.ok) throw new Error('Failed to void sale');
-  return r.json();
-}
-
-export async function createReturn(payload: any) {
-  const r = await fetch(`${BASE}/pos/returns`, {
+async function postJson<T>(path: string, payload: unknown): Promise<T> {
+  const response = await fetch(`${BASE}${path}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
   });
-  if (!r.ok) {
-    const err = await r.json().catch(() => ({ error: 'Unknown error' }));
-    throw new Error(err.error || 'Return failed');
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ error: `HTTP ${response.status}` })) as { error?: string };
+    throw new Error(error.error || `HTTP ${response.status}`);
   }
-  return r.json();
+  return response.json() as Promise<T>;
 }
 
-export async function openShift(payload: any) {
-  const r = await fetch(`${BASE}/pos/shifts/open`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
-  });
-  if (!r.ok) {
-    const err = await r.json().catch(() => ({ error: 'Unknown error' }));
-    throw new Error(err.error || 'Failed to open shift');
+export async function bootstrapPOS(options?: { deviceId?: string; terminalId?: string }): Promise<POSBootstrap> {
+  if (hasBridge()) {
+    return window.posAPI!.bootstrap(options);
   }
-  return r.json();
+
+  const params = new URLSearchParams();
+  if (options?.deviceId) {
+    params.set('deviceId', options.deviceId);
+  }
+  if (options?.terminalId) {
+    params.set('terminalId', options.terminalId);
+  }
+  return getJson<POSBootstrap>(`/bootstrap${params.size > 0 ? `?${params.toString()}` : ''}`);
 }
 
-export async function closeShift(id: string, payload: any) {
-  const r = await fetch(`${BASE}/pos/shifts/${id}/close`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
+export async function searchProducts(query: string): Promise<Product[]> {
+  if (hasBridge()) {
+    return window.posAPI!.searchProducts(query);
+  }
+  return getJson<Product[]>(`${'/products/search'}?q=${encodeURIComponent(query)}`);
+}
+
+export async function openShift(input: ShiftOpenInput): Promise<ShiftSummary> {
+  if (hasBridge()) {
+    return window.posAPI!.openShift(input);
+  }
+  return postJson<ShiftSummary>('/shifts/open', input);
+}
+
+export async function closeShift(input: ShiftCloseInput & { terminalId?: string }): Promise<ShiftSummary> {
+  if (hasBridge()) {
+    return window.posAPI!.closeShift(input);
+  }
+  return postJson<ShiftSummary>(`/shifts/${encodeURIComponent(input.shiftId)}/close`, input);
+}
+
+export async function saveHeldSale(
+  input: Omit<HoldSaleInput, 'holdNumber'> & { holdNumber?: string },
+): Promise<HeldSaleSummary> {
+  if (hasBridge()) {
+    return window.posAPI!.saveHeldSale(input);
+  }
+  return postJson<HeldSaleSummary>('/held-sales', input);
+}
+
+export async function listHeldSales(): Promise<HeldSaleSummary[]> {
+  if (hasBridge()) {
+    return window.posAPI!.listHeldSales();
+  }
+  return getJson('/held-sales');
+}
+
+export async function recallHeldSale(heldSaleId: string): Promise<HeldSaleSummary> {
+  if (hasBridge()) {
+    return window.posAPI!.recallHeldSale(heldSaleId);
+  }
+  return postJson(`/held-sales/${encodeURIComponent(heldSaleId)}/recall`, {});
+}
+
+export async function createSale(input: CompleteSaleInput): Promise<SaleSummary> {
+  if (hasBridge()) {
+    return window.posAPI!.createSale(input);
+  }
+  return postJson<SaleSummary>('/sales', input);
+}
+
+export async function listSales(): Promise<SaleSummary[]> {
+  if (hasBridge()) {
+    return window.posAPI!.listSales();
+  }
+  return getJson<SaleSummary[]>('/sales');
+}
+
+export async function getSale(saleId: string): Promise<SaleSummary> {
+  if (hasBridge()) {
+    return window.posAPI!.getSale(saleId);
+  }
+  return getJson<SaleSummary>(`/sales/${encodeURIComponent(saleId)}`);
+}
+
+export async function createReturn(input: ReturnInput): Promise<{ id: string; saleId: string; totalRefund: number }> {
+  if (hasBridge()) {
+    return window.posAPI!.createReturn(input);
+  }
+  return postJson<{ id: string; saleId: string; totalRefund: number }>('/returns', input);
+}
+
+export async function getZReport(shiftId: string): Promise<ZReportSummary> {
+  if (hasBridge()) {
+    return window.posAPI!.getZReport(shiftId);
+  }
+  return getJson(`/shifts/${encodeURIComponent(shiftId)}/z-report`);
+}
+
+export async function getSyncStatus(): Promise<SyncStatusSummary> {
+  if (hasBridge()) {
+    return window.posAPI!.getSyncStatus();
+  }
+  const bootstrap = await bootstrapPOS();
+  return bootstrap.syncStatus;
+}
+
+export async function syncNow() {
+  if (hasBridge()) {
+    return window.posAPI!.syncNow();
+  }
+  return postJson('/sync/playback', {
+    deviceId: 'browser-client',
+    terminalId: 'TERM-03',
+    vectorClock: {},
+    events: [],
   });
-  if (!r.ok) throw new Error('Failed to close shift');
-  return r.json();
 }
 
-export async function getActiveShift(terminalId?: string) {
-  const url = terminalId
-    ? `${BASE}/pos/shifts/active?terminalId=${encodeURIComponent(terminalId)}`
-    : `${BASE}/pos/shifts/active`;
-  const r = await fetch(url);
-  if (!r.ok) throw new Error('Failed to get shift');
-  return r.json();
+export function subscribeSyncStatus(callback: (status: SyncStatusSummary) => void): () => void {
+  if (hasBridge()) {
+    return window.posAPI!.onSyncStatus(callback);
+  }
+  return () => undefined;
 }

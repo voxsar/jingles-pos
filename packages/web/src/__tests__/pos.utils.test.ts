@@ -1,53 +1,123 @@
-import { describe, it, expect } from 'vitest';
-import { resolvePrice, calcCartTotals, formatCurrency, generateReceiptNumber } from '../utils/pos';
-import { CartLine } from '@jingles/shared';
+import { describe, expect, it } from 'vitest';
+import { CartLine, Product, UserRole } from '@jingles/shared';
+import {
+  calcCartTotals,
+  createCartLine,
+  formatCurrency,
+  generateReceiptNumber,
+  pickPriceTier,
+  recalculateCartLine,
+} from '../utils/pos';
 
-describe('resolvePrice', () => {
-  const batchPrices = [
-    { id: '1', productId: 'p1', minQty: 5, price: 8.0 },
-    { id: '2', productId: 'p1', minQty: 10, price: 6.0 },
+describe('pickPriceTier', () => {
+  const priceTiers = [
+    { id: 'tier-retail', label: 'Retail', price: 100, priority: 2 },
+    { id: 'tier-wholesale', label: 'Wholesale', price: 80, priority: 3 },
+    { id: 'tier-default', label: 'Promo', price: 90, priority: 1, isDefault: true },
   ];
 
-  it('returns base price when no batch prices', () => {
-    expect(resolvePrice(10.0, 3, [])).toBe(10.0);
+  it('prefers an explicit label match', () => {
+    expect(pickPriceTier(priceTiers, ['Wholesale']).label).toBe('Wholesale');
   });
 
-  it('returns batch price when qty meets threshold', () => {
-    expect(resolvePrice(10.0, 5, batchPrices)).toBe(8.0);
-    expect(resolvePrice(10.0, 10, batchPrices)).toBe(6.0);
+  it('falls back to the default tier', () => {
+    expect(pickPriceTier(priceTiers, ['Missing']).label).toBe('Promo');
   });
+});
 
-  it('returns base price when qty is below all thresholds', () => {
-    expect(resolvePrice(10.0, 3, batchPrices)).toBe(10.0);
-  });
+describe('createCartLine', () => {
+  it('builds a new cart line from product and salesperson data', () => {
+    const product: Product = {
+      id: 'prod-1',
+      sku: 'SKU-1',
+      name: 'Widget',
+      categoryId: 'cat-1',
+      subcategory: 'Tools',
+      packSize: 1,
+      unitLabel: 'pcs',
+      stockOnHand: 10,
+      priceTiers: [
+        { id: 'tier-retail', label: 'Retail', price: 100, priority: 1, isDefault: true },
+      ],
+    };
 
-  it('picks highest qualifying tier', () => {
-    expect(resolvePrice(10.0, 12, batchPrices)).toBe(6.0);
+    const line = createCartLine(product, {
+      id: 'user-1',
+      code: 'E1',
+      name: 'Cashier',
+      initials: 'CA',
+      role: UserRole.CASHIER,
+    });
+
+    expect(line.productId).toBe('prod-1');
+    expect(line.lineTotal).toBe(100);
+    expect(line.salespersonInitials).toBe('CA');
   });
 });
 
 describe('calcCartTotals', () => {
   const lines: CartLine[] = [
-    { productId: 'p1', sku: 'S1', name: 'Widget', unitPrice: 10, quantity: 2, discountAmount: 2, lineTotal: 18 },
-    { productId: 'p2', sku: 'S2', name: 'Gadget', unitPrice: 5, quantity: 3, discountAmount: 0, lineTotal: 15 },
+    recalculateCartLine({
+      uid: 'l1',
+      productId: 'p1',
+      sku: 'S1',
+      name: 'Widget',
+      categoryId: 'cat-1',
+      subcategory: 'Tools',
+      packSize: 1,
+      quantity: 2,
+      unitPrice: 10,
+      tierLabel: 'Retail',
+      priceTiers: [],
+      salespersonId: 'u1',
+      salespersonName: 'Cashier',
+      salespersonInitials: 'CA',
+      discountPercent: 10,
+      discountAmount: 0,
+      costBasis: 6,
+      stockOnHand: 5,
+      lineTotal: 20,
+    }),
+    recalculateCartLine({
+      uid: 'l2',
+      productId: 'p2',
+      sku: 'S2',
+      name: 'Gadget',
+      categoryId: 'cat-1',
+      subcategory: 'Tools',
+      packSize: 1,
+      quantity: 3,
+      unitPrice: 5,
+      tierLabel: 'Retail',
+      priceTiers: [],
+      salespersonId: 'u1',
+      salespersonName: 'Cashier',
+      salespersonInitials: 'CA',
+      discountPercent: 0,
+      discountAmount: 0,
+      costBasis: 2,
+      stockOnHand: 5,
+      lineTotal: 15,
+    }),
   ];
 
-  it('calculates subtotal correctly', () => {
-    const totals = calcCartTotals(lines);
-    expect(totals.subtotal).toBe(35); // 10*2 + 5*3
+  it('calculates subtotal and bill discount', () => {
+    const totals = calcCartTotals(lines, 3);
+    expect(totals.subtotal).toBe(33);
+    expect(totals.billDiscount).toBe(3);
   });
 
-  it('calculates discount total correctly', () => {
-    const totals = calcCartTotals(lines);
-    expect(totals.discountTotal).toBe(2);
+  it('calculates total discount correctly', () => {
+    const totals = calcCartTotals(lines, 3);
+    expect(totals.discountTotal).toBe(5);
   });
 
-  it('calculates total as subtotal minus discount', () => {
-    const totals = calcCartTotals(lines);
-    expect(totals.total).toBe(33); // 35 - 2
+  it('calculates total after line and bill discounts', () => {
+    const totals = calcCartTotals(lines, 3);
+    expect(totals.total).toBe(30);
   });
 
-  it('handles empty cart', () => {
+  it('handles empty carts', () => {
     const totals = calcCartTotals([]);
     expect(totals.subtotal).toBe(0);
     expect(totals.total).toBe(0);
@@ -55,15 +125,15 @@ describe('calcCartTotals', () => {
 });
 
 describe('formatCurrency', () => {
-  it('formats to 2 decimal places with dollar sign', () => {
-    expect(formatCurrency(10)).toBe('$10.00');
-    expect(formatCurrency(10.5)).toBe('$10.50');
-    expect(formatCurrency(0)).toBe('$0.00');
+  it('formats values with the rupee prefix', () => {
+    expect(formatCurrency(10)).toBe('Rs 10.00');
+    expect(formatCurrency(10.5)).toBe('Rs 10.50');
+    expect(formatCurrency(0)).toBe('Rs 0.00');
   });
 });
 
 describe('generateReceiptNumber', () => {
-  it('starts with RCP-', () => {
-    expect(generateReceiptNumber()).toMatch(/^RCP-\d{8}-\d{4}$/);
+  it('includes the terminal code fragment', () => {
+    expect(generateReceiptNumber('TERM-03')).toMatch(/^\d{6}-(TERM|RM03)-\d{4}$/);
   });
 });

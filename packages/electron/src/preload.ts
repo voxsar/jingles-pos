@@ -1,17 +1,24 @@
 import { contextBridge, ipcRenderer } from 'electron';
 
 contextBridge.exposeInMainWorld('posAPI', {
-  searchProducts: (q: string) => ipcRenderer.invoke('pos:searchProducts', q),
-  scanBarcode: (barcode: string) => ipcRenderer.invoke('pos:scanBarcode', barcode),
-  createSale: (input: any) => ipcRenderer.invoke('pos:createSale', input),
+  bootstrap: (options?: { deviceId?: string; terminalId?: string }) => ipcRenderer.invoke('pos:bootstrap', options),
+  searchProducts: (query: string) => ipcRenderer.invoke('pos:searchProducts', query),
   getShift: (terminalId: string) => ipcRenderer.invoke('pos:getShift', terminalId),
-  openShift: (data: any) => ipcRenderer.invoke('pos:openShift', data),
-  closeShift: (shiftId: string, data: any) => ipcRenderer.invoke('pos:closeShift', shiftId, data),
-  createReturn: (data: any) => ipcRenderer.invoke('pos:createReturn', data),
+  openShift: (input: unknown) => ipcRenderer.invoke('pos:openShift', input),
+  closeShift: (input: unknown) => ipcRenderer.invoke('pos:closeShift', input),
+  saveHeldSale: (input: unknown) => ipcRenderer.invoke('pos:saveHeldSale', input),
+  listHeldSales: () => ipcRenderer.invoke('pos:listHeldSales'),
+  recallHeldSale: (heldSaleId: string) => ipcRenderer.invoke('pos:recallHeldSale', heldSaleId),
+  createSale: (input: unknown) => ipcRenderer.invoke('pos:createSale', input),
   listSales: () => ipcRenderer.invoke('pos:listSales'),
-  getSyncQueue: () => ipcRenderer.invoke('pos:getSyncQueue'),
+  getSale: (saleId: string) => ipcRenderer.invoke('pos:getSale', saleId),
+  createReturn: (input: unknown) => ipcRenderer.invoke('pos:createReturn', input),
+  getZReport: (shiftId: string) => ipcRenderer.invoke('pos:getZReport', shiftId),
+  getSyncStatus: () => ipcRenderer.invoke('pos:getSyncStatus'),
   syncNow: () => ipcRenderer.invoke('pos:syncNow'),
-  upsertProduct: (product: any) => ipcRenderer.invoke('pos:upsertProduct', product),
-  onSyncResult: (callback: (result: any) => void) =>
-    ipcRenderer.on('sync-result', (_event, result) => callback(result)),
+  onSyncStatus: (callback: (status: unknown) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, status: unknown) => callback(status);
+    ipcRenderer.on('pos:sync-status', listener);
+    return () => ipcRenderer.removeListener('pos:sync-status', listener);
+  },
 });

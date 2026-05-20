@@ -7,26 +7,76 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+model Branch {
+  id        String   @id
+  code      String   @unique
+  name      String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  terminals Terminal[]
+}
+
+model Terminal {
+  id        String   @id
+  code      String   @unique
+  name      String
+  branchId  String
+  branch    Branch   @relation(fields: [branchId], references: [id])
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model POSUser {
+  id        String   @id
+  code      String   @unique
+  name      String
+  initials  String
+  role      String
+  pin       String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Category {
+  id        String    @id
+  name      String
+  icon      String?
+  sortOrder Int       @default(0)
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  products  Product[]
+}
+
 model Product {
-  id          String      @id @default(uuid())
-  sku         String      @unique
-  name        String
-  barcode     String?     @unique
-  price       Float
-  description String?
-  createdAt   DateTime    @default(now())
-  updatedAt   DateTime    @updatedAt
-  batchPrices BatchPrice[]
-  inventory   Inventory[]
-  saleLines   SaleLine[]
-  returnLines ReturnLine[]
+  id              String      @id
+  sku             String      @unique
+  name            String
+  barcode         String?     @unique
+  price           Float       @default(0)
+  categoryId      String?
+  subcategory     String      @default("")
+  packSize        Int         @default(1)
+  unitLabel       String      @default("pcs")
+  stockOnHand     Int         @default(0)
+  description     String?
+  lastVectorClock String?
+  createdAt       DateTime    @default(now())
+  updatedAt       DateTime    @updatedAt
+  category        Category?   @relation(fields: [categoryId], references: [id])
+  batchPrices     BatchPrice[]
+  inventory       Inventory[]
+  saleLines       SaleLine[]
+  returnLines     ReturnLine[]
 }
 
 model BatchPrice {
-  id        String   @id @default(uuid())
+  id        String   @id
   productId String
-  minQty    Int
+  label     String?
+  minQty    Int      @default(0)
   price     Float
+  priority  Int      @default(0)
+  isDefault Boolean  @default(false)
   createdAt DateTime @default(now())
   product   Product  @relation(fields: [productId], references: [id])
 }
@@ -41,7 +91,7 @@ model Inventory {
 }
 
 model InventoryEvent {
-  id          String   @id @default(uuid())
+  id          String   @id
   productId   String
   eventType   String
   quantity    Int
@@ -51,31 +101,48 @@ model InventoryEvent {
 }
 
 model Customer {
-  id        String   @id @default(uuid())
+  id        String   @id
+  code      String?  @unique
   name      String
+  tier      String   @default("Retail")
   email     String?  @unique
   phone     String?
+  notes     String?
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
   sales     Sale[]
 }
 
 model POSShift {
-  id            String    @id @default(uuid())
+  id            String    @id
   terminalId    String
   branchId      String?
   userId        String
   status        String    @default("OPEN")
   openingFloat  Float     @default(0)
   closingFloat  Float?
+  lastVectorClock String?
+  synced        Boolean   @default(true)
   openedAt      DateTime  @default(now())
   closedAt      DateTime?
   notes         String?
   sales         Sale[]
+  cashCounts    ShiftCashCount[]
+}
+
+model ShiftCashCount {
+  id            String   @id
+  shiftId        String
+  mode           String
+  total          Float
+  denominations  String
+  variance       Float?
+  createdAt      DateTime @default(now())
+  shift          POSShift @relation(fields: [shiftId], references: [id])
 }
 
 model Sale {
-  id              String     @id @default(uuid())
+  id              String     @id
   receiptNumber   String     @unique
   terminalId      String
   branchId        String?
@@ -87,8 +154,13 @@ model Sale {
   discountTotal   Float      @default(0)
   taxTotal        Float      @default(0)
   total           Float
+  marginTotal     Float      @default(0)
+  heldSaleId      String?
   offlineId       String?    @unique
+  sourceDeviceId  String?
+  sourceSequenceNum Int?
   synced          Boolean    @default(true)
+  lastVectorClock String?
   createdAt       DateTime   @default(now())
   updatedAt       DateTime   @updatedAt
   customer        Customer?  @relation(fields: [customerId], references: [id])
@@ -99,47 +171,94 @@ model Sale {
 }
 
 model SaleLine {
-  id             String       @id @default(uuid())
-  saleId         String
-  productId      String
-  sku            String
-  name           String
-  barcode        String?
-  quantity       Int
-  unitPrice      Float
-  discountAmount Float        @default(0)
-  lineTotal      Float
-  sale           Sale         @relation(fields: [saleId], references: [id])
-  product        Product      @relation(fields: [productId], references: [id])
-  returnLines    ReturnLine[]
+  id               String   @id
+  saleId           String
+  productId        String
+  sku              String
+  name             String
+  barcode          String?
+  subcategory      String   @default("")
+  salespersonId    String?
+  quantity         Int
+  unitPrice        Float
+  tierLabel        String   @default("Retail")
+  discountPercent  Float    @default(0)
+  discountAmount   Float    @default(0)
+  costBasis        Float    @default(0)
+  marginAmount     Float    @default(0)
+  lineTotal        Float
+  sale             Sale     @relation(fields: [saleId], references: [id])
+  product          Product  @relation(fields: [productId], references: [id])
+  returnLines      ReturnLine[]
 }
 
 model Payment {
-  id           String   @id @default(uuid())
-  saleId       String
-  method       String
-  amount       Float
-  cashReceived Float?
-  changeDue    Float?
-  reference    String?
-  createdAt    DateTime @default(now())
-  sale         Sale     @relation(fields: [saleId], references: [id])
+  id             String   @id
+  saleId         String
+  method         String
+  amount         Float
+  tenderedAmount Float?
+  changeDue      Float?
+  reference      String?
+  metadata       String?
+  createdAt      DateTime @default(now())
+  sale           Sale     @relation(fields: [saleId], references: [id])
+}
+
+model HeldSale {
+  id            String         @id
+  holdNumber    String         @unique
+  terminalId    String
+  branchId      String
+  userId        String
+  customerId    String?
+  customerName  String?
+  status        String         @default("HELD")
+  subtotal      Float
+  discountTotal Float          @default(0)
+  total         Float
+  notes         String?
+  lastVectorClock String?
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+  lines         HeldSaleLine[]
+}
+
+model HeldSaleLine {
+  id              String   @id
+  heldSaleId      String
+  productId       String
+  sku             String
+  name            String
+  subcategory     String   @default("")
+  salespersonId   String?
+  quantity        Int
+  unitPrice       Float
+  tierLabel       String   @default("Retail")
+  discountPercent Float    @default(0)
+  discountAmount  Float    @default(0)
+  costBasis       Float    @default(0)
+  lineTotal       Float
+  heldSale        HeldSale @relation(fields: [heldSaleId], references: [id])
 }
 
 model Return {
-  id          String       @id @default(uuid())
-  saleId      String
-  userId      String
-  terminalId  String
-  reason      String?
-  totalRefund Float
-  createdAt   DateTime     @default(now())
-  sale        Sale         @relation(fields: [saleId], references: [id])
-  lines       ReturnLine[]
+  id              String       @id
+  saleId          String
+  userId          String
+  terminalId      String
+  reason          String?
+  totalRefund     Float
+  sourceDeviceId  String?
+  sourceSequenceNum Int?
+  lastVectorClock String?
+  createdAt       DateTime     @default(now())
+  sale            Sale         @relation(fields: [saleId], references: [id])
+  lines           ReturnLine[]
 }
 
 model ReturnLine {
-  id           String   @id @default(uuid())
+  id           String   @id
   returnId     String
   saleLineId   String
   productId    String
@@ -148,4 +267,48 @@ model ReturnLine {
   return       Return   @relation(fields: [returnId], references: [id])
   saleLine     SaleLine @relation(fields: [saleLineId], references: [id])
   product      Product  @relation(fields: [productId], references: [id])
+}
+
+model SyncEvent {
+  id             String   @id
+  aggregateType  String
+  aggregateId    String
+  eventType      String
+  payload        String
+  vectorClock    String
+  deviceId       String
+  terminalId     String?
+  sequenceNum    Int
+  lamport        Int
+  conflictPolicy String   @default("LAST_WRITE_WINS")
+  state          String   @default("PENDING")
+  createdAt      DateTime @default(now())
+  appliedAt      DateTime?
+
+  @@unique([deviceId, sequenceNum])
+  @@index([aggregateType, aggregateId])
+}
+
+model SyncDeviceState {
+  id                  String   @id
+  deviceId            String   @unique
+  terminalId          String?
+  lastSequenceNum     Int      @default(0)
+  vectorClock         String   @default("{}")
+  confirmedVectorClock String  @default("{}")
+  lastSeenAt          DateTime @default(now())
+  lastSyncAt          DateTime?
+}
+
+model SyncConflict {
+  id            String   @id
+  aggregateType String
+  aggregateId   String
+  localEventId  String?
+  remoteEventId String?
+  policy        String
+  status        String   @default("OPEN")
+  detail        String?
+  createdAt     DateTime @default(now())
+  resolvedAt    DateTime?
 }

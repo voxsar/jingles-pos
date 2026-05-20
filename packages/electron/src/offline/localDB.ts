@@ -2,636 +2,1760 @@ import Database from 'better-sqlite3';
 import path from 'path';
 import { v4 as uuidv4 } from 'uuid';
 import {
+  Branch,
+  CartLine,
+  Category,
+  CompleteSaleInput,
+  Customer,
+  DEFAULT_DEVICE_ID,
+  DEFAULT_TERMINAL_ID,
+  HeldSaleSummary,
+  HoldSaleInput,
+  PaymentInput,
+  POSBootstrap,
+  POSUser,
+  Product,
+  ProductPriceTier,
+  ReturnInput,
   SaleStatus,
+  SaleSummary,
+  SAMPLE_BRANCHES,
+  SAMPLE_CATEGORIES,
+  SAMPLE_CUSTOMERS,
+  SAMPLE_PRODUCTS,
+  SAMPLE_TERMINALS,
+  SAMPLE_USERS,
+  ShiftCloseInput,
+  ShiftOpenInput,
   ShiftStatus,
-  SyncOperationType,
-  SyncStatus,
-  PaymentMethod,
-  InventoryState,
+  ShiftSummary,
+  SyncConflict,
+  SyncConflictPolicy,
+  SyncConflictStatus,
+  SyncEvent,
+  SyncEventState,
+  SyncEventType,
+  SyncStatusSummary,
+  Terminal,
+  VectorClock,
+  ZReportSummary,
+  CashCountMode,
 } from '@jingles/shared';
 
-let _db: Database.Database | null = null;
+let dbInstance: Database.Database | null = null;
+
+function parseJson<T>(value: string | null | undefined, fallback: T): T {
+  if (!value) {
+    return fallback;
+  }
+
+  try {
+    return JSON.parse(value) as T;
+  } catch {
+    return fallback;
+  }
+}
+
+function stringifyJson(value: unknown): string {
+  return JSON.stringify(value ?? {});
+}
+
+function normalizeClock(value: string | null | undefined): VectorClock {
+  return parseJson<VectorClock>(value, {});
+}
+
+function compareVectorClocks(left: VectorClock, right: VectorClock): 'equal' | 'lt' | 'gt' | 'concurrent' {
+  const keys = new Set([...Object.keys(left), ...Object.keys(right)]);
+  let leftGreater = false;
+  let rightGreater = false;
+
+  for (const key of keys) {
+    const a = left[key] ?? 0;
+    const b = right[key] ?? 0;
+    if (a > b) {
+      leftGreater = true;
+    }
+    if (a < b) {
+      rightGreater = true;
+    }
+  }
+
+  if (!leftGreater && !rightGreater) {
+    return 'equal';
+  }
+  if (leftGreater && !rightGreater) {
+    return 'gt';
+  }
+  if (!leftGreater && rightGreater) {
+    return 'lt';
+  }
+  return 'concurrent';
+}
+
+function compareEventOrder(
+  leftSequence: number,
+  leftDeviceId: string,
+  rightSequence: number,
+  rightDeviceId: string,
+): number {
+  if (leftSequence !== rightSequence) {
+    return leftSequence - rightSequence;
+  }
+  return leftDeviceId.localeCompare(rightDeviceId);
+}
+
+function eventWins(
+  incoming: Pick<SyncEvent, 'deviceId' | 'sequenceNum' | 'conflictPolicy'>,
+  current: Pick<SyncEvent, 'deviceId' | 'sequenceNum'>,
+): boolean {
+  if (incoming.conflictPolicy === SyncConflictPolicy.SERVER_WINS) {
+    const incomingServer = incoming.deviceId.startsWith('server:');
+    const currentServer = current.deviceId.startsWith('server:');
+    if (incomingServer !== currentServer) {
+      return incomingServer;
+    }
+  }
+
+  return compareEventOrder(
+    incoming.sequenceNum,
+    incoming.deviceId,
+    current.sequenceNum,
+    current.deviceId,
+  ) >= 0;
+}
+
+function resolveConflictPolicy(eventType: SyncEventType): SyncConflictPolicy {
+  switch (eventType) {
+    case SyncEventType.SALE_COMPLETED:
+    case SyncEventType.SALE_VOIDED:
+    case SyncEventType.RETURN_CREATED:
+    case SyncEventType.SHIFT_CLOSED:
+      return SyncConflictPolicy.SERVER_WINS;
+    default:
+      return SyncConflictPolicy.LAST_WRITE_WINS;
+  }
+}
+
+function mergeClocks(...clocks: VectorClock[]): VectorClock {
+  const result: VectorClock = {};
+  for (const clock of clocks) {
+    for (const [deviceId, sequence] of Object.entries(clock)) {
+      result[deviceId] = Math.max(result[deviceId] ?? 0, sequence);
+    }
+  }
+  return result;
+}
 
 export function getDB(dbPath?: string): Database.Database {
-  if (_db) return _db;
+  if (dbInstance) {
+    return dbInstance;
+  }
 
   const filePath = dbPath || path.join(process.cwd(), 'jingles-pos-local.db');
-  _db = new Database(filePath);
-  _db.pragma('journal_mode = WAL');
-  _db.pragma('foreign_keys = ON');
-  initSchema(_db);
-  return _db;
+  dbInstance = new Database(filePath);
+  dbInstance.pragma('journal_mode = WAL');
+  dbInstance.pragma('foreign_keys = ON');
+  initSchema(dbInstance);
+  seedReferenceData(dbInstance);
+  ensureDeviceState(dbInstance, DEFAULT_DEVICE_ID, DEFAULT_TERMINAL_ID);
+  return dbInstance;
 }
 
 export function resetDB(): void {
-  if (_db) {
-    _db.close();
-    _db = null;
+  if (dbInstance) {
+    dbInstance.close();
+    dbInstance = null;
   }
 }
 
 function initSchema(db: Database.Database): void {
   db.exec(`
-    CREATE TABLE IF NOT EXISTS local_products (
+    CREATE TABLE IF NOT EXISTS branches (
+      id TEXT PRIMARY KEY,
+      code TEXT NOT NULL UNIQUE,
+      name TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS terminals (
+      id TEXT PRIMARY KEY,
+      code TEXT NOT NULL UNIQUE,
+      name TEXT NOT NULL,
+      branch_id TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS users (
+      id TEXT PRIMARY KEY,
+      code TEXT NOT NULL UNIQUE,
+      name TEXT NOT NULL,
+      initials TEXT NOT NULL,
+      role TEXT NOT NULL,
+      pin TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS customers (
+      id TEXT PRIMARY KEY,
+      code TEXT,
+      name TEXT NOT NULL,
+      tier TEXT NOT NULL,
+      phone TEXT,
+      email TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS categories (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      icon TEXT NOT NULL,
+      sort_order INTEGER NOT NULL DEFAULT 0
+    );
+
+    CREATE TABLE IF NOT EXISTS products (
       id TEXT PRIMARY KEY,
       sku TEXT NOT NULL UNIQUE,
+      barcode TEXT,
       name TEXT NOT NULL,
-      barcode TEXT UNIQUE,
-      price REAL NOT NULL,
-      batch_prices TEXT DEFAULT '[]',
-      synced_at TEXT,
-      updated_at TEXT DEFAULT (datetime('now'))
+      category_id TEXT NOT NULL,
+      subcategory TEXT NOT NULL DEFAULT '',
+      pack_size INTEGER NOT NULL DEFAULT 1,
+      unit_label TEXT NOT NULL DEFAULT 'pcs',
+      stock_on_hand INTEGER NOT NULL DEFAULT 0,
+      description TEXT,
+      last_vector_clock TEXT DEFAULT '{}'
     );
 
-    CREATE TABLE IF NOT EXISTS local_inventory (
+    CREATE TABLE IF NOT EXISTS product_price_tiers (
       id TEXT PRIMARY KEY,
       product_id TEXT NOT NULL,
-      state TEXT NOT NULL DEFAULT 'ShelfReady',
-      updated_at TEXT DEFAULT (datetime('now')),
-      FOREIGN KEY (product_id) REFERENCES local_products(id)
+      label TEXT NOT NULL,
+      price REAL NOT NULL,
+      priority INTEGER NOT NULL DEFAULT 0,
+      min_qty INTEGER NOT NULL DEFAULT 0,
+      is_default INTEGER NOT NULL DEFAULT 0
     );
 
-    CREATE TABLE IF NOT EXISTS local_shifts (
+    CREATE TABLE IF NOT EXISTS shifts (
       id TEXT PRIMARY KEY,
       terminal_id TEXT NOT NULL,
       branch_id TEXT,
-      user_id TEXT NOT NULL,
-      status TEXT NOT NULL DEFAULT 'OPEN',
-      opening_float REAL DEFAULT 0,
+      cashier_id TEXT NOT NULL,
+      status TEXT NOT NULL,
+      opening_float REAL NOT NULL DEFAULT 0,
       closing_float REAL,
-      opened_at TEXT DEFAULT (datetime('now')),
-      closed_at TEXT,
       notes TEXT,
-      synced INTEGER DEFAULT 0,
-      offline_id TEXT UNIQUE
+      last_vector_clock TEXT DEFAULT '{}',
+      opened_at TEXT NOT NULL,
+      closed_at TEXT
     );
 
-    CREATE TABLE IF NOT EXISTS local_sales (
+    CREATE TABLE IF NOT EXISTS shift_cash_counts (
+      id TEXT PRIMARY KEY,
+      shift_id TEXT NOT NULL,
+      mode TEXT NOT NULL,
+      total REAL NOT NULL,
+      denominations_json TEXT NOT NULL,
+      variance REAL,
+      created_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS held_sales (
+      id TEXT PRIMARY KEY,
+      hold_number TEXT NOT NULL UNIQUE,
+      terminal_id TEXT NOT NULL,
+      branch_id TEXT NOT NULL,
+      cashier_id TEXT NOT NULL,
+      customer_id TEXT,
+      customer_name TEXT,
+      status TEXT NOT NULL,
+      subtotal REAL NOT NULL,
+      discount_total REAL NOT NULL DEFAULT 0,
+      total REAL NOT NULL,
+      notes TEXT,
+      last_vector_clock TEXT DEFAULT '{}',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS held_sale_lines (
+      id TEXT PRIMARY KEY,
+      held_sale_id TEXT NOT NULL,
+      product_id TEXT NOT NULL,
+      sku TEXT NOT NULL,
+      name TEXT NOT NULL,
+      subcategory TEXT NOT NULL,
+      quantity INTEGER NOT NULL,
+      unit_price REAL NOT NULL,
+      tier_label TEXT NOT NULL,
+      discount_percent REAL NOT NULL DEFAULT 0,
+      discount_amount REAL NOT NULL DEFAULT 0,
+      salesperson_id TEXT,
+      cost_basis REAL NOT NULL DEFAULT 0,
+      line_total REAL NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS sales (
       id TEXT PRIMARY KEY,
       receipt_number TEXT NOT NULL UNIQUE,
       terminal_id TEXT NOT NULL,
       branch_id TEXT,
-      user_id TEXT NOT NULL,
+      cashier_id TEXT NOT NULL,
       customer_id TEXT,
       shift_id TEXT,
-      status TEXT NOT NULL DEFAULT 'COMPLETED',
+      held_sale_id TEXT,
+      status TEXT NOT NULL,
       subtotal REAL NOT NULL,
-      discount_total REAL DEFAULT 0,
-      tax_total REAL DEFAULT 0,
+      discount_total REAL NOT NULL DEFAULT 0,
+      tax_total REAL NOT NULL DEFAULT 0,
       total REAL NOT NULL,
-      offline_id TEXT UNIQUE,
-      synced INTEGER DEFAULT 0,
-      sync_error TEXT,
-      created_at TEXT DEFAULT (datetime('now')),
-      FOREIGN KEY (shift_id) REFERENCES local_shifts(id)
+      margin_total REAL NOT NULL DEFAULT 0,
+      source_device_id TEXT,
+      source_sequence_num INTEGER,
+      last_vector_clock TEXT DEFAULT '{}',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
     );
 
-    CREATE TABLE IF NOT EXISTS local_sale_lines (
+    CREATE TABLE IF NOT EXISTS sale_lines (
       id TEXT PRIMARY KEY,
       sale_id TEXT NOT NULL,
       product_id TEXT NOT NULL,
       sku TEXT NOT NULL,
       name TEXT NOT NULL,
       barcode TEXT,
+      subcategory TEXT NOT NULL,
       quantity INTEGER NOT NULL,
       unit_price REAL NOT NULL,
-      discount_amount REAL DEFAULT 0,
-      line_total REAL NOT NULL,
-      FOREIGN KEY (sale_id) REFERENCES local_sales(id)
+      tier_label TEXT NOT NULL,
+      discount_percent REAL NOT NULL DEFAULT 0,
+      discount_amount REAL NOT NULL DEFAULT 0,
+      salesperson_id TEXT,
+      cost_basis REAL NOT NULL DEFAULT 0,
+      margin_amount REAL NOT NULL DEFAULT 0,
+      line_total REAL NOT NULL
     );
 
-    CREATE TABLE IF NOT EXISTS local_payments (
+    CREATE TABLE IF NOT EXISTS payments (
       id TEXT PRIMARY KEY,
       sale_id TEXT NOT NULL,
       method TEXT NOT NULL,
       amount REAL NOT NULL,
-      cash_received REAL,
+      tendered_amount REAL,
       change_due REAL,
       reference TEXT,
-      FOREIGN KEY (sale_id) REFERENCES local_sales(id)
+      metadata_json TEXT
     );
 
-    CREATE TABLE IF NOT EXISTS local_returns (
+    CREATE TABLE IF NOT EXISTS returns (
       id TEXT PRIMARY KEY,
       sale_id TEXT NOT NULL,
-      user_id TEXT NOT NULL,
       terminal_id TEXT NOT NULL,
+      cashier_id TEXT NOT NULL,
       reason TEXT,
       total_refund REAL NOT NULL,
-      synced INTEGER DEFAULT 0,
-      created_at TEXT DEFAULT (datetime('now')),
-      FOREIGN KEY (sale_id) REFERENCES local_sales(id)
+      source_device_id TEXT,
+      source_sequence_num INTEGER,
+      last_vector_clock TEXT DEFAULT '{}',
+      created_at TEXT NOT NULL
     );
 
-    CREATE TABLE IF NOT EXISTS local_return_lines (
+    CREATE TABLE IF NOT EXISTS return_lines (
       id TEXT PRIMARY KEY,
       return_id TEXT NOT NULL,
       sale_line_id TEXT NOT NULL,
       product_id TEXT NOT NULL,
       quantity INTEGER NOT NULL,
-      refund_amount REAL NOT NULL,
-      FOREIGN KEY (return_id) REFERENCES local_returns(id)
+      refund_amount REAL NOT NULL
     );
 
-    CREATE TABLE IF NOT EXISTS sync_queue (
+    CREATE TABLE IF NOT EXISTS sync_event_log (
       id TEXT PRIMARY KEY,
-      type TEXT NOT NULL,
-      status TEXT NOT NULL DEFAULT 'PENDING',
-      payload TEXT NOT NULL,
-      created_at TEXT DEFAULT (datetime('now')),
-      attempts INTEGER DEFAULT 0,
+      aggregate_type TEXT NOT NULL,
+      aggregate_id TEXT NOT NULL,
+      event_type TEXT NOT NULL,
+      payload_json TEXT NOT NULL,
+      device_id TEXT NOT NULL,
+      terminal_id TEXT,
+      sequence_num INTEGER NOT NULL,
+      lamport INTEGER NOT NULL,
+      vector_clock_json TEXT NOT NULL,
+      conflict_policy TEXT NOT NULL,
+      state TEXT NOT NULL,
+      source TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      applied_at TEXT
+    );
+
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_sync_event_device_sequence
+      ON sync_event_log(device_id, sequence_num);
+
+    CREATE INDEX IF NOT EXISTS idx_sync_event_aggregate
+      ON sync_event_log(aggregate_type, aggregate_id);
+
+    CREATE TABLE IF NOT EXISTS sync_conflicts (
+      id TEXT PRIMARY KEY,
+      aggregate_type TEXT NOT NULL,
+      aggregate_id TEXT NOT NULL,
+      local_event_id TEXT,
+      remote_event_id TEXT,
+      policy TEXT NOT NULL,
+      status TEXT NOT NULL,
+      detail_json TEXT,
+      created_at TEXT NOT NULL,
+      resolved_at TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS device_state (
+      device_id TEXT PRIMARY KEY,
+      terminal_id TEXT NOT NULL,
+      last_sequence_num INTEGER NOT NULL DEFAULT 0,
+      local_vector_clock TEXT NOT NULL DEFAULT '{}',
+      remote_vector_clock TEXT NOT NULL DEFAULT '{}',
+      confirmed_vector_clock TEXT NOT NULL DEFAULT '{}',
+      online INTEGER NOT NULL DEFAULT 0,
+      last_sync_at TEXT,
       last_error TEXT
     );
   `);
 }
 
-// ── Products ───────────────────────────────────────────────────────────────
+function seedReferenceData(db: Database.Database): void {
+  const count = db.prepare('SELECT COUNT(*) AS count FROM products').get() as { count: number };
+  if (count.count > 0) {
+    return;
+  }
 
-export interface LocalProduct {
-  id: string;
-  sku: string;
-  name: string;
-  barcode?: string;
-  price: number;
-  batchPrices: Array<{ minQty: number; price: number }>;
+  const transaction = db.transaction(() => {
+    for (const branch of SAMPLE_BRANCHES) {
+      db.prepare(`
+        INSERT INTO branches (id, code, name)
+        VALUES (?, ?, ?)
+      `).run(branch.id, branch.code, branch.name);
+    }
+
+    for (const terminal of SAMPLE_TERMINALS) {
+      db.prepare(`
+        INSERT INTO terminals (id, code, name, branch_id)
+        VALUES (?, ?, ?, ?)
+      `).run(terminal.id, terminal.code, terminal.name, terminal.branchId);
+    }
+
+    for (const user of SAMPLE_USERS) {
+      db.prepare(`
+        INSERT INTO users (id, code, name, initials, role, pin)
+        VALUES (?, ?, ?, ?, ?, ?)
+      `).run(user.id, user.code, user.name, user.initials, user.role, user.pin ?? null);
+    }
+
+    for (const customer of SAMPLE_CUSTOMERS) {
+      db.prepare(`
+        INSERT INTO customers (id, code, name, tier, phone, email)
+        VALUES (?, ?, ?, ?, ?, ?)
+      `).run(customer.id, customer.code, customer.name, customer.tier, customer.phone ?? null, customer.email ?? null);
+    }
+
+    for (const category of SAMPLE_CATEGORIES) {
+      db.prepare(`
+        INSERT INTO categories (id, name, icon, sort_order)
+        VALUES (?, ?, ?, ?)
+      `).run(category.id, category.name, category.icon, category.sortOrder);
+    }
+
+    for (const product of SAMPLE_PRODUCTS) {
+      db.prepare(`
+        INSERT INTO products (
+          id, sku, barcode, name, category_id, subcategory, pack_size,
+          unit_label, stock_on_hand, description, last_vector_clock
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        product.id,
+        product.sku,
+        product.barcode ?? null,
+        product.name,
+        product.categoryId,
+        product.subcategory,
+        product.packSize,
+        product.unitLabel,
+        product.stockOnHand,
+        product.description ?? null,
+        stringifyJson({}),
+      );
+
+      for (const tier of product.priceTiers) {
+        db.prepare(`
+          INSERT INTO product_price_tiers (id, product_id, label, price, priority, min_qty, is_default)
+          VALUES (?, ?, ?, ?, ?, ?, ?)
+        `).run(
+          tier.id,
+          product.id,
+          tier.label,
+          tier.price,
+          tier.priority,
+          tier.minQty ?? 0,
+          tier.isDefault ? 1 : 0,
+        );
+      }
+    }
+  });
+
+  transaction();
 }
 
-export function upsertProduct(product: LocalProduct): void {
-  const db = getDB();
+function ensureDeviceState(db: Database.Database, deviceId: string, terminalId: string) {
   db.prepare(`
-    INSERT INTO local_products (id, sku, name, barcode, price, batch_prices, synced_at)
-    VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
-    ON CONFLICT(id) DO UPDATE SET
-      sku = excluded.sku,
-      name = excluded.name,
-      barcode = excluded.barcode,
-      price = excluded.price,
-      batch_prices = excluded.batch_prices,
-      synced_at = excluded.synced_at,
-      updated_at = datetime('now')
-  `).run(
-    product.id,
-    product.sku,
-    product.name,
-    product.barcode ?? null,
-    product.price,
-    JSON.stringify(product.batchPrices ?? [])
-  );
+    INSERT INTO device_state (
+      device_id, terminal_id, last_sequence_num, local_vector_clock,
+      remote_vector_clock, confirmed_vector_clock, online
+    )
+    VALUES (?, ?, 0, '{}', '{}', '{}', 0)
+    ON CONFLICT(device_id) DO UPDATE SET terminal_id = excluded.terminal_id
+  `).run(deviceId, terminalId);
 }
 
-export function searchLocalProducts(query: string): LocalProduct[] {
-  const db = getDB();
-  const rows = db.prepare(`
-    SELECT * FROM local_products
-    WHERE name LIKE ? OR sku LIKE ? OR barcode = ?
-    LIMIT 20
-  `).all(`%${query}%`, `%${query}%`, query) as any[];
-
-  return rows.map(rowToProduct);
+function getDeviceStateRow(db: Database.Database, deviceId: string, terminalId: string) {
+  ensureDeviceState(db, deviceId, terminalId);
+  return db.prepare('SELECT * FROM device_state WHERE device_id = ?').get(deviceId) as any;
 }
 
-export function getLocalProductByBarcode(barcode: string): LocalProduct | undefined {
-  const db = getDB();
-  const row = db.prepare('SELECT * FROM local_products WHERE barcode = ?').get(barcode) as any;
-  return row ? rowToProduct(row) : undefined;
+function getUsers(db: Database.Database): POSUser[] {
+  return (db.prepare('SELECT * FROM users ORDER BY code ASC').all() as any[]).map((row) => ({
+    id: row.id,
+    code: row.code,
+    name: row.name,
+    initials: row.initials,
+    role: row.role,
+    pin: row.pin ?? undefined,
+  }));
 }
 
-function rowToProduct(row: any): LocalProduct {
+function getUserMap(db: Database.Database): Map<string, POSUser> {
+  return new Map(getUsers(db).map((user) => [user.id, user]));
+}
+
+function getCustomers(db: Database.Database): Customer[] {
+  return (db.prepare('SELECT * FROM customers ORDER BY name ASC').all() as any[]).map((row) => ({
+    id: row.id,
+    code: row.code ?? row.id,
+    name: row.name,
+    tier: row.tier,
+    phone: row.phone ?? undefined,
+    email: row.email ?? undefined,
+  }));
+}
+
+function getCategories(db: Database.Database): Category[] {
+  return (db.prepare('SELECT * FROM categories ORDER BY sort_order ASC, name ASC').all() as any[]).map((row) => ({
+    id: row.id,
+    name: row.name,
+    icon: row.icon,
+    sortOrder: row.sort_order,
+  }));
+}
+
+function getBranches(db: Database.Database): Branch[] {
+  return (db.prepare('SELECT * FROM branches ORDER BY code ASC').all() as any[]).map((row) => ({
+    id: row.id,
+    code: row.code,
+    name: row.name,
+  }));
+}
+
+function getTerminals(db: Database.Database): Terminal[] {
+  return (db.prepare('SELECT * FROM terminals ORDER BY code ASC').all() as any[]).map((row) => ({
+    id: row.id,
+    code: row.code,
+    name: row.name,
+    branchId: row.branch_id,
+    branchCode: SAMPLE_BRANCHES.find((branch) => branch.id === row.branch_id)?.code ?? '01',
+  }));
+}
+
+function getPriceTiersByProduct(db: Database.Database): Map<string, ProductPriceTier[]> {
+  const tiers = db.prepare(`
+    SELECT * FROM product_price_tiers
+    ORDER BY priority ASC, min_qty ASC, label ASC
+  `).all() as any[];
+  const grouped = new Map<string, ProductPriceTier[]>();
+  for (const row of tiers) {
+    const list = grouped.get(row.product_id) ?? [];
+    list.push({
+      id: row.id,
+      label: row.label,
+      price: row.price,
+      priority: row.priority,
+      minQty: row.min_qty ?? 0,
+      isDefault: row.is_default === 1,
+    });
+    grouped.set(row.product_id, list);
+  }
+  return grouped;
+}
+
+function mapProductRow(row: any, tiersByProduct: Map<string, ProductPriceTier[]>): Product {
   return {
     id: row.id,
     sku: row.sku,
-    name: row.name,
     barcode: row.barcode ?? undefined,
-    price: row.price,
-    batchPrices: JSON.parse(row.batch_prices || '[]'),
+    name: row.name,
+    categoryId: row.category_id,
+    subcategory: row.subcategory,
+    packSize: row.pack_size,
+    unitLabel: row.unit_label,
+    stockOnHand: row.stock_on_hand,
+    description: row.description ?? undefined,
+    priceTiers: tiersByProduct.get(row.id) ?? [],
   };
 }
 
-// ── Inventory ──────────────────────────────────────────────────────────────
-
-export function getLocalStock(productId: string, state: string = InventoryState.ShelfReady): number {
-  const db = getDB();
-  const row = db.prepare(`
-    SELECT COUNT(*) as count FROM local_inventory
-    WHERE product_id = ? AND state = ?
-  `).get(productId, state) as { count: number };
-  return row.count;
+function getProducts(db: Database.Database): Product[] {
+  const tiersByProduct = getPriceTiersByProduct(db);
+  const rows = db.prepare('SELECT * FROM products ORDER BY sku ASC').all() as any[];
+  return rows.map((row) => mapProductRow(row, tiersByProduct));
 }
 
-export function deductLocalInventory(productId: string, quantity: number): boolean {
-  const db = getDB();
-  const available = db.prepare(`
-    SELECT id FROM local_inventory
-    WHERE product_id = ? AND state = ?
-    LIMIT ?
-  `).all(productId, InventoryState.ShelfReady, quantity) as { id: string }[];
-
-  if (available.length < quantity) return false;
-
-  const ids = available.map((r) => r.id);
-  const placeholders = ids.map(() => '?').join(',');
-  db.prepare(`
-    UPDATE local_inventory SET state = ?, updated_at = datetime('now')
-    WHERE id IN (${placeholders})
-  `).run(InventoryState.Sold, ...ids);
-
-  return true;
-}
-
-export function restoreLocalInventory(productId: string, quantity: number): void {
-  const db = getDB();
-  for (let i = 0; i < quantity; i++) {
-    db.prepare(`
-      INSERT INTO local_inventory (id, product_id, state)
-      VALUES (?, ?, ?)
-    `).run(uuidv4(), productId, InventoryState.Returned);
+function getAggregateClock(db: Database.Database, aggregateType: string, aggregateId: string): VectorClock {
+  switch (aggregateType) {
+    case 'shift': {
+      const row = db.prepare('SELECT last_vector_clock FROM shifts WHERE id = ?').get(aggregateId) as any;
+      return normalizeClock(row?.last_vector_clock);
+    }
+    case 'sale': {
+      const row = db.prepare('SELECT last_vector_clock FROM sales WHERE id = ?').get(aggregateId) as any;
+      return normalizeClock(row?.last_vector_clock);
+    }
+    case 'held-sale': {
+      const row = db.prepare('SELECT last_vector_clock FROM held_sales WHERE id = ?').get(aggregateId) as any;
+      return normalizeClock(row?.last_vector_clock);
+    }
+    case 'return': {
+      const row = db.prepare('SELECT last_vector_clock FROM returns WHERE id = ?').get(aggregateId) as any;
+      return normalizeClock(row?.last_vector_clock);
+    }
+    default:
+      return {};
   }
 }
 
-// ── Shifts ─────────────────────────────────────────────────────────────────
-
-export interface LocalShift {
-  id: string;
-  terminalId: string;
-  branchId?: string;
-  userId: string;
-  status: string;
-  openingFloat: number;
-  closingFloat?: number;
-  openedAt: string;
-  closedAt?: string;
-  notes?: string;
-  synced: boolean;
-  offlineId?: string;
+function mapSyncEventRow(row: any): SyncEvent {
+  return {
+    id: row.id,
+    aggregateType: row.aggregate_type,
+    aggregateId: row.aggregate_id,
+    eventType: row.event_type,
+    payload: parseJson<Record<string, unknown>>(row.payload_json, {}),
+    deviceId: row.device_id,
+    sequenceNum: row.sequence_num,
+    lamport: row.lamport,
+    vectorClock: normalizeClock(row.vector_clock_json),
+    conflictPolicy: row.conflict_policy,
+    state: row.state,
+    createdAt: row.created_at,
+    appliedAt: row.applied_at ?? undefined,
+  };
 }
 
-export function openLocalShift(data: {
-  terminalId: string;
-  branchId?: string;
-  userId: string;
-  openingFloat?: number;
-}): LocalShift {
-  const db = getDB();
+function getLatestAggregateEvent(db: Database.Database, aggregateType: string, aggregateId: string): SyncEvent | null {
+  const rows = db.prepare(`
+    SELECT * FROM sync_event_log
+    WHERE aggregate_type = ? AND aggregate_id = ?
+    ORDER BY created_at DESC
+    LIMIT 10
+  `).all(aggregateType, aggregateId) as any[];
 
-  const existing = db.prepare(`
-    SELECT * FROM local_shifts WHERE terminal_id = ? AND status = ?
-  `).get(data.terminalId, ShiftStatus.OPEN) as any;
+  if (rows.length === 0) {
+    return null;
+  }
 
-  if (existing) return rowToShift(existing);
+  return rows
+    .map(mapSyncEventRow)
+    .sort((left, right) =>
+      compareEventOrder(right.sequenceNum, right.deviceId, left.sequenceNum, left.deviceId),
+    )[0] ?? null;
+}
 
-  const id = uuidv4();
-  const offlineId = `shift-offline-${id}`;
+function recordConflict(db: Database.Database, incoming: SyncEvent, existing: SyncEvent): SyncConflict {
+  const conflict: SyncConflict = {
+    id: uuidv4(),
+    aggregateType: incoming.aggregateType,
+    aggregateId: incoming.aggregateId,
+    localEventId: existing.id,
+    remoteEventId: incoming.id,
+    policy: incoming.conflictPolicy,
+    status: SyncConflictStatus.OPEN,
+    detail: {
+      localVectorClock: existing.vectorClock,
+      remoteVectorClock: incoming.vectorClock,
+    },
+    createdAt: new Date().toISOString(),
+  };
 
   db.prepare(`
-    INSERT INTO local_shifts (id, terminal_id, branch_id, user_id, opening_float, status, offline_id)
+    INSERT INTO sync_conflicts (
+      id, aggregate_type, aggregate_id, local_event_id, remote_event_id,
+      policy, status, detail_json, created_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    conflict.id,
+    conflict.aggregateType,
+    conflict.aggregateId,
+    conflict.localEventId ?? null,
+    conflict.remoteEventId ?? null,
+    conflict.policy,
+    conflict.status,
+    stringifyJson(conflict.detail),
+    conflict.createdAt,
+  );
+
+  return conflict;
+}
+
+function persistEvent(db: Database.Database, event: SyncEvent, source: 'LOCAL' | 'REMOTE', applied: boolean): void {
+  db.prepare(`
+    INSERT INTO sync_event_log (
+      id, aggregate_type, aggregate_id, event_type, payload_json, device_id,
+      terminal_id, sequence_num, lamport, vector_clock_json, conflict_policy,
+      state, source, created_at, applied_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    event.id,
+    event.aggregateType,
+    event.aggregateId,
+    event.eventType,
+    stringifyJson(event.payload),
+    event.deviceId,
+    (event.payload as any).terminalId ?? null,
+    event.sequenceNum,
+    event.lamport,
+    stringifyJson(event.vectorClock),
+    event.conflictPolicy,
+    event.state,
+    source,
+    event.createdAt,
+    applied ? (event.appliedAt ?? new Date().toISOString()) : null,
+  );
+}
+
+function updateDeviceStateAfterEvent(
+  db: Database.Database,
+  deviceId: string,
+  terminalId: string,
+  nextSequence: number,
+  localClock: VectorClock,
+  remoteClock?: VectorClock,
+): void {
+  ensureDeviceState(db, deviceId, terminalId);
+  db.prepare(`
+    UPDATE device_state
+    SET last_sequence_num = ?, terminal_id = ?, local_vector_clock = ?, remote_vector_clock = ?
+    WHERE device_id = ?
+  `).run(
+    nextSequence,
+    terminalId,
+    stringifyJson(localClock),
+    stringifyJson(remoteClock ?? normalizeClock((db.prepare('SELECT remote_vector_clock FROM device_state WHERE device_id = ?').get(deviceId) as any)?.remote_vector_clock)),
+    deviceId,
+  );
+}
+
+function saveCashCountRow(
+  db: Database.Database,
+  shiftId: string,
+  declaration: ShiftOpenInput['declaration'] | ShiftCloseInput['declaration'] | undefined,
+  idPrefix: string,
+): void {
+  if (!declaration) {
+    return;
+  }
+
+  db.prepare(`
+    INSERT INTO shift_cash_counts (id, shift_id, mode, total, denominations_json, variance, created_at)
     VALUES (?, ?, ?, ?, ?, ?, ?)
-  `).run(id, data.terminalId, data.branchId ?? null, data.userId, data.openingFloat ?? 0, ShiftStatus.OPEN, offlineId);
-
-  enqueueSyncOp(SyncOperationType.OPEN_SHIFT, { ...data, offlineId });
-
-  return rowToShift(db.prepare('SELECT * FROM local_shifts WHERE id = ?').get(id) as any);
+    ON CONFLICT(id) DO UPDATE SET
+      total = excluded.total,
+      denominations_json = excluded.denominations_json,
+      variance = excluded.variance
+  `).run(
+    `${idPrefix}-${declaration.mode}`,
+    shiftId,
+    declaration.mode,
+    declaration.total,
+    stringifyJson(declaration.denominations),
+    declaration.variance ?? null,
+    new Date().toISOString(),
+  );
 }
 
-export function closeLocalShift(shiftId: string, data: { closingFloat?: number; notes?: string }): LocalShift {
-  const db = getDB();
+function applyShiftOpened(db: Database.Database, event: SyncEvent<ShiftOpenInput>): void {
+  const payload = event.payload;
+  db.prepare(`
+    INSERT INTO shifts (
+      id, terminal_id, branch_id, cashier_id, status, opening_float,
+      notes, last_vector_clock, opened_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET
+      terminal_id = excluded.terminal_id,
+      branch_id = excluded.branch_id,
+      cashier_id = excluded.cashier_id,
+      status = excluded.status,
+      opening_float = excluded.opening_float,
+      notes = excluded.notes,
+      last_vector_clock = excluded.last_vector_clock
+  `).run(
+    event.aggregateId,
+    payload.terminalId,
+    payload.branchId,
+    payload.cashierId,
+    ShiftStatus.OPEN,
+    payload.openingFloat,
+    payload.notes ?? null,
+    stringifyJson(event.vectorClock),
+    new Date().toISOString(),
+  );
+
+  saveCashCountRow(db, event.aggregateId, payload.declaration, `${event.aggregateId}-opening`);
+}
+
+function applyShiftClosed(db: Database.Database, event: SyncEvent<ShiftCloseInput>): void {
+  const payload = event.payload;
+  db.prepare(`
+    UPDATE shifts
+    SET status = ?, closing_float = ?, notes = ?, closed_at = ?, last_vector_clock = ?
+    WHERE id = ?
+  `).run(
+    ShiftStatus.CLOSED,
+    payload.closingFloat,
+    payload.notes ?? null,
+    new Date().toISOString(),
+    stringifyJson(event.vectorClock),
+    payload.shiftId,
+  );
+
+  saveCashCountRow(db, payload.shiftId, payload.declaration, `${payload.shiftId}-closing`);
+}
+
+function replaceHeldSaleLines(db: Database.Database, heldSaleId: string, lines: CartLine[]): void {
+  db.prepare('DELETE FROM held_sale_lines WHERE held_sale_id = ?').run(heldSaleId);
+  for (const line of lines) {
+    db.prepare(`
+      INSERT INTO held_sale_lines (
+        id, held_sale_id, product_id, sku, name, subcategory, quantity,
+        unit_price, tier_label, discount_percent, discount_amount,
+        salesperson_id, cost_basis, line_total
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      line.uid,
+      heldSaleId,
+      line.productId,
+      line.sku,
+      line.name,
+      line.subcategory,
+      line.quantity,
+      line.unitPrice,
+      line.tierLabel,
+      line.discountPercent,
+      line.discountAmount,
+      line.salespersonId,
+      line.costBasis,
+      line.lineTotal,
+    );
+  }
+}
+
+function applyHeldSaleSaved(db: Database.Database, event: SyncEvent<HoldSaleInput>): void {
+  const payload = event.payload;
+  const customer = payload.customerId
+    ? db.prepare('SELECT name FROM customers WHERE id = ?').get(payload.customerId) as any
+    : null;
 
   db.prepare(`
-    UPDATE local_shifts SET status = ?, closing_float = ?, closed_at = datetime('now'), notes = ?
+    INSERT INTO held_sales (
+      id, hold_number, terminal_id, branch_id, cashier_id, customer_id,
+      customer_name, status, subtotal, discount_total, total, notes,
+      last_vector_clock, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET
+      hold_number = excluded.hold_number,
+      terminal_id = excluded.terminal_id,
+      branch_id = excluded.branch_id,
+      cashier_id = excluded.cashier_id,
+      customer_id = excluded.customer_id,
+      customer_name = excluded.customer_name,
+      status = excluded.status,
+      subtotal = excluded.subtotal,
+      discount_total = excluded.discount_total,
+      total = excluded.total,
+      notes = excluded.notes,
+      last_vector_clock = excluded.last_vector_clock,
+      updated_at = excluded.updated_at
+  `).run(
+    event.aggregateId,
+    payload.holdNumber,
+    payload.terminalId,
+    payload.branchId,
+    payload.cashierId,
+    payload.customerId ?? null,
+    customer?.name ?? null,
+    SaleStatus.HELD,
+    payload.subtotal,
+    payload.discountTotal,
+    payload.total,
+    null,
+    stringifyJson(event.vectorClock),
+    new Date().toISOString(),
+    new Date().toISOString(),
+  );
+
+  replaceHeldSaleLines(db, event.aggregateId, payload.lines);
+}
+
+function applyHeldSaleRecalled(db: Database.Database, event: SyncEvent<{ heldSaleId: string }>): void {
+  db.prepare(`
+    UPDATE held_sales
+    SET status = ?, last_vector_clock = ?, updated_at = ?
     WHERE id = ?
-  `).run(ShiftStatus.CLOSED, data.closingFloat ?? null, data.notes ?? null, shiftId);
-
-  enqueueSyncOp(SyncOperationType.CLOSE_SHIFT, { shiftId, ...data });
-
-  return rowToShift(db.prepare('SELECT * FROM local_shifts WHERE id = ?').get(shiftId) as any);
+  `).run(
+    SaleStatus.RECALLED,
+    stringifyJson(event.vectorClock),
+    new Date().toISOString(),
+    event.payload.heldSaleId,
+  );
 }
 
-export function getActiveLocalShift(terminalId: string): LocalShift | undefined {
-  const db = getDB();
-  const row = db.prepare(`
-    SELECT * FROM local_shifts WHERE terminal_id = ? AND status = ?
-  `).get(terminalId, ShiftStatus.OPEN) as any;
-  return row ? rowToShift(row) : undefined;
+function replaceSaleLines(db: Database.Database, saleId: string, lines: CartLine[]): void {
+  for (const line of lines) {
+    const marginAmount = line.quantity * (line.unitPrice - line.costBasis) - line.discountAmount;
+    db.prepare(`
+      INSERT INTO sale_lines (
+        id, sale_id, product_id, sku, name, barcode, subcategory,
+        quantity, unit_price, tier_label, discount_percent, discount_amount,
+        salesperson_id, cost_basis, margin_amount, line_total
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      line.uid,
+      saleId,
+      line.productId,
+      line.sku,
+      line.name,
+      line.barcode ?? null,
+      line.subcategory,
+      line.quantity,
+      line.unitPrice,
+      line.tierLabel,
+      line.discountPercent,
+      line.discountAmount,
+      line.salespersonId,
+      line.costBasis,
+      marginAmount,
+      line.lineTotal,
+    );
+  }
 }
 
-function rowToShift(row: any): LocalShift {
+function replacePayments(db: Database.Database, saleId: string, payments: PaymentInput[]): void {
+  for (const payment of payments) {
+    db.prepare(`
+      INSERT INTO payments (
+        id, sale_id, method, amount, tendered_amount, change_due, reference, metadata_json
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      uuidv4(),
+      saleId,
+      payment.method,
+      payment.amount,
+      payment.tenderedAmount ?? null,
+      payment.changeDue ?? null,
+      payment.reference ?? null,
+      payment.metadata ? stringifyJson(payment.metadata) : null,
+    );
+  }
+}
+
+function assertSufficientStock(db: Database.Database, lines: CartLine[]): void {
+  for (const line of lines) {
+    const row = db.prepare('SELECT stock_on_hand FROM products WHERE id = ?').get(line.productId) as any;
+    if (!row || row.stock_on_hand < line.quantity) {
+      throw new Error(`Insufficient local stock for ${line.sku}`);
+    }
+  }
+}
+
+function applySaleCompleted(db: Database.Database, event: SyncEvent<CompleteSaleInput>): void {
+  const payload = event.payload;
+  const existing = db.prepare('SELECT id FROM sales WHERE id = ?').get(event.aggregateId) as any;
+  if (existing) {
+    return;
+  }
+
+  for (const line of payload.lines) {
+    db.prepare(`
+      UPDATE products
+      SET stock_on_hand = stock_on_hand - ?, last_vector_clock = ?
+      WHERE id = ?
+    `).run(line.quantity, stringifyJson(event.vectorClock), line.productId);
+  }
+
+  db.prepare(`
+    INSERT INTO sales (
+      id, receipt_number, terminal_id, branch_id, cashier_id, customer_id,
+      shift_id, held_sale_id, status, subtotal, discount_total, tax_total,
+      total, margin_total, source_device_id, source_sequence_num,
+      last_vector_clock, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    event.aggregateId,
+    payload.receiptNumber,
+    payload.terminalId,
+    payload.branchId ?? null,
+    payload.cashierId,
+    payload.customerId ?? null,
+    payload.shiftId ?? null,
+    payload.heldSaleId ?? null,
+    SaleStatus.COMPLETED,
+    payload.subtotal,
+    payload.discountTotal,
+    payload.taxTotal,
+    payload.total,
+    payload.marginTotal,
+    event.deviceId,
+    event.sequenceNum,
+    stringifyJson(event.vectorClock),
+    new Date().toISOString(),
+    new Date().toISOString(),
+  );
+
+  replaceSaleLines(db, event.aggregateId, payload.lines);
+  replacePayments(db, event.aggregateId, payload.payments);
+
+  if (payload.heldSaleId) {
+    db.prepare(`
+      UPDATE held_sales
+      SET status = ?, last_vector_clock = ?, updated_at = ?
+      WHERE id = ?
+    `).run(
+      SaleStatus.RECALLED,
+      stringifyJson(event.vectorClock),
+      new Date().toISOString(),
+      payload.heldSaleId,
+    );
+  }
+}
+
+function applySaleVoided(db: Database.Database, event: SyncEvent<{ saleId: string; reason?: string; managerId?: string }>): void {
+  const sale = db.prepare('SELECT id, status, receipt_number FROM sales WHERE id = ?').get(event.payload.saleId) as any;
+  if (!sale || sale.status === SaleStatus.VOIDED) {
+    return;
+  }
+
+  const lines = db.prepare('SELECT product_id, quantity FROM sale_lines WHERE sale_id = ?').all(event.payload.saleId) as any[];
+  for (const line of lines) {
+    db.prepare(`
+      UPDATE products
+      SET stock_on_hand = stock_on_hand + ?, last_vector_clock = ?
+      WHERE id = ?
+    `).run(line.quantity, stringifyJson(event.vectorClock), line.product_id);
+  }
+
+  db.prepare(`
+    UPDATE sales
+    SET status = ?, last_vector_clock = ?, updated_at = ?
+    WHERE id = ?
+  `).run(
+    SaleStatus.VOIDED,
+    stringifyJson(event.vectorClock),
+    new Date().toISOString(),
+    event.payload.saleId,
+  );
+}
+
+function applyReturnCreated(db: Database.Database, event: SyncEvent<ReturnInput>): void {
+  const payload = event.payload;
+  const existing = db.prepare('SELECT id FROM returns WHERE id = ?').get(event.aggregateId) as any;
+  if (existing) {
+    return;
+  }
+
+  const totalRefund = payload.lines.reduce((sum, line) => sum + line.refundAmount, 0);
+  db.prepare(`
+    INSERT INTO returns (
+      id, sale_id, terminal_id, cashier_id, reason, total_refund,
+      source_device_id, source_sequence_num, last_vector_clock, created_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    event.aggregateId,
+    payload.saleId,
+    payload.terminalId,
+    payload.cashierId,
+    payload.reason ?? null,
+    totalRefund,
+    event.deviceId,
+    event.sequenceNum,
+    stringifyJson(event.vectorClock),
+    new Date().toISOString(),
+  );
+
+  for (const line of payload.lines) {
+    db.prepare(`
+      INSERT INTO return_lines (id, return_id, sale_line_id, product_id, quantity, refund_amount)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).run(uuidv4(), event.aggregateId, line.saleLineId, line.productId, line.quantity, line.refundAmount);
+
+    db.prepare(`
+      UPDATE products
+      SET stock_on_hand = stock_on_hand + ?, last_vector_clock = ?
+      WHERE id = ?
+    `).run(line.quantity, stringifyJson(event.vectorClock), line.productId);
+  }
+
+  db.prepare(`
+    UPDATE sales
+    SET status = ?, last_vector_clock = ?, updated_at = ?
+    WHERE id = ?
+  `).run(
+    SaleStatus.REFUNDED,
+    stringifyJson(event.vectorClock),
+    new Date().toISOString(),
+    payload.saleId,
+  );
+}
+
+function applyProjectionEvent(db: Database.Database, event: SyncEvent): void {
+  switch (event.eventType) {
+    case SyncEventType.SHIFT_OPENED:
+      applyShiftOpened(db, event as SyncEvent<ShiftOpenInput>);
+      return;
+    case SyncEventType.SHIFT_CLOSED:
+      applyShiftClosed(db, event as SyncEvent<ShiftCloseInput>);
+      return;
+    case SyncEventType.HELD_SALE_SAVED:
+      applyHeldSaleSaved(db, event as SyncEvent<HoldSaleInput>);
+      return;
+    case SyncEventType.HELD_SALE_RECALLED:
+      applyHeldSaleRecalled(db, event as SyncEvent<{ heldSaleId: string }>);
+      return;
+    case SyncEventType.SALE_COMPLETED:
+      applySaleCompleted(db, event as SyncEvent<CompleteSaleInput>);
+      return;
+    case SyncEventType.SALE_VOIDED:
+      applySaleVoided(db, event as SyncEvent<{ saleId: string; reason?: string; managerId?: string }>);
+      return;
+    case SyncEventType.RETURN_CREATED:
+      applyReturnCreated(db, event as SyncEvent<ReturnInput>);
+      return;
+    case SyncEventType.CASH_DECLARED:
+      saveCashCountRow(
+        db,
+        (event.payload as any).shiftId,
+        (event.payload as any).declaration,
+        `${(event.payload as any).shiftId}-${event.id}`,
+      );
+      return;
+    default:
+      return;
+  }
+}
+
+function appendEventToLog(
+  db: Database.Database,
+  event: SyncEvent,
+  source: 'LOCAL' | 'REMOTE',
+  terminalId: string,
+): { applied: boolean; conflict?: SyncConflict } {
+  const duplicate = db.prepare(`
+    SELECT * FROM sync_event_log
+    WHERE id = ? OR (device_id = ? AND sequence_num = ?)
+    LIMIT 1
+  `).get(event.id, event.deviceId, event.sequenceNum) as any;
+  if (duplicate) {
+    return { applied: duplicate.applied_at != null };
+  }
+
+  const aggregateClock = getAggregateClock(db, event.aggregateType, event.aggregateId);
+  const relation = compareVectorClocks(event.vectorClock, aggregateClock);
+  const latestEvent = getLatestAggregateEvent(db, event.aggregateType, event.aggregateId);
+
+  let apply = relation !== 'lt' && relation !== 'equal';
+  let conflict: SyncConflict | undefined;
+  if (relation === 'concurrent' && latestEvent) {
+    conflict = recordConflict(db, event, latestEvent);
+    apply = eventWins(event, latestEvent);
+  }
+
+  persistEvent(db, { ...event, appliedAt: apply ? new Date().toISOString() : undefined }, source, apply);
+  if (apply) {
+    applyProjectionEvent(db, event);
+  }
+
+  const stateRow = getDeviceStateRow(db, DEFAULT_DEVICE_ID, terminalId);
+  const mergedLocalClock = mergeClocks(normalizeClock(stateRow.local_vector_clock), event.vectorClock);
+  const mergedRemoteClock = source === 'REMOTE'
+    ? mergeClocks(normalizeClock(stateRow.remote_vector_clock), event.vectorClock)
+    : normalizeClock(stateRow.remote_vector_clock);
+
+  updateDeviceStateAfterEvent(
+    db,
+    DEFAULT_DEVICE_ID,
+    terminalId,
+    stateRow.last_sequence_num,
+    mergedLocalClock,
+    mergedRemoteClock,
+  );
+
+  return { applied: apply, conflict };
+}
+
+function createLocalEventEnvelope(
+  db: Database.Database,
+  terminalId: string,
+  input: {
+    aggregateType: string;
+    aggregateId: string;
+    eventType: SyncEventType;
+    payload: unknown;
+    deviceId?: string;
+  },
+): SyncEvent {
+  const deviceId = input.deviceId ?? DEFAULT_DEVICE_ID;
+  const state = getDeviceStateRow(db, deviceId, terminalId);
+  const currentClock = normalizeClock(state.local_vector_clock);
+  const nextSequence = (state.last_sequence_num ?? 0) + 1;
+  const vectorClock = { ...currentClock, [deviceId]: nextSequence };
+
+  db.prepare(`
+    UPDATE device_state
+    SET last_sequence_num = ?, local_vector_clock = ?, terminal_id = ?
+    WHERE device_id = ?
+  `).run(nextSequence, stringifyJson(vectorClock), terminalId, deviceId);
+
+  return {
+    id: uuidv4(),
+    aggregateType: input.aggregateType,
+    aggregateId: input.aggregateId,
+    eventType: input.eventType,
+    payload: input.payload,
+    deviceId,
+    sequenceNum: nextSequence,
+    lamport: nextSequence,
+    vectorClock,
+    conflictPolicy: resolveConflictPolicy(input.eventType),
+    state: SyncEventState.PENDING,
+    createdAt: new Date().toISOString(),
+  };
+}
+
+function createAndApplyLocalEvent(
+  db: Database.Database,
+  terminalId: string,
+  input: {
+    aggregateType: string;
+    aggregateId: string;
+    eventType: SyncEventType;
+    payload: unknown;
+  },
+): SyncEvent {
+  const event = createLocalEventEnvelope(db, terminalId, input);
+  appendEventToLog(db, event, 'LOCAL', terminalId);
+  return event;
+}
+
+function mapShiftRow(row: any, userMap: Map<string, POSUser>): ShiftSummary {
   return {
     id: row.id,
     terminalId: row.terminal_id,
-    branchId: row.branch_id ?? undefined,
-    userId: row.user_id,
+    branchId: row.branch_id ?? 'branch-jingles-01',
+    cashierId: row.cashier_id,
+    cashierName: userMap.get(row.cashier_id)?.name ?? row.cashier_id,
     status: row.status,
     openingFloat: row.opening_float,
     closingFloat: row.closing_float ?? undefined,
     openedAt: row.opened_at,
     closedAt: row.closed_at ?? undefined,
     notes: row.notes ?? undefined,
-    synced: row.synced === 1,
-    offlineId: row.offline_id ?? undefined,
   };
 }
 
-// ── Sales ──────────────────────────────────────────────────────────────────
+function mapHeldSaleRows(db: Database.Database, userMap: Map<string, POSUser>): HeldSaleSummary[] {
+  const lineRows = db.prepare('SELECT * FROM held_sale_lines').all() as any[];
+  const groupedLines = new Map<string, any[]>();
+  for (const row of lineRows) {
+    const list = groupedLines.get(row.held_sale_id) ?? [];
+    list.push(row);
+    groupedLines.set(row.held_sale_id, list);
+  }
 
-export interface LocalSaleLine {
-  id: string;
-  saleId: string;
-  productId: string;
-  sku: string;
-  name: string;
-  barcode?: string;
-  quantity: number;
-  unitPrice: number;
-  discountAmount: number;
-  lineTotal: number;
-}
+  const heldRows = db.prepare(`
+    SELECT * FROM held_sales
+    WHERE status = ?
+    ORDER BY created_at DESC
+  `).all(SaleStatus.HELD) as any[];
 
-export interface LocalPayment {
-  id: string;
-  saleId: string;
-  method: string;
-  amount: number;
-  cashReceived?: number;
-  changeDue?: number;
-  reference?: string;
-}
-
-export interface LocalSale {
-  id: string;
-  receiptNumber: string;
-  terminalId: string;
-  branchId?: string;
-  userId: string;
-  customerId?: string;
-  shiftId?: string;
-  status: string;
-  subtotal: number;
-  discountTotal: number;
-  taxTotal: number;
-  total: number;
-  offlineId?: string;
-  synced: boolean;
-  syncError?: string;
-  createdAt: string;
-  lines: LocalSaleLine[];
-  payments: LocalPayment[];
-}
-
-export interface CreateLocalSaleInput {
-  receiptNumber: string;
-  terminalId: string;
-  branchId?: string;
-  userId: string;
-  customerId?: string;
-  shiftId?: string;
-  lines: Omit<LocalSaleLine, 'id' | 'saleId'>[];
-  payment: Omit<LocalPayment, 'id' | 'saleId'>;
-  subtotal: number;
-  discountTotal: number;
-  taxTotal: number;
-  total: number;
-}
-
-export function createLocalSale(input: CreateLocalSaleInput): LocalSale {
-  const db = getDB();
-  const id = uuidv4();
-  const offlineId = `sale-offline-${id}`;
-
-  const txn = db.transaction(() => {
-    for (const line of input.lines) {
-      const ok = deductLocalInventory(line.productId, line.quantity);
-      if (!ok) {
-        throw new Error(`Insufficient local stock for product ${line.productId}`);
-      }
-    }
-
-    db.prepare(`
-      INSERT INTO local_sales (
-        id, receipt_number, terminal_id, branch_id, user_id, customer_id, shift_id,
-        status, subtotal, discount_total, tax_total, total, offline_id, synced
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
-    `).run(
-      id, input.receiptNumber, input.terminalId, input.branchId ?? null,
-      input.userId, input.customerId ?? null, input.shiftId ?? null,
-      SaleStatus.COMPLETED, input.subtotal, input.discountTotal,
-      input.taxTotal, input.total, offlineId
-    );
-
-    for (const line of input.lines) {
-      db.prepare(`
-        INSERT INTO local_sale_lines (id, sale_id, product_id, sku, name, barcode, quantity, unit_price, discount_amount, line_total)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `).run(
-        uuidv4(), id, line.productId, line.sku, line.name, line.barcode ?? null,
-        line.quantity, line.unitPrice, line.discountAmount, line.lineTotal
-      );
-    }
-
-    const p = input.payment;
-    db.prepare(`
-      INSERT INTO local_payments (id, sale_id, method, amount, cash_received, change_due, reference)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      uuidv4(), id, p.method, p.amount,
-      p.cashReceived ?? null, p.changeDue ?? null, p.reference ?? null
-    );
-
-    enqueueSyncOp(SyncOperationType.CREATE_SALE, { ...input, offlineId });
-  });
-
-  txn();
-
-  return getLocalSale(id)!;
-}
-
-export function getLocalSale(id: string): LocalSale | undefined {
-  const db = getDB();
-  const row = db.prepare('SELECT * FROM local_sales WHERE id = ?').get(id) as any;
-  if (!row) return undefined;
-
-  const lines = db.prepare('SELECT * FROM local_sale_lines WHERE sale_id = ?').all(id) as any[];
-  const payments = db.prepare('SELECT * FROM local_payments WHERE sale_id = ?').all(id) as any[];
-
-  return rowToSale(row, lines, payments);
-}
-
-export function listLocalSales(): LocalSale[] {
-  const db = getDB();
-  const rows = db.prepare('SELECT * FROM local_sales ORDER BY created_at DESC').all() as any[];
-  return rows.map((row) => {
-    const lines = db.prepare('SELECT * FROM local_sale_lines WHERE sale_id = ?').all(row.id) as any[];
-    const payments = db.prepare('SELECT * FROM local_payments WHERE sale_id = ?').all(row.id) as any[];
-    return rowToSale(row, lines, payments);
+  return heldRows.map((row) => {
+    const lines = groupedLines.get(row.id) ?? [];
+    return {
+      id: row.id,
+      holdNumber: row.hold_number,
+      terminalId: row.terminal_id,
+      branchId: row.branch_id,
+      cashierId: row.cashier_id,
+      cashierName: userMap.get(row.cashier_id)?.name ?? row.cashier_id,
+      customerId: row.customer_id ?? undefined,
+      customerName: row.customer_name ?? undefined,
+      status: row.status,
+      subtotal: row.subtotal,
+      discountTotal: row.discount_total,
+      total: row.total,
+      itemCount: lines.reduce((sum, line) => sum + line.quantity, 0),
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+      lines: lines.map((line) => ({
+        id: line.id,
+        heldSaleId: line.held_sale_id,
+        productId: line.product_id,
+        sku: line.sku,
+        name: line.name,
+        subcategory: line.subcategory,
+        quantity: line.quantity,
+        unitPrice: line.unit_price,
+        tierLabel: line.tier_label,
+        discountPercent: line.discount_percent,
+        discountAmount: line.discount_amount,
+        salespersonId: line.salesperson_id ?? '',
+        salespersonName: userMap.get(line.salesperson_id)?.name ?? 'Unassigned',
+        salespersonInitials: userMap.get(line.salesperson_id)?.initials ?? '--',
+        costBasis: line.cost_basis,
+        lineTotal: line.line_total,
+      })),
+    };
   });
 }
 
-function rowToSale(row: any, lines: any[], payments: any[]): LocalSale {
-  return {
+function mapSales(db: Database.Database, userMap: Map<string, POSUser>): SaleSummary[] {
+  const lineRows = db.prepare('SELECT * FROM sale_lines').all() as any[];
+  const paymentRows = db.prepare('SELECT * FROM payments').all() as any[];
+  const groupedLines = new Map<string, any[]>();
+  const groupedPayments = new Map<string, any[]>();
+
+  for (const row of lineRows) {
+    const list = groupedLines.get(row.sale_id) ?? [];
+    list.push(row);
+    groupedLines.set(row.sale_id, list);
+  }
+  for (const row of paymentRows) {
+    const list = groupedPayments.get(row.sale_id) ?? [];
+    list.push(row);
+    groupedPayments.set(row.sale_id, list);
+  }
+
+  const rows = db.prepare('SELECT * FROM sales ORDER BY created_at DESC').all() as any[];
+  return rows.map((row) => ({
     id: row.id,
     receiptNumber: row.receipt_number,
     terminalId: row.terminal_id,
-    branchId: row.branch_id ?? undefined,
-    userId: row.user_id,
+    branchId: row.branch_id ?? 'branch-jingles-01',
+    cashierId: row.cashier_id,
+    cashierName: userMap.get(row.cashier_id)?.name ?? row.cashier_id,
     customerId: row.customer_id ?? undefined,
+    customerName: row.customer_id
+      ? (db.prepare('SELECT name FROM customers WHERE id = ?').get(row.customer_id) as any)?.name
+      : undefined,
     shiftId: row.shift_id ?? undefined,
     status: row.status,
     subtotal: row.subtotal,
     discountTotal: row.discount_total,
     taxTotal: row.tax_total,
     total: row.total,
-    offlineId: row.offline_id ?? undefined,
-    synced: row.synced === 1,
-    syncError: row.sync_error ?? undefined,
+    marginTotal: row.margin_total,
     createdAt: row.created_at,
-    lines: lines.map((l) => ({
-      id: l.id,
-      saleId: l.sale_id,
-      productId: l.product_id,
-      sku: l.sku,
-      name: l.name,
-      barcode: l.barcode ?? undefined,
-      quantity: l.quantity,
-      unitPrice: l.unit_price,
-      discountAmount: l.discount_amount,
-      lineTotal: l.line_total,
+    updatedAt: row.updated_at,
+    lines: (groupedLines.get(row.id) ?? []).map((line) => ({
+      id: line.id,
+      saleId: line.sale_id,
+      productId: line.product_id,
+      sku: line.sku,
+      name: line.name,
+      subcategory: line.subcategory,
+      quantity: line.quantity,
+      unitPrice: line.unit_price,
+      tierLabel: line.tier_label,
+      discountPercent: line.discount_percent,
+      discountAmount: line.discount_amount,
+      salespersonId: line.salesperson_id ?? '',
+      salespersonName: userMap.get(line.salesperson_id)?.name ?? 'Unassigned',
+      salespersonInitials: userMap.get(line.salesperson_id)?.initials ?? '--',
+      costBasis: line.cost_basis,
+      marginAmount: line.margin_amount,
+      lineTotal: line.line_total,
     })),
-    payments: payments.map((p) => ({
-      id: p.id,
-      saleId: p.sale_id,
-      method: p.method,
-      amount: p.amount,
-      cashReceived: p.cash_received ?? undefined,
-      changeDue: p.change_due ?? undefined,
-      reference: p.reference ?? undefined,
+    payments: (groupedPayments.get(row.id) ?? []).map((payment) => ({
+      method: payment.method,
+      amount: payment.amount,
+      tenderedAmount: payment.tendered_amount ?? undefined,
+      changeDue: payment.change_due ?? undefined,
+      reference: payment.reference ?? undefined,
+      metadata: parseJson<Record<string, unknown> | undefined>(payment.metadata_json, undefined),
     })),
-  };
+  }));
 }
 
-// ── Returns ────────────────────────────────────────────────────────────────
-
-export interface LocalReturn {
-  id: string;
-  saleId: string;
-  userId: string;
-  terminalId: string;
-  reason?: string;
-  totalRefund: number;
-  synced: boolean;
-  createdAt: string;
-}
-
-export function createLocalReturn(data: {
-  saleId: string;
-  userId: string;
-  terminalId: string;
-  reason?: string;
-  lines: Array<{ saleLineId: string; productId: string; quantity: number; refundAmount: number }>;
-}): LocalReturn {
-  const db = getDB();
-  const id = uuidv4();
-  const totalRefund = data.lines.reduce((s, l) => s + l.refundAmount, 0);
-
-  const txn = db.transaction(() => {
-    db.prepare(`
-      INSERT INTO local_returns (id, sale_id, user_id, terminal_id, reason, total_refund)
-      VALUES (?, ?, ?, ?, ?, ?)
-    `).run(id, data.saleId, data.userId, data.terminalId, data.reason ?? null, totalRefund);
-
-    for (const line of data.lines) {
-      db.prepare(`
-        INSERT INTO local_return_lines (id, return_id, sale_line_id, product_id, quantity, refund_amount)
-        VALUES (?, ?, ?, ?, ?, ?)
-      `).run(uuidv4(), id, line.saleLineId, line.productId, line.quantity, line.refundAmount);
-
-      restoreLocalInventory(line.productId, line.quantity);
-    }
-
-    enqueueSyncOp(SyncOperationType.CREATE_RETURN, data);
-  });
-
-  txn();
+function getSyncStatusInternal(db: Database.Database, deviceId: string, terminalId: string): SyncStatusSummary {
+  const state = getDeviceStateRow(db, deviceId, terminalId);
+  const pendingEvents = (db.prepare(`
+    SELECT COUNT(*) AS count FROM sync_event_log WHERE state = ?
+  `).get(SyncEventState.PENDING) as any).count;
+  const conflictCount = (db.prepare(`
+    SELECT COUNT(*) AS count FROM sync_conflicts WHERE status = ?
+  `).get(SyncConflictStatus.OPEN) as any).count;
 
   return {
-    id,
-    saleId: data.saleId,
-    userId: data.userId,
-    terminalId: data.terminalId,
-    reason: data.reason,
-    totalRefund,
-    synced: false,
-    createdAt: new Date().toISOString(),
+    online: state.online === 1,
+    pendingEvents,
+    conflictCount,
+    deviceId,
+    localVectorClock: normalizeClock(state.local_vector_clock),
+    remoteVectorClock: normalizeClock(state.remote_vector_clock),
+    lastSyncAt: state.last_sync_at ?? undefined,
+    lastError: state.last_error ?? undefined,
   };
 }
 
-// ── Sync Queue ─────────────────────────────────────────────────────────────
-
-export interface SyncQueueItem {
-  id: string;
-  type: SyncOperationType;
-  status: SyncStatus;
-  payload: string;
-  createdAt: string;
-  attempts: number;
-  lastError?: string;
-}
-
-export function enqueueSyncOp(type: SyncOperationType, payload: object): SyncQueueItem {
+export function bootstrapPOS(options?: { deviceId?: string; terminalId?: string }): POSBootstrap {
   const db = getDB();
-  const id = uuidv4();
+  const deviceId = options?.deviceId ?? DEFAULT_DEVICE_ID;
+  const terminalId = options?.terminalId ?? DEFAULT_TERMINAL_ID;
+  ensureDeviceState(db, deviceId, terminalId);
+  const userMap = getUserMap(db);
 
-  db.prepare(`
-    INSERT INTO sync_queue (id, type, status, payload)
-    VALUES (?, ?, ?, ?)
-  `).run(id, type, SyncStatus.PENDING, JSON.stringify(payload));
+  const activeShiftRow = db.prepare(`
+    SELECT * FROM shifts
+    WHERE terminal_id = ? AND status = ?
+    ORDER BY opened_at DESC
+    LIMIT 1
+  `).get(terminalId, ShiftStatus.OPEN) as any;
 
   return {
-    id,
-    type,
-    status: SyncStatus.PENDING,
-    payload: JSON.stringify(payload),
-    createdAt: new Date().toISOString(),
-    attempts: 0,
+    branches: getBranches(db),
+    terminals: getTerminals(db),
+    users: getUsers(db),
+    customers: getCustomers(db),
+    categories: getCategories(db),
+    products: getProducts(db),
+    activeShift: activeShiftRow ? mapShiftRow(activeShiftRow, userMap) : null,
+    heldSales: mapHeldSaleRows(db, userMap),
+    syncStatus: getSyncStatusInternal(db, deviceId, terminalId),
   };
 }
 
-export function getPendingSyncOps(): SyncQueueItem[] {
+export function searchLocalProducts(query: string): Product[] {
   const db = getDB();
+  const tiersByProduct = getPriceTiersByProduct(db);
   const rows = db.prepare(`
-    SELECT * FROM sync_queue WHERE status = ? ORDER BY created_at ASC
-  `).all(SyncStatus.PENDING) as any[];
-
-  return rows.map(rowToSyncItem);
+    SELECT * FROM products
+    WHERE sku LIKE ? OR name LIKE ? OR barcode = ? OR subcategory LIKE ?
+    ORDER BY sku ASC
+    LIMIT 30
+  `).all(`%${query}%`, `%${query}%`, query, `%${query}%`) as any[];
+  return rows.map((row) => mapProductRow(row, tiersByProduct));
 }
 
-export function markSyncOpStatus(id: string, status: SyncStatus, error?: string): void {
+export function getActiveLocalShift(terminalId: string): ShiftSummary | undefined {
   const db = getDB();
-  db.prepare(`
-    UPDATE sync_queue SET status = ?, last_error = ?, attempts = attempts + 1
-    WHERE id = ?
-  `).run(status, error ?? null, id);
+  const row = db.prepare(`
+    SELECT * FROM shifts
+    WHERE terminal_id = ? AND status = ?
+    ORDER BY opened_at DESC
+    LIMIT 1
+  `).get(terminalId, ShiftStatus.OPEN) as any;
+  if (!row) {
+    return undefined;
+  }
+  return mapShiftRow(row, getUserMap(db));
 }
 
-export function markSaleAsSynced(offlineId: string, _serverId: string): void {
+export function openLocalShift(input: ShiftOpenInput): ShiftSummary {
   const db = getDB();
-  db.prepare(`
-    UPDATE local_sales SET synced = 1, sync_error = NULL
-    WHERE offline_id = ?
-  `).run(offlineId);
+  const existing = getActiveLocalShift(input.terminalId);
+  if (existing) {
+    return existing;
+  }
+
+  const shiftId = uuidv4();
+  const transaction = db.transaction(() => {
+    createAndApplyLocalEvent(db, input.terminalId, {
+      aggregateType: 'shift',
+      aggregateId: shiftId,
+      eventType: SyncEventType.SHIFT_OPENED,
+      payload: {
+        shiftId,
+        terminalId: input.terminalId,
+        branchId: input.branchId,
+        cashierId: input.cashierId,
+        openingFloat: input.openingFloat,
+        notes: input.notes,
+        declaration: input.declaration,
+      },
+    });
+  });
+  transaction();
+
+  return getActiveLocalShift(input.terminalId)!;
 }
 
-export function getAllSyncOps(): SyncQueueItem[] {
+export function closeLocalShift(input: ShiftCloseInput & { terminalId?: string }): ShiftSummary {
   const db = getDB();
-  const rows = db.prepare('SELECT * FROM sync_queue ORDER BY created_at DESC').all() as any[];
-  return rows.map(rowToSyncItem);
+  const shift = db.prepare('SELECT * FROM shifts WHERE id = ?').get(input.shiftId) as any;
+  if (!shift) {
+    throw new Error('Shift not found');
+  }
+
+  const transaction = db.transaction(() => {
+    createAndApplyLocalEvent(db, input.terminalId ?? shift.terminal_id, {
+      aggregateType: 'shift',
+      aggregateId: input.shiftId,
+      eventType: SyncEventType.SHIFT_CLOSED,
+      payload: {
+        shiftId: input.shiftId,
+        closingFloat: input.closingFloat,
+        notes: input.notes,
+        declaration: input.declaration,
+      },
+    });
+  });
+  transaction();
+
+  const updated = db.prepare('SELECT * FROM shifts WHERE id = ?').get(input.shiftId) as any;
+  return mapShiftRow(updated, getUserMap(db));
 }
 
-function rowToSyncItem(row: any): SyncQueueItem {
+export function saveHeldSale(input: Omit<HoldSaleInput, 'holdNumber'> & { holdNumber?: string }): HeldSaleSummary {
+  const db = getDB();
+  const holdSaleId = uuidv4();
+  const holdNumber = input.holdNumber ?? `H-${Date.now()}`;
+  const transaction = db.transaction(() => {
+    createAndApplyLocalEvent(db, input.terminalId, {
+      aggregateType: 'held-sale',
+      aggregateId: holdSaleId,
+      eventType: SyncEventType.HELD_SALE_SAVED,
+      payload: {
+        holdNumber,
+        terminalId: input.terminalId,
+        branchId: input.branchId,
+        cashierId: input.cashierId,
+        customerId: input.customerId,
+        lines: input.lines,
+        discountTotal: input.discountTotal,
+        subtotal: input.subtotal,
+        total: input.total,
+      },
+    });
+  });
+  transaction();
+
+  return mapHeldSaleRows(db, getUserMap(db)).find((sale) => sale.id === holdSaleId)!;
+}
+
+export function listHeldSales(): HeldSaleSummary[] {
+  const db = getDB();
+  return mapHeldSaleRows(db, getUserMap(db));
+}
+
+export function recallHeldSale(heldSaleId: string, terminalId: string = DEFAULT_TERMINAL_ID): HeldSaleSummary | undefined {
+  const db = getDB();
+  const heldSale = mapHeldSaleRows(db, getUserMap(db)).find((row) => row.id === heldSaleId);
+  if (!heldSale) {
+    return undefined;
+  }
+
+  const transaction = db.transaction(() => {
+    createAndApplyLocalEvent(db, terminalId, {
+      aggregateType: 'held-sale',
+      aggregateId: heldSaleId,
+      eventType: SyncEventType.HELD_SALE_RECALLED,
+      payload: {
+        heldSaleId,
+      },
+    });
+  });
+  transaction();
+
+  return heldSale;
+}
+
+export function createLocalSale(input: CompleteSaleInput): SaleSummary {
+  const db = getDB();
+  assertSufficientStock(db, input.lines);
+  const saleId = uuidv4();
+  const transaction = db.transaction(() => {
+    createAndApplyLocalEvent(db, input.terminalId, {
+      aggregateType: 'sale',
+      aggregateId: saleId,
+      eventType: SyncEventType.SALE_COMPLETED,
+      payload: input,
+    });
+  });
+  transaction();
+
+  return listLocalSales().find((sale) => sale.id === saleId)!;
+}
+
+export function listLocalSales(): SaleSummary[] {
+  const db = getDB();
+  return mapSales(db, getUserMap(db));
+}
+
+export function getLocalSale(id: string): SaleSummary | undefined {
+  return listLocalSales().find((sale) => sale.id === id);
+}
+
+export function createLocalReturn(input: ReturnInput): { id: string; saleId: string; totalRefund: number } {
+  const db = getDB();
+  const returnId = uuidv4();
+  const totalRefund = input.lines.reduce((sum, line) => sum + line.refundAmount, 0);
+  const transaction = db.transaction(() => {
+    createAndApplyLocalEvent(db, input.terminalId, {
+      aggregateType: 'return',
+      aggregateId: returnId,
+      eventType: SyncEventType.RETURN_CREATED,
+      payload: input,
+    });
+  });
+  transaction();
+
   return {
-    id: row.id,
-    type: row.type,
-    status: row.status,
-    payload: row.payload,
-    createdAt: row.created_at,
-    attempts: row.attempts,
-    lastError: row.last_error ?? undefined,
+    id: returnId,
+    saleId: input.saleId,
+    totalRefund,
+  };
+}
+
+export function getPendingSyncEvents(): SyncEvent[] {
+  const db = getDB();
+  return (db.prepare(`
+    SELECT * FROM sync_event_log
+    WHERE state = ?
+    ORDER BY created_at ASC
+  `).all(SyncEventState.PENDING) as any[]).map(mapSyncEventRow);
+}
+
+export function appendRemoteEvents(events: SyncEvent[], terminalId: string = DEFAULT_TERMINAL_ID): SyncConflict[] {
+  const db = getDB();
+  const conflicts: SyncConflict[] = [];
+  const transaction = db.transaction(() => {
+    for (const event of events) {
+      const result = appendEventToLog(
+        db,
+        { ...event, state: SyncEventState.CONFIRMED },
+        'REMOTE',
+        terminalId,
+      );
+      if (result.conflict) {
+        conflicts.push(result.conflict);
+      }
+    }
+  });
+  transaction();
+  return conflicts;
+}
+
+export function markEventsConfirmed(
+  eventIds: string[],
+  serverVectorClock: VectorClock,
+  deviceId: string = DEFAULT_DEVICE_ID,
+  terminalId: string = DEFAULT_TERMINAL_ID,
+): void {
+  const db = getDB();
+  if (eventIds.length > 0) {
+    const placeholders = eventIds.map(() => '?').join(', ');
+    db.prepare(`
+      UPDATE sync_event_log
+      SET state = ?
+      WHERE id IN (${placeholders})
+    `).run(SyncEventState.CONFIRMED, ...eventIds);
+  }
+
+  const state = getDeviceStateRow(db, deviceId, terminalId);
+  db.prepare(`
+    UPDATE device_state
+    SET online = 1,
+        remote_vector_clock = ?,
+        last_sync_at = ?,
+        last_error = NULL
+    WHERE device_id = ?
+  `).run(
+    stringifyJson(serverVectorClock),
+    new Date().toISOString(),
+    deviceId,
+  );
+
+  db.prepare(`
+    UPDATE device_state
+    SET confirmed_vector_clock = ?
+    WHERE device_id = ?
+  `).run(state.local_vector_clock, deviceId);
+}
+
+export function recordSyncFailure(
+  errorMessage: string,
+  deviceId: string = DEFAULT_DEVICE_ID,
+  terminalId: string = DEFAULT_TERMINAL_ID,
+): void {
+  const db = getDB();
+  ensureDeviceState(db, deviceId, terminalId);
+  db.prepare(`
+    UPDATE device_state
+    SET online = 0, last_error = ?
+    WHERE device_id = ?
+  `).run(errorMessage, deviceId);
+}
+
+export function getSyncStatus(
+  deviceId: string = DEFAULT_DEVICE_ID,
+  terminalId: string = DEFAULT_TERMINAL_ID,
+): SyncStatusSummary {
+  const db = getDB();
+  return getSyncStatusInternal(db, deviceId, terminalId);
+}
+
+export function buildLocalZReport(shiftId: string): ZReportSummary {
+  const db = getDB();
+  const shift = db.prepare('SELECT * FROM shifts WHERE id = ?').get(shiftId) as any;
+  if (!shift) {
+    throw new Error('Shift not found');
+  }
+
+  const sales = (db.prepare('SELECT * FROM sales WHERE shift_id = ?').all(shiftId) as any[]);
+  const returns = (db.prepare(`
+    SELECT returns.* FROM returns
+    INNER JOIN sales ON sales.id = returns.sale_id
+    WHERE sales.shift_id = ?
+  `).all(shiftId) as any[]);
+  const paymentRows = (db.prepare(`
+    SELECT payments.* FROM payments
+    INNER JOIN sales ON sales.id = payments.sale_id
+    WHERE sales.shift_id = ?
+  `).all(shiftId) as any[]);
+  const closingCount = db.prepare(`
+    SELECT * FROM shift_cash_counts
+    WHERE shift_id = ? AND mode = ?
+    ORDER BY created_at DESC
+    LIMIT 1
+  `).get(shiftId, CashCountMode.CLOSING) as any;
+
+  const grossSales = sales.reduce((sum, sale) => sum + sale.subtotal, 0);
+  const discounts = sales.reduce((sum, sale) => sum + sale.discount_total, 0);
+  const refunds = returns.reduce((sum, row) => sum + row.total_refund, 0);
+  const paymentBreakdown = paymentRows.reduce<Record<string, number>>((bucket, row) => {
+    bucket[row.method] = (bucket[row.method] ?? 0) + row.amount;
+    return bucket;
+  }, {});
+  const expectedDrawer = shift.opening_float + (paymentBreakdown.CASH ?? 0) - refunds;
+
+  return {
+    shiftId,
+    grossSales,
+    discounts,
+    refunds,
+    netSales: sales.reduce((sum, sale) => sum + sale.total, 0) - refunds,
+    transactionCount: sales.length,
+    paymentBreakdown,
+    expectedDrawer,
+    openingFloat: shift.opening_float,
+    countedDrawer: closingCount?.total ?? undefined,
+    variance: closingCount ? closingCount.total - expectedDrawer : undefined,
   };
 }

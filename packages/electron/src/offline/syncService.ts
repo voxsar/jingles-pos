@@ -1,78 +1,87 @@
-import { getPendingSyncOps, markSyncOpStatus, markSaleAsSynced } from './localDB';
-import { SyncOperationType, SyncStatus } from '@jingles/shared';
+import {
+  DEFAULT_DEVICE_ID,
+  DEFAULT_TERMINAL_ID,
+  SyncPlaybackResponse,
+  SyncStatusSummary,
+} from '@jingles/shared';
+import {
+  appendRemoteEvents,
+  getPendingSyncEvents,
+  getSyncStatus,
+  markEventsConfirmed,
+  recordSyncFailure,
+} from './localDB';
 
 const BACKEND_URL = process.env.BACKEND_URL || 'http://localhost:3001';
 
-export async function syncPendingOperations(): Promise<{ synced: number; failed: number }> {
-  const pending = getPendingSyncOps();
-  let synced = 0;
-  let failed = 0;
+export interface SyncPlaybackResult {
+  accepted: number;
+  remoteApplied: number;
+  conflicts: number;
+  status: SyncStatusSummary;
+}
 
-  for (const op of pending) {
-    try {
-      markSyncOpStatus(op.id, SyncStatus.IN_PROGRESS);
-      const payload = JSON.parse(op.payload);
+async function postJson<T>(path: string, body: unknown): Promise<T> {
+  const response = await fetch(`${BACKEND_URL}${path}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
 
-      switch (op.type) {
-        case SyncOperationType.CREATE_SALE: {
-          const res = await fetch(`${BACKEND_URL}/api/pos/sales`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload),
-          });
-          if (!res.ok) {
-            const err = await res.json().catch(() => ({ error: 'Unknown' })) as { error?: string };
-            throw new Error(err.error || `HTTP ${res.status}`);
-          }
-          const sale = await res.json() as { id: string };
-          if (payload.offlineId) {
-            markSaleAsSynced(payload.offlineId, sale.id);
-          }
-          break;
-        }
-
-        case SyncOperationType.CREATE_RETURN: {
-          const res = await fetch(`${BACKEND_URL}/api/pos/returns`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload),
-          });
-          if (!res.ok) throw new Error(`HTTP ${res.status}`);
-          break;
-        }
-
-        case SyncOperationType.OPEN_SHIFT: {
-          const res = await fetch(`${BACKEND_URL}/api/pos/shifts/open`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload),
-          });
-          if (!res.ok) throw new Error(`HTTP ${res.status}`);
-          break;
-        }
-
-        case SyncOperationType.CLOSE_SHIFT: {
-          const { shiftId, ...rest } = payload;
-          const res = await fetch(`${BACKEND_URL}/api/pos/shifts/${shiftId}/close`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(rest),
-          });
-          if (!res.ok) throw new Error(`HTTP ${res.status}`);
-          break;
-        }
-
-        default:
-          throw new Error(`Unknown sync op type: ${op.type}`);
-      }
-
-      markSyncOpStatus(op.id, SyncStatus.SYNCED);
-      synced++;
-    } catch (err: any) {
-      markSyncOpStatus(op.id, SyncStatus.FAILED, err.message);
-      failed++;
-    }
+  if (!response.ok) {
+    const payload = await response.json().catch(() => ({ error: `HTTP ${response.status}` })) as { error?: string };
+    throw new Error(payload.error || `HTTP ${response.status}`);
   }
 
-  return { synced, failed };
+  return response.json() as Promise<T>;
+}
+
+export async function syncPlaybackLog(options?: {
+  deviceId?: string;
+  terminalId?: string;
+}): Promise<SyncPlaybackResult> {
+  const deviceId = options?.deviceId ?? DEFAULT_DEVICE_ID;
+  const terminalId = options?.terminalId ?? DEFAULT_TERMINAL_ID;
+  const currentStatus = getSyncStatus(deviceId, terminalId);
+
+  try {
+    await postJson('/api/pos/sync/handshake', {
+      deviceId,
+      terminalId,
+      vectorClock: currentStatus.localVectorClock,
+    });
+
+    const pendingEvents = getPendingSyncEvents();
+    const playback = await postJson<SyncPlaybackResponse>('/api/pos/sync/playback', {
+      deviceId,
+      terminalId,
+      vectorClock: currentStatus.localVectorClock,
+      events: pendingEvents,
+    });
+
+    markEventsConfirmed(playback.acceptedEventIds, playback.serverVectorClock, deviceId, terminalId);
+    const remoteConflicts = appendRemoteEvents(playback.remoteEvents, terminalId);
+
+    const updatedStatus = getSyncStatus(deviceId, terminalId);
+    await postJson('/api/pos/sync/confirm', {
+      deviceId,
+      terminalId,
+      vectorClock: updatedStatus.localVectorClock,
+    });
+
+    return {
+      accepted: playback.acceptedEventIds.length,
+      remoteApplied: playback.remoteEvents.length,
+      conflicts: playback.conflicts.length + remoteConflicts.length,
+      status: getSyncStatus(deviceId, terminalId),
+    };
+  } catch (error: any) {
+    recordSyncFailure(error.message, deviceId, terminalId);
+    return {
+      accepted: 0,
+      remoteApplied: 0,
+      conflicts: 0,
+      status: getSyncStatus(deviceId, terminalId),
+    };
+  }
 }
