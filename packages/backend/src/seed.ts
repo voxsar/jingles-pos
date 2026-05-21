@@ -44,12 +44,20 @@ export async function ensureSeedData(): Promise<void> {
       data: SAMPLE_USERS.map((user) => ({
         id: user.id,
         code: user.code,
+        email: user.email ?? null,
         name: user.name,
         initials: user.initials,
         role: user.role,
         pin: user.pin ?? null,
       })),
     });
+  } else {
+    for (const user of SAMPLE_USERS) {
+      await prisma.pOSUser.updateMany({
+        where: { id: user.id, email: null },
+        data: { email: user.email ?? null },
+      });
+    }
   }
 
   if (categoryCount === 0) {

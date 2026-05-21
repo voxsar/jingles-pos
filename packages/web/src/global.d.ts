@@ -2,7 +2,11 @@ import {
   CompleteSaleInput,
   HeldSaleSummary,
   HoldSaleInput,
+  POSAuthLoginInput,
+  POSAuthResult,
   POSBootstrap,
+  POSSyncDashboard,
+  POSUser,
   Product,
   ReturnInput,
   SaleSummary,
@@ -17,6 +21,9 @@ declare global {
   interface Window {
     posAPI?: {
       bootstrap: (options?: { deviceId?: string; terminalId?: string }) => Promise<POSBootstrap>;
+      login: (input: POSAuthLoginInput) => Promise<POSAuthResult>;
+      me: (token: string) => Promise<POSUser | null>;
+      logout: (token: string) => Promise<void>;
       searchProducts: (query: string) => Promise<Product[]>;
       getShift: (terminalId: string) => Promise<ShiftSummary | null>;
       openShift: (input: ShiftOpenInput) => Promise<ShiftSummary>;
@@ -30,6 +37,7 @@ declare global {
       createReturn: (input: ReturnInput) => Promise<{ id: string; saleId: string; totalRefund: number }>;
       getZReport: (shiftId: string) => Promise<ZReportSummary>;
       getSyncStatus: () => Promise<SyncStatusSummary>;
+      getSyncDashboard: () => Promise<POSSyncDashboard>;
       syncNow: () => Promise<unknown>;
       onSyncStatus: (callback: (status: SyncStatusSummary) => void) => () => void;
     };

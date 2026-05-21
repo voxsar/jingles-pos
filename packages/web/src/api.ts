@@ -1,10 +1,14 @@
 import {
   CompleteSaleInput,
+  POSAuthLoginInput,
+  POSAuthResult,
   Product,
+  POSSyncDashboard,
   SaleSummary,
   HeldSaleSummary,
   HoldSaleInput,
   POSBootstrap,
+  POSUser,
   ReturnInput,
   ShiftSummary,
   ShiftCloseInput,
@@ -19,8 +23,19 @@ function hasBridge() {
   return typeof window !== 'undefined' && typeof window.posAPI !== 'undefined';
 }
 
-async function getJson<T>(path: string): Promise<T> {
-  const response = await fetch(`${BASE}${path}`);
+function buildAuthHeaders(token?: string | null): Record<string, string> {
+  const normalized = token?.trim();
+  if (!normalized) {
+    return {};
+  }
+
+  return { Authorization: `Bearer ${normalized}` };
+}
+
+async function getJson<T>(path: string, options?: { token?: string | null }): Promise<T> {
+  const response = await fetch(`${BASE}${path}`, {
+    headers: buildAuthHeaders(options?.token),
+  });
   if (!response.ok) {
     const error = await response.json().catch(() => ({ error: `HTTP ${response.status}` })) as { error?: string };
     throw new Error(error.error || `HTTP ${response.status}`);
@@ -28,10 +43,13 @@ async function getJson<T>(path: string): Promise<T> {
   return response.json() as Promise<T>;
 }
 
-async function postJson<T>(path: string, payload: unknown): Promise<T> {
+async function postJson<T>(path: string, payload: unknown, options?: { token?: string | null }): Promise<T> {
   const response = await fetch(`${BASE}${path}`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      'Content-Type': 'application/json',
+      ...buildAuthHeaders(options?.token),
+    },
     body: JSON.stringify(payload),
   });
   if (!response.ok) {
@@ -39,6 +57,31 @@ async function postJson<T>(path: string, payload: unknown): Promise<T> {
     throw new Error(error.error || `HTTP ${response.status}`);
   }
   return response.json() as Promise<T>;
+}
+
+export async function login(input: POSAuthLoginInput): Promise<POSAuthResult> {
+  if (hasBridge()) {
+    return window.posAPI!.login(input);
+  }
+
+  return postJson<POSAuthResult>('/auth/login', input);
+}
+
+export async function getCurrentUser(token: string): Promise<POSUser | null> {
+  if (hasBridge()) {
+    return window.posAPI!.me(token);
+  }
+
+  return getJson<POSUser>('/auth/me', { token });
+}
+
+export async function logout(token: string): Promise<void> {
+  if (hasBridge()) {
+    await window.posAPI!.logout(token);
+    return;
+  }
+
+  await postJson<{ ok: true }>('/auth/logout', {}, { token });
 }
 
 export async function bootstrapPOS(options?: { deviceId?: string; terminalId?: string }): Promise<POSBootstrap> {
@@ -141,6 +184,20 @@ export async function getSyncStatus(): Promise<SyncStatusSummary> {
   }
   const bootstrap = await bootstrapPOS();
   return bootstrap.syncStatus;
+}
+
+export async function getSyncDashboard(): Promise<POSSyncDashboard> {
+  if (hasBridge()) {
+    return window.posAPI!.getSyncDashboard();
+  }
+
+  const bootstrap = await bootstrapPOS();
+  return {
+    status: bootstrap.syncStatus,
+    pendingEvents: [],
+    recentEvents: [],
+    conflicts: [],
+  };
 }
 
 export async function syncNow() {

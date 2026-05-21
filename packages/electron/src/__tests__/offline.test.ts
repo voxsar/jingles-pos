@@ -17,18 +17,22 @@ import {
 import {
   bootstrapPOS,
   buildLocalZReport,
+  clearLocalAuthSession,
   closeLocalShift,
   createLocalReturn,
   createLocalSale,
   getActiveLocalShift,
+  getLocalAuthUser,
   getDB,
   getLocalSale,
   getPendingSyncEvents,
+  loginLocalUser,
   listHeldSales,
   openLocalShift,
   recallHeldSale,
   resetDB,
   saveHeldSale,
+  searchLocalProducts,
 } from '../offline/localDB';
 
 const TEST_DB_PATH = path.join(
@@ -92,6 +96,28 @@ describe('local SQLite playback-log backend', () => {
     expect(bootstrap.customers.length).toBeGreaterThan(0);
     expect(bootstrap.syncStatus.deviceId).toBeTruthy();
     expect(bootstrap.syncStatus.pendingEvents).toBe(0);
+  });
+
+  it('creates and clears a local auth session without exposing the PIN', () => {
+    const result = loginLocalUser({
+      identifier: 'muslim.abdullah@jingles.local',
+      password: '1042',
+    });
+
+    expect(result.token).toBeTruthy();
+    expect(result.user.code).toBe('E1042');
+    expect(result.user.pin).toBeUndefined();
+    expect(getLocalAuthUser(result.token)?.email).toBe('muslim.abdullah@jingles.local');
+
+    clearLocalAuthSession(result.token);
+    expect(getLocalAuthUser(result.token)).toBeNull();
+  });
+
+  it('searches products through the SQLite FTS index', () => {
+    const rows = searchLocalProducts('liquid found');
+
+    expect(rows[0]?.sku).toBe('2010023');
+    expect(rows[0]?.name).toContain('Liquid Foundation');
   });
 
   it('opens and closes shifts as local events', () => {

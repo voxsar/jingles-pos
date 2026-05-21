@@ -1,5 +1,6 @@
 import cors from 'cors';
 import express from 'express';
+import authRouter from './routes/auth';
 import posRouter from './routes/pos';
 import { ensureSeedData } from './seed';
 
@@ -19,6 +20,7 @@ app.get('/health', async (_req, res) => {
   }
 });
 
+app.use('/api/pos/auth', authRouter);
 app.use('/api/pos', posRouter);
 
 async function startServer() {

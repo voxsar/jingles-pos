@@ -84,10 +84,10 @@ function mapUser(user: any) {
   return {
     id: user.id,
     code: user.code,
+    email: user.email ?? undefined,
     name: user.name,
     initials: user.initials,
     role: user.role as UserRole,
-    pin: user.pin ?? undefined,
   };
 }
 

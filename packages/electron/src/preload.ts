@@ -2,6 +2,9 @@ import { contextBridge, ipcRenderer } from 'electron';
 
 contextBridge.exposeInMainWorld('posAPI', {
   bootstrap: (options?: { deviceId?: string; terminalId?: string }) => ipcRenderer.invoke('pos:bootstrap', options),
+  login: (input: { identifier: string; password: string }) => ipcRenderer.invoke('pos:auth:login', input),
+  me: (token: string) => ipcRenderer.invoke('pos:auth:me', token),
+  logout: (token: string) => ipcRenderer.invoke('pos:auth:logout', token),
   searchProducts: (query: string) => ipcRenderer.invoke('pos:searchProducts', query),
   getShift: (terminalId: string) => ipcRenderer.invoke('pos:getShift', terminalId),
   openShift: (input: unknown) => ipcRenderer.invoke('pos:openShift', input),
@@ -15,6 +18,7 @@ contextBridge.exposeInMainWorld('posAPI', {
   createReturn: (input: unknown) => ipcRenderer.invoke('pos:createReturn', input),
   getZReport: (shiftId: string) => ipcRenderer.invoke('pos:getZReport', shiftId),
   getSyncStatus: () => ipcRenderer.invoke('pos:getSyncStatus'),
+  getSyncDashboard: () => ipcRenderer.invoke('pos:getSyncDashboard'),
   syncNow: () => ipcRenderer.invoke('pos:syncNow'),
   onSyncStatus: (callback: (status: unknown) => void) => {
     const listener = (_event: Electron.IpcRendererEvent, status: unknown) => callback(status);

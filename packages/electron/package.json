@@ -27,10 +27,16 @@
   "build": {
     "appId": "com.jingles.pos",
     "electronVersion": "41.4.0",
+    "npmRebuild": false,
     "productName": "Jingles POS",
     "files": [
       "dist/**/*",
-      "package.json"
+      "package.json",
+      "node_modules/**/*"
+    ],
+    "asarUnpack": [
+      "node_modules/better-sqlite3/**/*",
+      "**/*.node"
     ],
     "extraResources": [
       {

@@ -4,6 +4,7 @@ import { v4 as uuidv4 } from 'uuid';
 import {
   Branch,
   CartLine,
+  CashCountMode,
   Category,
   CompleteSaleInput,
   Customer,
@@ -12,7 +13,10 @@ import {
   HeldSaleSummary,
   HoldSaleInput,
   PaymentInput,
+  POSAuthLoginInput,
+  POSAuthResult,
   POSBootstrap,
+  POSSyncDashboard,
   POSUser,
   Product,
   ProductPriceTier,
@@ -39,7 +43,6 @@ import {
   Terminal,
   VectorClock,
   ZReportSummary,
-  CashCountMode,
 } from '@jingles/shared';
 
 let dbInstance: Database.Database | null = null;
@@ -146,6 +149,79 @@ function mergeClocks(...clocks: VectorClock[]): VectorClock {
   return result;
 }
 
+function createAuthToken() {
+  return `pos-${Date.now().toString(36)}-${uuidv4()}`;
+}
+
+function hasColumn(db: Database.Database, table: string, column: string) {
+  const rows = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+  return rows.some((row) => row.name === column);
+}
+
+function ensureColumn(db: Database.Database, table: string, column: string, definition: string) {
+  if (!hasColumn(db, table, column)) {
+    db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+  }
+}
+
+function buildFtsQuery(query: string): string {
+  const tokens = query
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((token) => token.replace(/["*()\[\]{}^~?:\\]/g, '').trim())
+    .filter(Boolean);
+
+  if (tokens.length === 0) {
+    return '';
+  }
+
+  const last = tokens.pop()!;
+  return [...tokens, `${last}*`].join(' ');
+}
+
+function rebuildProductSearchIndex(db: Database.Database) {
+  db.exec('DELETE FROM products_fts;');
+  db.prepare(`
+    INSERT INTO products_fts (id, sku, barcode, name, subcategory, description)
+    SELECT id, sku, COALESCE(barcode, ''), name, subcategory, COALESCE(description, '')
+    FROM products
+  `).run();
+}
+
+function mapUserRow(row: any): POSUser {
+  return {
+    id: row.id,
+    code: row.code,
+    email: row.email ?? undefined,
+    name: row.name,
+    initials: row.initials,
+    role: row.role,
+    pin: row.pin ?? undefined,
+  };
+}
+
+function sanitizeUser(user: POSUser): POSUser {
+  const { pin: _pin, ...rest } = user;
+  return rest;
+}
+
+function findUserByIdentifier(db: Database.Database, identifier: string): POSUser | null {
+  const normalized = identifier.trim().toLowerCase();
+  if (!normalized) {
+    return null;
+  }
+
+  const row = db.prepare(`
+    SELECT *
+    FROM users
+    WHERE lower(code) = ? OR lower(COALESCE(email, '')) = ?
+    LIMIT 1
+  `).get(normalized, normalized) as any;
+
+  return row ? mapUserRow(row) : null;
+}
+
 export function getDB(dbPath?: string): Database.Database {
   if (dbInstance) {
     return dbInstance;
@@ -186,6 +262,7 @@ function initSchema(db: Database.Database): void {
     CREATE TABLE IF NOT EXISTS users (
       id TEXT PRIMARY KEY,
       code TEXT NOT NULL UNIQUE,
+      email TEXT,
       name TEXT NOT NULL,
       initials TEXT NOT NULL,
       role TEXT NOT NULL,
@@ -413,12 +490,65 @@ function initSchema(db: Database.Database): void {
       last_sync_at TEXT,
       last_error TEXT
     );
+
+    CREATE TABLE IF NOT EXISTS auth_sessions (
+      token TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      last_seen_at TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_auth_sessions_user
+      ON auth_sessions(user_id);
+
+    CREATE VIRTUAL TABLE IF NOT EXISTS products_fts USING fts5(
+      id UNINDEXED,
+      sku,
+      barcode,
+      name,
+      subcategory,
+      description
+    );
+
+    CREATE TRIGGER IF NOT EXISTS products_ai
+    AFTER INSERT ON products
+    BEGIN
+      INSERT INTO products_fts (id, sku, barcode, name, subcategory, description)
+      VALUES (new.id, new.sku, COALESCE(new.barcode, ''), new.name, new.subcategory, COALESCE(new.description, ''));
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS products_ad
+    AFTER DELETE ON products
+    BEGIN
+      DELETE FROM products_fts WHERE id = old.id;
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS products_au
+    AFTER UPDATE ON products
+    BEGIN
+      DELETE FROM products_fts WHERE id = old.id;
+      INSERT INTO products_fts (id, sku, barcode, name, subcategory, description)
+      VALUES (new.id, new.sku, COALESCE(new.barcode, ''), new.name, new.subcategory, COALESCE(new.description, ''));
+    END;
+  `);
+
+  ensureColumn(db, 'users', 'email', 'TEXT');
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
   `);
 }
 
 function seedReferenceData(db: Database.Database): void {
   const count = db.prepare('SELECT COUNT(*) AS count FROM products').get() as { count: number };
   if (count.count > 0) {
+    for (const user of SAMPLE_USERS) {
+      db.prepare(`
+        UPDATE users
+        SET email = COALESCE(email, ?)
+        WHERE id = ?
+      `).run(user.email ?? null, user.id);
+    }
+    rebuildProductSearchIndex(db);
     return;
   }
 
@@ -439,9 +569,17 @@ function seedReferenceData(db: Database.Database): void {
 
     for (const user of SAMPLE_USERS) {
       db.prepare(`
-        INSERT INTO users (id, code, name, initials, role, pin)
-        VALUES (?, ?, ?, ?, ?, ?)
-      `).run(user.id, user.code, user.name, user.initials, user.role, user.pin ?? null);
+        INSERT INTO users (id, code, email, name, initials, role, pin)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        user.id,
+        user.code,
+        user.email ?? null,
+        user.name,
+        user.initials,
+        user.role,
+        user.pin ?? null,
+      );
     }
 
     for (const customer of SAMPLE_CUSTOMERS) {
@@ -496,6 +634,7 @@ function seedReferenceData(db: Database.Database): void {
   });
 
   transaction();
+  rebuildProductSearchIndex(db);
 }
 
 function ensureDeviceState(db: Database.Database, deviceId: string, terminalId: string) {
@@ -515,18 +654,74 @@ function getDeviceStateRow(db: Database.Database, deviceId: string, terminalId: 
 }
 
 function getUsers(db: Database.Database): POSUser[] {
-  return (db.prepare('SELECT * FROM users ORDER BY code ASC').all() as any[]).map((row) => ({
-    id: row.id,
-    code: row.code,
-    name: row.name,
-    initials: row.initials,
-    role: row.role,
-    pin: row.pin ?? undefined,
-  }));
+  return (db.prepare('SELECT * FROM users ORDER BY code ASC').all() as any[]).map((row) =>
+    sanitizeUser(mapUserRow(row)),
+  );
 }
 
 function getUserMap(db: Database.Database): Map<string, POSUser> {
   return new Map(getUsers(db).map((user) => [user.id, user]));
+}
+
+export function loginLocalUser(input: POSAuthLoginInput): POSAuthResult {
+  const db = getDB();
+  const user = findUserByIdentifier(db, input.identifier);
+
+  if (!user || (user.role !== 'CASHIER' && user.role !== 'MANAGER')) {
+    throw new Error('Employee account was not recognised for this workstation.');
+  }
+
+  if (!user.pin || user.pin !== input.password.trim()) {
+    throw new Error('Password does not match the selected employee.');
+  }
+
+  const token = createAuthToken();
+  const timestamp = new Date().toISOString();
+
+  db.prepare(`
+    INSERT INTO auth_sessions (token, user_id, created_at, last_seen_at)
+    VALUES (?, ?, ?, ?)
+  `).run(token, user.id, timestamp, timestamp);
+
+  return {
+    token,
+    user: sanitizeUser(user),
+  };
+}
+
+export function getLocalAuthUser(token: string): POSUser | null {
+  if (!token.trim()) {
+    return null;
+  }
+
+  const db = getDB();
+  const row = db.prepare(`
+    SELECT u.*
+    FROM auth_sessions s
+    INNER JOIN users u ON u.id = s.user_id
+    WHERE s.token = ?
+    LIMIT 1
+  `).get(token.trim()) as any;
+
+  if (!row) {
+    return null;
+  }
+
+  db.prepare(`
+    UPDATE auth_sessions
+    SET last_seen_at = ?
+    WHERE token = ?
+  `).run(new Date().toISOString(), token.trim());
+
+  return sanitizeUser(mapUserRow(row));
+}
+
+export function clearLocalAuthSession(token: string): void {
+  if (!token.trim()) {
+    return;
+  }
+
+  getDB().prepare('DELETE FROM auth_sessions WHERE token = ?').run(token.trim());
 }
 
 function getCustomers(db: Database.Database): Customer[] {
@@ -648,6 +843,21 @@ function mapSyncEventRow(row: any): SyncEvent {
     state: row.state,
     createdAt: row.created_at,
     appliedAt: row.applied_at ?? undefined,
+  };
+}
+
+function mapSyncConflictRow(row: any): SyncConflict {
+  return {
+    id: row.id,
+    aggregateType: row.aggregate_type,
+    aggregateId: row.aggregate_id,
+    localEventId: row.local_event_id ?? undefined,
+    remoteEventId: row.remote_event_id ?? undefined,
+    policy: row.policy,
+    status: row.status,
+    detail: parseJson<Record<string, unknown> | undefined>(row.detail_json, undefined),
+    createdAt: row.created_at,
+    resolvedAt: row.resolved_at ?? undefined,
   };
 }
 
@@ -1444,12 +1654,57 @@ export function bootstrapPOS(options?: { deviceId?: string; terminalId?: string 
 export function searchLocalProducts(query: string): Product[] {
   const db = getDB();
   const tiersByProduct = getPriceTiersByProduct(db);
+  const trimmedQuery = query.trim();
+
+  if (!trimmedQuery) {
+    const rows = db.prepare(`
+      SELECT *
+      FROM products
+      ORDER BY sku ASC
+      LIMIT 30
+    `).all() as any[];
+    return rows.map((row) => mapProductRow(row, tiersByProduct));
+  }
+
+  const exactBarcodeRows = db.prepare(`
+    SELECT *
+    FROM products
+    WHERE barcode = ?
+    ORDER BY sku ASC
+    LIMIT 5
+  `).all(trimmedQuery) as any[];
+
+  try {
+    const ftsQuery = buildFtsQuery(trimmedQuery);
+    if (ftsQuery) {
+      const rows = db.prepare(`
+        SELECT p.*
+        FROM products_fts
+        INNER JOIN products p ON p.id = products_fts.id
+        WHERE products_fts MATCH ?
+          AND p.id NOT IN (
+            SELECT id FROM products WHERE barcode = ?
+          )
+        ORDER BY bm25(products_fts), p.sku ASC
+        LIMIT 30
+      `).all(ftsQuery, trimmedQuery) as any[];
+
+      return [...exactBarcodeRows, ...rows]
+        .slice(0, 30)
+        .map((row) => mapProductRow(row, tiersByProduct));
+    }
+  } catch {
+    // Fall through to the basic contains filter if the FTS table is unavailable.
+  }
+
   const rows = db.prepare(`
-    SELECT * FROM products
+    SELECT *
+    FROM products
     WHERE sku LIKE ? OR name LIKE ? OR barcode = ? OR subcategory LIKE ?
     ORDER BY sku ASC
     LIMIT 30
-  `).all(`%${query}%`, `%${query}%`, query, `%${query}%`) as any[];
+  `).all(`%${trimmedQuery}%`, `%${trimmedQuery}%`, trimmedQuery, `%${trimmedQuery}%`) as any[];
+
   return rows.map((row) => mapProductRow(row, tiersByProduct));
 }
 
@@ -1630,6 +1885,39 @@ export function getPendingSyncEvents(): SyncEvent[] {
     WHERE state = ?
     ORDER BY created_at ASC
   `).all(SyncEventState.PENDING) as any[]).map(mapSyncEventRow);
+}
+
+export function listRecentSyncEvents(limit = 20): SyncEvent[] {
+  const db = getDB();
+  return (db.prepare(`
+    SELECT *
+    FROM sync_event_log
+    ORDER BY datetime(created_at) DESC, sequence_num DESC
+    LIMIT ?
+  `).all(limit) as any[]).map(mapSyncEventRow);
+}
+
+export function listSyncConflicts(limit = 20): SyncConflict[] {
+  const db = getDB();
+  return (db.prepare(`
+    SELECT *
+    FROM sync_conflicts
+    ORDER BY datetime(created_at) DESC
+    LIMIT ?
+  `).all(limit) as any[]).map(mapSyncConflictRow);
+}
+
+export function getSyncDashboard(
+  deviceId: string = DEFAULT_DEVICE_ID,
+  terminalId: string = DEFAULT_TERMINAL_ID,
+  limit = 20,
+): POSSyncDashboard {
+  return {
+    status: getSyncStatus(deviceId, terminalId),
+    pendingEvents: getPendingSyncEvents().slice(0, limit),
+    recentEvents: listRecentSyncEvents(limit),
+    conflicts: listSyncConflicts(limit),
+  };
 }
 
 export function appendRemoteEvents(events: SyncEvent[], terminalId: string = DEFAULT_TERMINAL_ID): SyncConflict[] {

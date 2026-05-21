@@ -30,9 +30,11 @@ import {
   openShift,
   recallHeldSale,
   saveHeldSale,
+  searchProducts,
   subscribeSyncStatus,
   syncNow,
 } from './api';
+import { useAuth } from './auth/AuthContext';
 import {
   buildCashDeclaration,
   calcCartTotals,
@@ -49,6 +51,7 @@ import {
   pickPriceTier,
   recalculateCartLine,
 } from './utils/pos';
+import { useNavigate } from 'react-router-dom';
 
 type Notice = {
   type: 'success' | 'error';
@@ -76,6 +79,8 @@ const PAYMENT_OPTIONS: Array<{ method: PaymentMethod; label: string; short: stri
 ];
 
 export default function PosWorkstation() {
+  const navigate = useNavigate();
+  const { logout, user: authUser } = useAuth();
   const [bootstrapData, setBootstrapData] = useState<POSBootstrap | null>(null);
   const [bootError, setBootError] = useState('');
   const [loadedTerminalId, setLoadedTerminalId] = useState(DEFAULT_TERMINAL_ID);
@@ -83,9 +88,6 @@ export default function PosWorkstation() {
 
   const [selectedBranchId, setSelectedBranchId] = useState('');
   const [selectedTerminalId, setSelectedTerminalId] = useState(DEFAULT_TERMINAL_ID);
-  const [employeeCode, setEmployeeCode] = useState('');
-  const [password, setPassword] = useState('');
-  const [biometric, setBiometric] = useState(false);
   const [session, setSession] = useState<SessionState | null>(null);
 
   const [activeShift, setActiveShift] = useState<ShiftSummary | null>(null);
@@ -123,6 +125,12 @@ export default function PosWorkstation() {
     setNotice({ type, text });
   }, []);
 
+  useEffect(() => {
+    if (authUser == null) {
+      setSession(null);
+    }
+  }, [authUser]);
+
   const currentTerminalId = session?.terminalId ?? selectedTerminalId ?? loadedTerminalId ?? DEFAULT_TERMINAL_ID;
 
   const branches = bootstrapData?.branches ?? [];
@@ -135,11 +143,6 @@ export default function PosWorkstation() {
   const branchTerminals = useMemo(
     () => terminals.filter((terminal) => terminal.branchId === selectedBranchId),
     [selectedBranchId, terminals],
-  );
-
-  const cashierUsers = useMemo(
-    () => users.filter((user) => user.role === UserRole.CASHIER || user.role === UserRole.MANAGER),
-    [users],
   );
 
   const salespeople = useMemo(() => {
@@ -234,13 +237,11 @@ export default function PosWorkstation() {
         const data = await bootstrapPOS({ terminalId });
         const resolvedTerminal = data.terminals.find((item) => item.id === terminalId) ?? data.terminals[0] ?? null;
         const resolvedBranchId = resolvedTerminal?.branchId ?? data.branches[0]?.id ?? '';
-        const firstCashier = data.users.find((user) => user.role !== UserRole.SALESPERSON);
 
         setBootstrapData(data);
         setLoadedTerminalId(resolvedTerminal?.id ?? terminalId);
         setSelectedTerminalId((previous) => previous || resolvedTerminal?.id || terminalId);
         setSelectedBranchId((previous) => previous || resolvedBranchId);
-        setEmployeeCode((previous) => previous || firstCashier?.code || '');
         setCustomerId((previous) => previous || data.customers[0]?.id || '');
         setDefaultTierLabel((previous) => previous || data.customers[0]?.tier || 'Retail');
         setActiveShift(data.activeShift ?? null);
@@ -413,62 +414,44 @@ export default function PosWorkstation() {
     setReceiptSale(null);
   }, []);
 
-  const handleLogin = useCallback(() => {
-    if (bootstrapData == null) {
-      return;
-    }
-
-    const user = cashierUsers.find(
-      (candidate) => candidate.code.trim().toLowerCase() === employeeCode.trim().toLowerCase(),
-    );
-
-    if (user == null) {
-      showNotice('error', 'Employee ID was not recognised for this workstation.');
-      return;
-    }
-
-    if (!biometric && user.pin && user.pin !== password.trim()) {
-      showNotice('error', 'PIN does not match the selected employee.');
+  const handleStartSession = useCallback(() => {
+    if (bootstrapData == null || authUser == null) {
       return;
     }
 
     const terminal = terminals.find((candidate) => candidate.id === selectedTerminalId);
     if (terminal == null) {
-      showNotice('error', 'Select a terminal before signing in.');
+      showNotice('error', 'Select a terminal before entering the workstation.');
       return;
     }
 
-    if (activeShift != null && activeShift.cashierId !== user.id) {
+    if (activeShift != null && activeShift.cashierId !== authUser.id) {
       showNotice('error', `Terminal ${terminal.code} already has an active shift.`);
       return;
     }
 
     setSession({
-      user,
+      user: authUser,
       branchId: terminal.branchId,
       terminalId: terminal.id,
     });
-    setPassword('');
 
     if (activeShift == null) {
       setMoneyMode('open');
-      showNotice('success', `Signed in as ${user.name}. Open the shift to begin billing.`);
+      showNotice('success', `Ready on ${terminal.code}. Open the shift to begin billing.`);
     } else {
-      showNotice('success', `Signed in to ${terminal.code}.`);
+      showNotice('success', `Entered ${terminal.code} as ${authUser.name}.`);
     }
   }, [
     activeShift,
-    biometric,
+    authUser,
     bootstrapData,
-    cashierUsers,
-    employeeCode,
-    password,
     selectedTerminalId,
     showNotice,
     terminals,
   ]);
 
-  const handleSignOut = useCallback(() => {
+  const handleSignOut = useCallback(async () => {
     if (activeShift != null) {
       showNotice('error', 'Close the active shift before signing out.');
       return;
@@ -482,8 +465,9 @@ export default function PosWorkstation() {
     setIsSearchOpen(false);
     setIsPaymentOpen(false);
     setIsHoldOpen(false);
-    showNotice('success', 'Signed out.');
-  }, [activeShift, showNotice]);
+    await logout();
+    navigate('/login', { replace: true });
+  }, [activeShift, logout, navigate, showNotice]);
 
   const handleCustomerChange = useCallback((nextCustomerId: string) => {
     const nextCustomer = customerMap.get(nextCustomerId);
@@ -837,19 +821,14 @@ export default function PosWorkstation() {
 
   if (bootstrapData == null || session == null) {
     return (
-      <LoginScreen
+      <WorkstationAccessScreen
         activeShift={activeShift}
-        biometric={biometric}
+        authenticatedUser={authUser}
         branches={branches}
-        cashiers={cashierUsers}
-        employeeCode={employeeCode}
         notice={notice}
-        onBiometricChange={setBiometric}
         onBranchChange={setSelectedBranchId}
-        onEmployeeCodeChange={setEmployeeCode}
-        onPasswordChange={setPassword}
-        onSignIn={handleLogin}
-        password={password}
+        onEnterWorkstation={handleStartSession}
+        onSignOut={() => void handleSignOut()}
         selectedBranchId={selectedBranchId}
         selectedTerminalId={selectedTerminalId}
         terminals={branchTerminals.length > 0 ? branchTerminals : terminals}
@@ -870,6 +849,7 @@ export default function PosWorkstation() {
         isSyncing={isSyncing}
         onCashAction={() => setMoneyMode(activeShift == null ? 'open' : 'close')}
         onSignOut={handleSignOut}
+        onOpenSync={() => navigate('/sync')}
         onSync={handleSyncNow}
         onZReport={() => void handleOpenZReport()}
         pendingEvents={syncStatus?.pendingEvents ?? 0}
@@ -1088,26 +1068,21 @@ function LoadingScreen({ message }: { message: string }) {
   );
 }
 
-type LoginScreenProps = {
+type WorkstationAccessScreenProps = {
   activeShift: ShiftSummary | null;
-  biometric: boolean;
+  authenticatedUser: POSUser | null;
   branches: POSBootstrap['branches'];
-  cashiers: POSUser[];
-  employeeCode: string;
   notice: Notice;
-  onBiometricChange: (value: boolean) => void;
   onBranchChange: (value: string) => void;
-  onEmployeeCodeChange: (value: string) => void;
-  onPasswordChange: (value: string) => void;
-  onSignIn: () => void;
+  onEnterWorkstation: () => void;
+  onSignOut: () => void;
   onTerminalChange: (value: string) => void;
-  password: string;
   selectedBranchId: string;
   selectedTerminalId: string;
   terminals: POSBootstrap['terminals'];
 };
 
-function LoginScreen(props: LoginScreenProps) {
+function WorkstationAccessScreen(props: WorkstationAccessScreenProps) {
   const now = new Date();
 
   return (
@@ -1127,8 +1102,8 @@ function LoginScreen(props: LoginScreenProps) {
           </div>
         </div>
 
-        <div className="login-heading">Welcome back.</div>
-        <div className="login-copy">Sign in to continue on the selected terminal.</div>
+        <div className="login-heading">Workstation ready.</div>
+        <div className="login-copy">Choose the terminal for this local session, then continue into billing.</div>
 
         {props.notice != null && (
           <div className={`inline-alert ${props.notice.type === 'error' ? 'error' : 'success'}`}>
@@ -1142,37 +1117,13 @@ function LoginScreen(props: LoginScreenProps) {
           </div>
         )}
 
-        <LabelBlock label="Employee ID">
-          <input
-            className="glass-input"
-            list="cashier-options"
-            value={props.employeeCode}
-            onChange={(event) => props.onEmployeeCodeChange(event.target.value)}
-            placeholder="E1042"
-          />
-          <datalist id="cashier-options">
-            {props.cashiers.map((cashier) => (
-              <option key={cashier.id} value={cashier.code}>
-                {cashier.name}
-              </option>
-            ))}
-          </datalist>
-        </LabelBlock>
-
-        <LabelBlock label="PIN / Password">
-          <input
-            className="glass-input"
-            type="password"
-            value={props.password}
-            onChange={(event) => props.onPasswordChange(event.target.value)}
-            placeholder="Enter PIN"
-            onKeyDown={(event) => {
-              if (event.key === 'Enter') {
-                props.onSignIn();
-              }
-            }}
-          />
-        </LabelBlock>
+        <div className="session-user-card">
+          <div className="meta-label">Authenticated user</div>
+          <div className="session-user-name">{props.authenticatedUser?.name ?? 'Unknown user'}</div>
+          <div className="session-user-meta">
+            {props.authenticatedUser?.email ?? props.authenticatedUser?.code ?? 'No identifier'}
+          </div>
+        </div>
 
         <div className="login-grid">
           <LabelBlock label="Branch">
@@ -1204,22 +1155,18 @@ function LoginScreen(props: LoginScreenProps) {
           </LabelBlock>
         </div>
 
-        <label className="toggle-row">
-          <input
-            checked={props.biometric}
-            type="checkbox"
-            onChange={(event) => props.onBiometricChange(event.target.checked)}
-          />
-          <span>Use biometric token instead of manual PIN validation</span>
-        </label>
-
-        <button className="btn-primary login-submit" onClick={props.onSignIn}>
-          Sign in and continue
-        </button>
+        <div className="auth-actions-row">
+          <button className="ghost-button" onClick={props.onSignOut}>
+            Sign out
+          </button>
+          <button className="btn-primary login-submit" onClick={props.onEnterWorkstation}>
+            Enter workstation
+          </button>
+        </div>
 
         <div className="login-footer">
+          <span>Authenticated once, workstation stays local.</span>
           <span>Playback log sync enabled</span>
-          <span>SQLite local backend ready</span>
         </div>
       </div>
     </div>
@@ -1232,6 +1179,7 @@ type HeaderBarProps = {
   conflictCount: number;
   isSyncing: boolean;
   onCashAction: () => void;
+  onOpenSync: () => void;
   onSignOut: () => void;
   onSync: () => void;
   onZReport: () => void;
@@ -1273,6 +1221,9 @@ function HeaderBar(props: HeaderBarProps) {
         <MetricCard label="Cashier" value={props.cashierName} />
         <button className="ghost-button" onClick={props.onSync} disabled={props.isSyncing}>
           {props.isSyncing ? 'Syncing...' : 'Sync now'}
+        </button>
+        <button className="ghost-button" onClick={props.onOpenSync}>
+          Sync center
         </button>
         <button className="ghost-button" onClick={props.onCashAction}>
           Cash
@@ -1695,41 +1646,79 @@ function SearchOverlay(
 ) {
   const [query, setQuery] = useState('');
   const [scope, setScope] = useState<'all' | 'sku' | 'name' | 'category' | 'subcategory'>('all');
+  const [results, setResults] = useState<Product[]>(props.products.slice(0, 12));
+  const [isSearching, setIsSearching] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     inputRef.current?.focus();
   }, []);
 
-  const results = useMemo(() => {
+  useEffect(() => {
     const term = query.trim().toLowerCase();
-    if (!term) {
-      return props.products.slice(0, 12);
+
+    function filterByScope(rows: Product[]) {
+      return rows.filter((product) => {
+        const categoryToken = getCategoryToken(product.categoryId).toLowerCase();
+        if (!term) {
+          return true;
+        }
+
+        if (scope === 'sku') {
+          return product.sku.toLowerCase().includes(term);
+        }
+        if (scope === 'name') {
+          return product.name.toLowerCase().includes(term);
+        }
+        if (scope === 'category') {
+          return categoryToken.includes(term) || product.categoryId.toLowerCase().includes(term);
+        }
+        if (scope === 'subcategory') {
+          return product.subcategory.toLowerCase().includes(term);
+        }
+
+        return [
+          product.sku.toLowerCase(),
+          product.name.toLowerCase(),
+          product.subcategory.toLowerCase(),
+          product.categoryId.toLowerCase(),
+          product.barcode?.toLowerCase() ?? '',
+        ].some((value) => value.includes(term));
+      });
     }
 
-    return props.products.filter((product) => {
-      const categoryToken = getCategoryToken(product.categoryId).toLowerCase();
-      if (scope === 'sku') {
-        return product.sku.toLowerCase().includes(term);
-      }
-      if (scope === 'name') {
-        return product.name.toLowerCase().includes(term);
-      }
-      if (scope === 'category') {
-        return categoryToken.includes(term) || product.categoryId.toLowerCase().includes(term);
-      }
-      if (scope === 'subcategory') {
-        return product.subcategory.toLowerCase().includes(term);
-      }
+    if (!term) {
+      setResults(filterByScope(props.products).slice(0, 12));
+      setIsSearching(false);
+      return;
+    }
 
-      return [
-        product.sku.toLowerCase(),
-        product.name.toLowerCase(),
-        product.subcategory.toLowerCase(),
-        product.categoryId.toLowerCase(),
-        product.barcode?.toLowerCase() ?? '',
-      ].some((value) => value.includes(term));
-    }).slice(0, 24);
+    let cancelled = false;
+    setIsSearching(true);
+
+    const timer = window.setTimeout(() => {
+      void searchProducts(term)
+        .then((rows) => {
+          if (!cancelled) {
+            setResults(filterByScope(rows).slice(0, 24));
+          }
+        })
+        .catch(() => {
+          if (!cancelled) {
+            setResults(filterByScope(props.products).slice(0, 24));
+          }
+        })
+        .finally(() => {
+          if (!cancelled) {
+            setIsSearching(false);
+          }
+        });
+    }, 120);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
   }, [props.products, query, scope]);
 
   return (
@@ -1764,6 +1753,11 @@ function SearchOverlay(
         </div>
 
         <div className="search-results">
+          {isSearching && (
+            <div className="inline-alert info">
+              Searching local SQLite index...
+            </div>
+          )}
           {results.map((product) => (
             <button key={product.id} className="search-result-row" onClick={() => props.onPick(product)}>
               <div className="product-thumb compact">{getCategoryToken(product.subcategory || product.name)}</div>

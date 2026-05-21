@@ -12,12 +12,66 @@ export const SAMPLE_TERMINALS: Terminal[] = [
 ];
 
 export const SAMPLE_USERS: POSUser[] = [
-  { id: 'user-e1042', code: 'E1042', name: 'Muslim Abdullah', initials: 'MA', role: UserRole.CASHIER, pin: '1042' },
-  { id: 'user-e1098', code: 'E1098', name: 'Fathima Rizwan', initials: 'FR', role: UserRole.CASHIER, pin: '1098' },
-  { id: 'user-s001', code: 'S001', name: 'Pradeep Silva', initials: 'PS', role: UserRole.SALESPERSON },
-  { id: 'user-s002', code: 'S002', name: 'Nimasha Perera', initials: 'NP', role: UserRole.SALESPERSON },
-  { id: 'user-s003', code: 'S003', name: 'Ahmed Hassan', initials: 'AH', role: UserRole.SALESPERSON },
-  { id: 'user-m001', code: 'M001', name: 'Manager One', initials: 'MO', role: UserRole.MANAGER, pin: '4321' },
+  {
+    id: 'user-admin-default',
+    code: 'ADMIN',
+    email: 'admin@theredsun.org',
+    name: 'Inventory Admin',
+    initials: 'IA',
+    role: UserRole.MANAGER,
+    pin: 'admin@theredsun.org',
+  },
+  {
+    id: 'user-e1042',
+    code: 'E1042',
+    email: 'muslim.abdullah@jingles.local',
+    name: 'Muslim Abdullah',
+    initials: 'MA',
+    role: UserRole.CASHIER,
+    pin: '1042',
+  },
+  {
+    id: 'user-e1098',
+    code: 'E1098',
+    email: 'fathima.rizwan@jingles.local',
+    name: 'Fathima Rizwan',
+    initials: 'FR',
+    role: UserRole.CASHIER,
+    pin: '1098',
+  },
+  {
+    id: 'user-s001',
+    code: 'S001',
+    email: 'pradeep.silva@jingles.local',
+    name: 'Pradeep Silva',
+    initials: 'PS',
+    role: UserRole.SALESPERSON,
+  },
+  {
+    id: 'user-s002',
+    code: 'S002',
+    email: 'nimasha.perera@jingles.local',
+    name: 'Nimasha Perera',
+    initials: 'NP',
+    role: UserRole.SALESPERSON,
+  },
+  {
+    id: 'user-s003',
+    code: 'S003',
+    email: 'ahmed.hassan@jingles.local',
+    name: 'Ahmed Hassan',
+    initials: 'AH',
+    role: UserRole.SALESPERSON,
+  },
+  {
+    id: 'user-m001',
+    code: 'M001',
+    email: 'manager.one@jingles.local',
+    name: 'Manager One',
+    initials: 'MO',
+    role: UserRole.MANAGER,
+    pin: '4321',
+  },
 ];
 
 export const SAMPLE_CUSTOMERS: Customer[] = [

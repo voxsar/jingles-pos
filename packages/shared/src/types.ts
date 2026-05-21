@@ -29,6 +29,7 @@ export interface Terminal {
 export interface POSUser {
   id: string;
   code: string;
+  email?: string;
   name: string;
   initials: string;
   role: UserRole;
@@ -319,6 +320,16 @@ export interface SyncStatusSummary {
   lastError?: string;
 }
 
+export interface POSAuthLoginInput {
+  identifier: string;
+  password: string;
+}
+
+export interface POSAuthResult {
+  token: string;
+  user: POSUser;
+}
+
 export interface SyncHandshakeRequest {
   deviceId: string;
   terminalId: string;
@@ -355,4 +366,11 @@ export interface POSBootstrap {
   activeShift?: ShiftSummary | null;
   heldSales: HeldSaleSummary[];
   syncStatus: SyncStatusSummary;
+}
+
+export interface POSSyncDashboard {
+  status: SyncStatusSummary;
+  pendingEvents: SyncEvent[];
+  recentEvents: SyncEvent[];
+  conflicts: SyncConflict[];
 }

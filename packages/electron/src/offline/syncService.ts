@@ -12,7 +12,7 @@ import {
   recordSyncFailure,
 } from './localDB';
 
-const BACKEND_URL = process.env.BACKEND_URL || 'http://localhost:3001';
+const BACKEND_URL = (process.env.BACKEND_URL || 'https://inv.theredsun.org').replace(/\/+$/, '');
 
 export interface SyncPlaybackResult {
   accepted: number;

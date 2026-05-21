@@ -342,6 +342,64 @@ button {
   font-size: 12px;
 }
 
+.auth-login-card,
+.auth-form-stack {
+  display: flex;
+  flex-direction: column;
+}
+
+.auth-login-card {
+  gap: 14px;
+}
+
+.auth-form-stack {
+  gap: 14px;
+}
+
+.auth-pill-row,
+.auth-actions-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.auth-actions-row {
+  margin-top: 6px;
+}
+
+.auth-actions-row .ghost-button,
+.auth-actions-row .login-submit {
+  flex: 1;
+}
+
+.session-user-card,
+.sync-clock-panel,
+.sync-stat,
+.sync-row {
+  border: 1px solid rgba(77, 59, 38, 0.08);
+  background: rgba(255, 255, 255, 0.72);
+  box-shadow: var(--shadow-sm);
+}
+
+.session-user-card {
+  border-radius: 20px;
+  padding: 14px 16px;
+}
+
+.session-user-name {
+  margin-top: 4px;
+  font-size: 20px;
+  font-weight: 700;
+  letter-spacing: -0.03em;
+}
+
+.session-user-meta {
+  margin-top: 4px;
+  color: var(--ink-2);
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
 .inline-alert,
 .toast-banner {
   border-radius: 16px;
@@ -478,6 +536,118 @@ button {
   flex-direction: column;
   min-height: calc(100vh - 190px);
   padding: 18px;
+}
+
+.sync-grid {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+  margin-top: 16px;
+}
+
+.sync-card {
+  padding: 18px;
+}
+
+.sync-card-wide {
+  grid-column: 1 / -1;
+}
+
+.sync-card-title,
+.sync-clock-title {
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+.sync-card-title {
+  margin-bottom: 14px;
+}
+
+.sync-stat-grid,
+.sync-clock-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.sync-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  border-radius: 18px;
+  padding: 12px 14px;
+}
+
+.sync-stat span,
+.sync-clock-title {
+  font-size: 11px;
+  color: var(--ink-2);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.sync-stat b {
+  font-size: 14px;
+}
+
+.sync-clock-panel {
+  border-radius: 20px;
+  padding: 14px;
+}
+
+.sync-clock-title {
+  margin-bottom: 10px;
+}
+
+.sync-clock-empty {
+  color: var(--ink-2);
+  font-size: 13px;
+}
+
+.sync-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-height: 360px;
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.sync-row {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  border-radius: 18px;
+  padding: 13px 14px;
+}
+
+.sync-row-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.sync-row-title,
+.sync-row-side {
+  font-weight: 700;
+}
+
+.sync-row-meta {
+  margin-top: 4px;
+  color: var(--ink-2);
+  font-size: 12px;
+  font-family: var(--mono);
+}
+
+.sync-row-side {
+  text-align: right;
+  font-size: 12px;
+}
+
+.mono {
+  font-family: var(--mono);
 }
 
 .panel-head,
@@ -1287,6 +1457,16 @@ button {
     flex-wrap: wrap;
   }
 
+  .sync-grid,
+  .sync-stat-grid,
+  .sync-clock-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .sync-card-wide {
+    grid-column: auto;
+  }
+
   .action-bar {
     grid-template-columns: repeat(5, minmax(0, 1fr));
   }
@@ -1320,7 +1500,8 @@ button {
   }
 
   .cart-select-grid,
-  .login-grid {
+  .login-grid,
+  .auth-actions-row {
     grid-template-columns: 1fr;
   }
 
@@ -1332,7 +1513,9 @@ button {
   .cash-total-bar,
   .held-toolbar,
   .grand-total-row,
-  .cart-actions {
+  .cart-actions,
+  .auth-actions-row,
+  .login-footer {
     flex-direction: column;
     align-items: stretch;
   }
