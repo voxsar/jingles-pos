@@ -20,6 +20,61 @@ type LocalBackendChild = ReturnType<typeof spawn>;
 const LOCAL_API_PORT = Number(process.env.JINGLES_POS_LOCAL_API_PORT ?? 3631);
 const LOCAL_API_URL = `http://127.0.0.1:${LOCAL_API_PORT}`;
 
+function parseEnvFile(filePath: string) {
+  const parsed: Record<string, string> = {};
+  const lines = fs.readFileSync(filePath, 'utf8').split(/\r?\n/);
+
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith('#')) {
+      continue;
+    }
+
+    const separatorIndex = line.indexOf('=');
+    if (separatorIndex <= 0) {
+      continue;
+    }
+
+    const key = line.slice(0, separatorIndex).trim();
+    if (!key) {
+      continue;
+    }
+
+    let value = line.slice(separatorIndex + 1).trim();
+    if (
+      (value.startsWith('"') && value.endsWith('"')) ||
+      (value.startsWith("'") && value.endsWith("'"))
+    ) {
+      value = value.slice(1, -1);
+    }
+
+    parsed[key] = value;
+  }
+
+  return parsed;
+}
+
+function readDesktopEnvOverrides(runtimeRoot: string) {
+  const candidateFiles = [
+    path.join(app.getPath('userData'), 'jingles-pos.env'),
+    path.join(runtimeRoot, '.env'),
+    path.join(path.dirname(app.getPath('exe')), 'jingles-pos.env'),
+    path.resolve(app.getAppPath(), '..', 'backend', '.env'),
+    path.resolve(app.getAppPath(), '..', '..', '.env'),
+  ];
+  const loaded: Record<string, string> = {};
+
+  for (const filePath of candidateFiles) {
+    if (!fs.existsSync(filePath)) {
+      continue;
+    }
+
+    Object.assign(loaded, parseEnvFile(filePath));
+  }
+
+  return loaded;
+}
+
 function pipeChildLogs(child: LocalBackendChild) {
   child.stdout?.on('data', (chunk) => {
     const message = String(chunk).trim();
@@ -114,22 +169,24 @@ export async function startLocalApiServer(): Promise<LocalApiServer> {
   }
 
   const runtimeRoot = getDesktopRuntimeRoot();
+  const fileEnv = readDesktopEnvOverrides(runtimeRoot);
+  const baseEnv = { ...fileEnv, ...process.env };
   const child = spawn(process.execPath, [localBackendEntryPath], {
     cwd: runtimeRoot,
     env: {
-      ...process.env,
-      NODE_PATH: [path.join(app.getAppPath(), 'node_modules'), process.env.NODE_PATH ?? '']
+      ...baseEnv,
+      NODE_PATH: [path.join(app.getAppPath(), 'node_modules'), baseEnv.NODE_PATH ?? '']
         .filter(Boolean)
         .join(path.delimiter),
       ELECTRON_RUN_AS_NODE: '1',
       PORT: String(LOCAL_API_PORT),
       DATABASE_URL: getDesktopSqliteDatabaseUrl(),
       JINGLES_POS_LOCAL_MODE: 'true',
-      JINGLES_POS_DEVICE_ID: process.env.JINGLES_POS_DEVICE_ID?.trim() || DEFAULT_DEVICE_ID,
-      JINGLES_POS_TERMINAL_ID: process.env.JINGLES_POS_TERMINAL_ID?.trim() || DEFAULT_TERMINAL_ID,
+      JINGLES_POS_DEVICE_ID: baseEnv.JINGLES_POS_DEVICE_ID?.trim() || DEFAULT_DEVICE_ID,
+      JINGLES_POS_TERMINAL_ID: baseEnv.JINGLES_POS_TERMINAL_ID?.trim() || DEFAULT_TERMINAL_ID,
       JINGLES_POS_UPSTREAM_URL:
-        process.env.JINGLES_POS_UPSTREAM_URL?.trim() ||
-        process.env.BACKEND_URL?.trim() ||
+        baseEnv.JINGLES_POS_UPSTREAM_URL?.trim() ||
+        baseEnv.BACKEND_URL?.trim() ||
         'https://inv.theredsun.org',
     },
     stdio: ['ignore', 'pipe', 'pipe'],
