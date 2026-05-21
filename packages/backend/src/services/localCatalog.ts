@@ -1,3 +1,4 @@
+import path from 'path';
 import type { ProductPriceTier, Product, SharedCatalogSnapshot } from '@jingles/shared';
 import prisma from '../prisma';
 import { isLocalPosBackendMode } from '../localMode';
@@ -14,6 +15,65 @@ type LocalProductRow = {
   stockOnHand: number;
   description: string | null;
 };
+
+type DirectSqliteStatement = {
+  run: (...params: Array<string | number | null>) => unknown;
+};
+
+type DirectSqliteDatabase = {
+  exec: (sql: string) => void;
+  prepare: (sql: string) => DirectSqliteStatement;
+  close: () => void;
+};
+
+type DirectSqliteDatabaseSyncConstructor = new (location: string) => DirectSqliteDatabase;
+
+const LOCAL_CATALOG_BULK_REFRESH_TIMEOUT_MS = 300_000;
+const LOCAL_CATALOG_REPLACE_TRANSACTION_OPTIONS = {
+  maxWait: 10_000,
+  timeout: LOCAL_CATALOG_BULK_REFRESH_TIMEOUT_MS,
+} as const;
+const LOCAL_CATALOG_TRIGGER_SQL = `
+  CREATE TRIGGER IF NOT EXISTS product_search_ai
+  AFTER INSERT ON "Product"
+  BEGIN
+    INSERT INTO product_search (id, sku, barcode, name, subcategory, description)
+    VALUES (
+      NEW.id,
+      NEW.sku,
+      COALESCE(NEW.barcode, ''),
+      NEW.name,
+      COALESCE(NEW.subcategory, ''),
+      COALESCE(NEW.description, '')
+    );
+  END;
+
+  CREATE TRIGGER IF NOT EXISTS product_search_ad
+  AFTER DELETE ON "Product"
+  BEGIN
+    DELETE FROM product_search WHERE id = OLD.id;
+  END;
+
+  CREATE TRIGGER IF NOT EXISTS product_search_au
+  AFTER UPDATE ON "Product"
+  BEGIN
+    DELETE FROM product_search WHERE id = OLD.id;
+    INSERT INTO product_search (id, sku, barcode, name, subcategory, description)
+    VALUES (
+      NEW.id,
+      NEW.sku,
+      COALESCE(NEW.barcode, ''),
+      NEW.name,
+      COALESCE(NEW.subcategory, ''),
+      COALESCE(NEW.description, '')
+    );
+  END;
+`;
+const LOCAL_CATALOG_DROP_TRIGGER_SQL = `
+  DROP TRIGGER IF EXISTS product_search_ai;
+  DROP TRIGGER IF EXISTS product_search_ad;
+  DROP TRIGGER IF EXISTS product_search_au;
+`;
 
 function sortTiers<T extends { priority: number; minQty: number }>(tiers: T[]): T[] {
   return [...tiers].sort((left, right) => {
@@ -152,6 +212,159 @@ export async function rebuildLocalCatalogSearchIndex() {
   `);
 }
 
+function resolveLocalCatalogDatabasePath() {
+  const raw = process.env.DATABASE_URL?.trim();
+  if (!raw) {
+    return null;
+  }
+
+  const withoutQuery = raw.split('?')[0];
+  if (!withoutQuery.startsWith('file:')) {
+    return null;
+  }
+
+  const filePath = decodeURIComponent(withoutQuery.slice('file:'.length));
+  if (/^[a-z]:/i.test(filePath) || filePath.startsWith('/') || filePath.startsWith('\\')) {
+    return filePath;
+  }
+
+  return path.resolve(process.cwd(), filePath);
+}
+
+function openDirectCatalogDatabase(): DirectSqliteDatabase | null {
+  const databasePath = resolveLocalCatalogDatabasePath();
+  if (!databasePath) {
+    return null;
+  }
+
+  let DatabaseSync: DirectSqliteDatabaseSyncConstructor | undefined;
+  try {
+    ({ DatabaseSync } = require('node:sqlite') as {
+      DatabaseSync: DirectSqliteDatabaseSyncConstructor;
+    });
+  } catch {
+    return null;
+  }
+
+  const db = new DatabaseSync(databasePath);
+  db.exec(`PRAGMA busy_timeout = ${LOCAL_CATALOG_BULK_REFRESH_TIMEOUT_MS};`);
+  db.exec('PRAGMA foreign_keys = ON;');
+  return db;
+}
+
+function ensureLocalCatalogSearchIndexDirect(db: DirectSqliteDatabase) {
+  db.exec(`
+    CREATE VIRTUAL TABLE IF NOT EXISTS product_search USING fts5(
+      id UNINDEXED,
+      sku,
+      barcode,
+      name,
+      subcategory,
+      description
+    )
+  `);
+  db.exec(LOCAL_CATALOG_TRIGGER_SQL);
+}
+
+function rebuildLocalCatalogSearchIndexDirect(db: DirectSqliteDatabase) {
+  db.prepare('DELETE FROM product_search').run();
+  db.prepare(`
+    INSERT INTO product_search (id, sku, barcode, name, subcategory, description)
+    SELECT
+      id,
+      sku,
+      COALESCE(barcode, ''),
+      name,
+      COALESCE(subcategory, ''),
+      COALESCE(description, '')
+    FROM "Product"
+  `).run();
+}
+
+function replaceLocalCatalogSnapshotDirect(snapshot: SharedCatalogSnapshot) {
+  if (!isLocalPosBackendMode()) {
+    return false;
+  }
+
+  const db = openDirectCatalogDatabase();
+  if (!db) {
+    return false;
+  }
+
+  try {
+    ensureLocalCatalogSearchIndexDirect(db);
+
+    const insertCategory = db.prepare(`
+      INSERT INTO "Category" (id, name, icon, sortOrder, createdAt, updatedAt)
+      VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+    `);
+    const insertProduct = db.prepare(`
+      INSERT INTO "Product" (
+        id, sku, barcode, name, price, categoryId, subcategory, packSize,
+        unitLabel, stockOnHand, description, lastVectorClock, createdAt, updatedAt
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+    `);
+    const insertBatchPrice = db.prepare(`
+      INSERT INTO "BatchPrice" (id, productId, label, minQty, price, priority, isDefault, createdAt)
+      VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+    `);
+
+    db.exec(LOCAL_CATALOG_DROP_TRIGGER_SQL);
+    db.exec('BEGIN IMMEDIATE;');
+    try {
+      db.prepare('DELETE FROM product_search').run();
+      db.prepare('DELETE FROM "BatchPrice"').run();
+      db.prepare('DELETE FROM "Product"').run();
+      db.prepare('DELETE FROM "Category"').run();
+
+      for (const category of snapshot.categories) {
+        insertCategory.run(category.id, category.name, category.icon, category.sortOrder);
+      }
+
+      for (const product of snapshot.products) {
+        insertProduct.run(
+          product.id,
+          product.sku,
+          product.barcode ?? null,
+          product.name,
+          product.priceTiers[0]?.price ?? 0,
+          product.categoryId ?? null,
+          product.subcategory,
+          Math.max(1, Math.round(product.packSize || 1)),
+          product.unitLabel,
+          Math.max(0, Math.round(product.stockOnHand)),
+          product.description ?? null,
+          '{}',
+        );
+
+        for (const tier of product.priceTiers) {
+          insertBatchPrice.run(
+            tier.id,
+            product.id,
+            tier.label,
+            tier.minQty ?? 0,
+            tier.price,
+            tier.priority,
+            tier.isDefault ? 1 : 0,
+          );
+        }
+      }
+
+      db.exec('COMMIT;');
+    } catch (error) {
+      db.exec('ROLLBACK;');
+      throw error;
+    } finally {
+      db.exec(LOCAL_CATALOG_TRIGGER_SQL);
+    }
+
+    rebuildLocalCatalogSearchIndexDirect(db);
+    return true;
+  } finally {
+    db.close();
+  }
+}
+
 export async function getLocalCatalogSnapshot(): Promise<SharedCatalogSnapshot> {
   const [categories, products] = await Promise.all([
     prisma.category.findMany({
@@ -180,57 +393,63 @@ export async function getLocalCatalogSnapshot(): Promise<SharedCatalogSnapshot> 
 }
 
 export async function replaceLocalCatalogSnapshot(snapshot: SharedCatalogSnapshot) {
+  if (replaceLocalCatalogSnapshotDirect(snapshot)) {
+    return;
+  }
+
+  const categoryRows = snapshot.categories.map((category) => ({
+    id: category.id,
+    name: category.name,
+    icon: category.icon,
+    sortOrder: category.sortOrder,
+  }));
+  const productRows = snapshot.products.map((product) => ({
+    id: product.id,
+    sku: product.sku,
+    barcode: product.barcode ?? null,
+    name: product.name,
+    price: product.priceTiers[0]?.price ?? 0,
+    categoryId: product.categoryId,
+    subcategory: product.subcategory,
+    packSize: Math.max(1, Math.round(product.packSize || 1)),
+    unitLabel: product.unitLabel,
+    stockOnHand: Math.max(0, Math.round(product.stockOnHand)),
+    description: product.description ?? null,
+    lastVectorClock: '{}',
+  }));
+  const batchPriceRows = snapshot.products.flatMap((product) =>
+    product.priceTiers.map((tier) => ({
+      id: tier.id,
+      productId: product.id,
+      label: tier.label,
+      price: tier.price,
+      priority: tier.priority,
+      minQty: tier.minQty ?? 0,
+      isDefault: tier.isDefault ?? false,
+    })),
+  );
+
   await prisma.$transaction(async (tx) => {
     await tx.batchPrice.deleteMany();
     await tx.product.deleteMany();
     await tx.category.deleteMany();
 
-    if (snapshot.categories.length > 0) {
+    if (categoryRows.length > 0) {
       await tx.category.createMany({
-        data: snapshot.categories.map((category) => ({
-          id: category.id,
-          name: category.name,
-          icon: category.icon,
-          sortOrder: category.sortOrder,
-        })),
+        data: categoryRows,
       });
     }
 
-    if (snapshot.products.length > 0) {
+    if (productRows.length > 0) {
       await tx.product.createMany({
-        data: snapshot.products.map((product) => ({
-          id: product.id,
-          sku: product.sku,
-          barcode: product.barcode ?? null,
-          name: product.name,
-          price: product.priceTiers[0]?.price ?? 0,
-          categoryId: product.categoryId,
-          subcategory: product.subcategory,
-          packSize: Math.max(1, Math.round(product.packSize || 1)),
-          unitLabel: product.unitLabel,
-          stockOnHand: Math.max(0, Math.round(product.stockOnHand)),
-          description: product.description ?? null,
-          lastVectorClock: '{}',
-        })),
+        data: productRows,
       });
     }
 
-    const batchPrices = snapshot.products.flatMap((product) =>
-      product.priceTiers.map((tier) => ({
-        id: tier.id,
-        productId: product.id,
-        label: tier.label,
-        price: tier.price,
-        priority: tier.priority,
-        minQty: tier.minQty ?? 0,
-        isDefault: tier.isDefault ?? false,
-      })),
-    );
-
-    if (batchPrices.length > 0) {
-      await tx.batchPrice.createMany({ data: batchPrices });
+    if (batchPriceRows.length > 0) {
+      await tx.batchPrice.createMany({ data: batchPriceRows });
     }
-  });
+  }, LOCAL_CATALOG_REPLACE_TRANSACTION_OPTIONS);
 
   await rebuildLocalCatalogSearchIndex();
 }
