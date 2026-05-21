@@ -2,6 +2,7 @@ import {
   CompleteSaleInput,
   POSAuthLoginInput,
   POSAuthResult,
+  POSSyncTokenResult,
   Product,
   POSSyncDashboard,
   SaleSummary,
@@ -66,6 +67,10 @@ export async function getCurrentUser(token: string): Promise<POSUser | null> {
 
 export async function logout(token: string): Promise<void> {
   await postJson<{ ok: true }>('/auth/logout', {}, { token });
+}
+
+export async function refreshHostSyncAuth(password: string, token: string): Promise<POSSyncTokenResult> {
+  return postJson<POSSyncTokenResult>('/auth/sync-token', { password }, { token });
 }
 
 export async function bootstrapPOS(options?: { deviceId?: string; terminalId?: string }): Promise<POSBootstrap> {

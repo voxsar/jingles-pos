@@ -42,6 +42,11 @@ import {
   getLocalCatalogSnapshot,
   replaceLocalCatalogSnapshot,
 } from './localCatalog';
+import {
+  HOST_SYNC_AUTH_REQUIRED_ERROR,
+  clearStoredSyncAuth,
+  readStoredSyncAuth,
+} from './syncCredentials';
 
 type Tx = Prisma.TransactionClient;
 
@@ -1053,11 +1058,12 @@ async function buildLocalSyncStatusInTransaction(
   deviceId: string,
   terminalId: string,
 ): Promise<SyncStatusSummary> {
-  const [state, pendingEvents, conflictCount, localVectorClock] = await Promise.all([
+  const [state, pendingEvents, conflictCount, localVectorClock, syncAuth] = await Promise.all([
     tx.syncDeviceState.findUnique({ where: { deviceId } }),
     tx.syncEvent.count({ where: { state: SyncEventState.PENDING } }),
     tx.syncConflict.count({ where: { status: SyncConflictStatus.OPEN } }),
     getServerVectorClock(tx),
+    readStoredSyncAuth(tx),
   ]);
 
   return {
@@ -1069,6 +1075,9 @@ async function buildLocalSyncStatusInTransaction(
     remoteVectorClock: normalizeClock(state?.confirmedVectorClock),
     lastSyncAt: state?.lastSyncAt?.toISOString(),
     lastError: state?.lastError ?? undefined,
+    syncAuthConfigured: Boolean(syncAuth?.token),
+    syncAuthIdentity: syncAuth?.identity,
+    needsSyncAuth: !syncAuth?.token,
   };
 }
 
@@ -1243,10 +1252,16 @@ export async function appendRemoteEventsFromServer(
 }
 
 async function fetchUpstreamJson<T>(path: string, options?: { method?: 'GET' | 'POST'; body?: unknown }) {
+  const syncAuth = await readStoredSyncAuth();
+  if (!syncAuth?.token) {
+    throw new Error(HOST_SYNC_AUTH_REQUIRED_ERROR);
+  }
+
   const response = await fetch(`${getPosUpstreamUrl()}${path}`, {
     method: options?.method ?? 'GET',
     headers: {
       'Content-Type': 'application/json',
+      Authorization: `Bearer ${syncAuth.token}`,
     },
     ...(typeof options?.body === 'undefined'
       ? {}
@@ -1255,6 +1270,11 @@ async function fetchUpstreamJson<T>(path: string, options?: { method?: 'GET' | '
 
   if (!response.ok) {
     const payload = await response.json().catch(() => ({ error: `HTTP ${response.status}` })) as { error?: string };
+    if (response.status === 401 || response.status === 403) {
+      await clearStoredSyncAuth();
+      throw new Error(HOST_SYNC_AUTH_REQUIRED_ERROR);
+    }
+
     throw new Error(payload.error || `HTTP ${response.status}`);
   }
 

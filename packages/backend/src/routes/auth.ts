@@ -4,6 +4,10 @@ import jwt from 'jsonwebtoken';
 import prisma from '../prisma';
 import { getPosUpstreamUrl, isLocalPosBackendMode } from '../localMode';
 import { ensureSeedData } from '../seed';
+import {
+  clearStoredSyncAuth,
+  storeStoredSyncAuth,
+} from '../services/syncCredentials';
 
 const router = Router();
 const AUTH_SECRET =
@@ -33,14 +37,15 @@ type LocalAuthUser = {
   passwordHash: string | null;
 };
 
-type UpstreamAuthUser = {
+type UpstreamAuthPayload = {
+  token: string;
   id: string;
   email: string;
   role: string;
 };
 
 type UpstreamLoginResult =
-  | { ok: true; user: UpstreamAuthUser }
+  | { ok: true; user: UpstreamAuthPayload }
   | { ok: false; status: number; error: string };
 
 function mapAuthUser(user: LocalAuthUser) {
@@ -106,7 +111,7 @@ function looksLikeEmail(value: string) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value.trim());
 }
 
-function parseUpstreamAuthPayload(payload: unknown): UpstreamAuthUser | null {
+function parseUpstreamAuthPayload(payload: unknown): UpstreamAuthPayload | null {
   if (!payload || typeof payload !== 'object') {
     return null;
   }
@@ -120,6 +125,7 @@ function parseUpstreamAuthPayload(payload: unknown): UpstreamAuthUser | null {
     return null;
   }
 
+  const token = 'token' in candidate ? candidate.token : null;
   const user = candidate.user;
   if (!user || typeof user !== 'object') {
     return null;
@@ -129,11 +135,17 @@ function parseUpstreamAuthPayload(payload: unknown): UpstreamAuthUser | null {
   const email = 'email' in user ? user.email : null;
   const role = 'role' in user ? user.role : null;
 
-  if (typeof id !== 'string' || typeof email !== 'string' || typeof role !== 'string') {
+  if (
+    typeof token !== 'string' ||
+    typeof id !== 'string' ||
+    typeof email !== 'string' ||
+    typeof role !== 'string'
+  ) {
     return null;
   }
 
   return {
+    token: token.trim(),
     id,
     email: email.toLowerCase(),
     role,
@@ -329,7 +341,7 @@ async function requestUpstreamLogin(
 }
 
 async function upsertInventoryBackedUser(
-  upstreamUser: UpstreamAuthUser,
+  upstreamUser: UpstreamAuthPayload,
   password: string,
   existingUser: LocalAuthUser | null,
 ) {
@@ -385,6 +397,17 @@ async function tryLocalPasswordLogin(user: LocalAuthUser, password: string) {
   return false;
 }
 
+async function rememberSyncAuthForUser(
+  user: Pick<LocalAuthUser, 'id' | 'email'>,
+  upstreamUser: UpstreamAuthPayload,
+) {
+  await storeStoredSyncAuth({
+    token: upstreamUser.token,
+    userId: user.id,
+    identity: user.email ?? upstreamUser.email,
+  });
+}
+
 router.post('/login', async (req: Request, res: Response) => {
   try {
     await ensureSeedData();
@@ -397,6 +420,18 @@ router.post('/login', async (req: Request, res: Response) => {
 
     const user = await findUserByIdentifier(identifier);
     if (user && isSupportedPosRole(user.role) && await tryLocalPasswordLogin(user, password)) {
+      const upstreamLogin = await requestUpstreamLogin(identifier, password, user);
+      if (upstreamLogin?.ok) {
+        const syncedUser = await upsertInventoryBackedUser(upstreamLogin.user, password, user);
+        if (syncedUser) {
+          await rememberSyncAuthForUser(syncedUser, upstreamLogin.user);
+          return res.json({
+            token: signToken(syncedUser),
+            user: mapAuthUser(syncedUser),
+          });
+        }
+      }
+
       return res.json({
         token: signToken(user),
         user: mapAuthUser(user),
@@ -435,6 +470,8 @@ router.post('/login', async (req: Request, res: Response) => {
         return res.status(403).json({ error: 'This inventory account does not have POS access.' });
       }
 
+      await rememberSyncAuthForUser(syncedUser, upstreamLogin.user);
+
       return res.json({
         token: signToken(syncedUser),
         user: mapAuthUser(syncedUser),
@@ -462,6 +499,57 @@ router.post('/login', async (req: Request, res: Response) => {
   }
 });
 
+router.post('/sync-token', authenticate, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    await ensureSeedData();
+
+    if (!isLocalPosBackendMode()) {
+      return res.status(400).json({ error: 'Sync auth exchange is only available in desktop local mode.' });
+    }
+
+    const password = typeof req.body.password === 'string' ? req.body.password.trim() : '';
+    if (!password) {
+      return res.status(400).json({ error: 'Password is required' });
+    }
+
+    const user = await prisma.pOSUser.findUnique({
+      where: { id: req.user!.id },
+    });
+    if (!user) {
+      return res.status(404).json({ error: 'Authenticated user no longer exists' });
+    }
+
+    if (!user.email) {
+      return res.status(400).json({
+        error: 'This POS user is not linked to an inventory email account yet.',
+      });
+    }
+
+    const upstreamLogin = await requestUpstreamLogin(user.email, password, user);
+    if (!upstreamLogin?.ok) {
+      return res.status(upstreamLogin?.status ?? 503).json({
+        error: upstreamLogin?.error ?? 'Unable to refresh host sync authentication.',
+      });
+    }
+
+    const syncedUser = await upsertInventoryBackedUser(upstreamLogin.user, password, user);
+    if (!syncedUser) {
+      return res.status(403).json({ error: 'This inventory account does not have POS access.' });
+    }
+
+    await rememberSyncAuthForUser(syncedUser, upstreamLogin.user);
+
+    return res.json({
+      syncAuthConfigured: true,
+      syncAuthIdentity: syncedUser.email ?? upstreamLogin.user.email,
+      userId: syncedUser.id,
+    });
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({ error: 'Failed to refresh host sync authentication' });
+  }
+});
+
 router.get('/me', authenticate, async (req: AuthenticatedRequest, res: Response) => {
   try {
     await ensureSeedData();
@@ -480,7 +568,8 @@ router.get('/me', authenticate, async (req: AuthenticatedRequest, res: Response)
   }
 });
 
-router.post('/logout', (_req: Request, res: Response) => {
+router.post('/logout', async (_req: Request, res: Response) => {
+  await clearStoredSyncAuth();
   res.json({ ok: true });
 });
 

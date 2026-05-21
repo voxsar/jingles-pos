@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import type { POSSyncDashboard } from '@jingles/shared';
 import { useNavigate } from 'react-router-dom';
-import { getSyncDashboard, subscribeSyncStatus, syncNow } from '../api';
+import { getSyncDashboard, refreshHostSyncAuth, subscribeSyncStatus, syncNow } from '../api';
 import { useAuth } from '../auth/AuthContext';
 import { formatDateTime, formatInteger } from '../utils/pos';
 
@@ -13,10 +13,12 @@ function readClockEntries(clock?: Record<string, number>) {
 
 export default function SyncPage() {
   const navigate = useNavigate();
-  const { logout, user } = useAuth();
+  const { logout, token, user } = useAuth();
   const [dashboard, setDashboard] = useState<POSSyncDashboard | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [isSyncing, setIsSyncing] = useState(false);
+  const [isRefreshingSyncAuth, setIsRefreshingSyncAuth] = useState(false);
+  const [syncPassword, setSyncPassword] = useState('');
   const [error, setError] = useState<string | null>(null);
 
   const loadDashboard = useCallback(async (options?: { silent?: boolean }) => {
@@ -66,6 +68,30 @@ export default function SyncPage() {
     }
   }, [loadDashboard]);
 
+  const handleRefreshSyncAuth = useCallback(async () => {
+    if (!token) {
+      setError('Sign in again before reconnecting host sync.');
+      return;
+    }
+
+    if (!syncPassword.trim()) {
+      setError('Enter the host password to reconnect sync.');
+      return;
+    }
+
+    setIsRefreshingSyncAuth(true);
+    try {
+      await refreshHostSyncAuth(syncPassword, token);
+      setSyncPassword('');
+      setError(null);
+      await loadDashboard({ silent: true });
+    } catch (nextError) {
+      setError(nextError instanceof Error ? nextError.message : 'Failed to refresh host sync authentication');
+    } finally {
+      setIsRefreshingSyncAuth(false);
+    }
+  }, [loadDashboard, syncPassword, token]);
+
   const handleLogout = useCallback(async () => {
     await logout();
     navigate('/login', { replace: true });
@@ -74,6 +100,8 @@ export default function SyncPage() {
   const status = dashboard?.status ?? null;
   const localClockEntries = readClockEntries(status?.localVectorClock);
   const remoteClockEntries = readClockEntries(status?.remoteVectorClock);
+  const syncIdentity = status?.syncAuthIdentity ?? user?.email ?? null;
+  const shouldShowSyncAuthCard = Boolean(status?.needsSyncAuth || status?.syncAuthConfigured || user?.email);
 
   return (
     <div className="screen-fill workstation-app sync-page">
@@ -128,6 +156,38 @@ export default function SyncPage() {
               <SyncStat label="Last error" value={status?.lastError ?? 'None'} />
             </div>
           </section>
+
+          {shouldShowSyncAuthCard && (
+            <section className="glass-panel sync-card">
+              <div className="sync-card-title">Host sync authentication</div>
+              <div className="sync-auth-copy">
+                {status?.syncAuthConfigured
+                  ? `Host sync is currently authenticated${syncIdentity ? ` as ${syncIdentity}` : ''}.`
+                  : `Host sync needs an inventory backend token${syncIdentity ? ` for ${syncIdentity}` : ''}.`}
+              </div>
+              <label className="label-block" htmlFor="sync-host-password">
+                Host password
+              </label>
+              <input
+                id="sync-host-password"
+                autoComplete="current-password"
+                className="glass-input"
+                onChange={(event) => setSyncPassword(event.target.value)}
+                placeholder="Enter inventory password"
+                type="password"
+                value={syncPassword}
+              />
+              <div className="sync-auth-actions">
+                <button
+                  className="btn-primary"
+                  disabled={isRefreshingSyncAuth || !user?.email}
+                  onClick={() => void handleRefreshSyncAuth()}
+                >
+                  {isRefreshingSyncAuth ? 'Reconnecting...' : 'Reconnect host sync'}
+                </button>
+              </div>
+            </section>
+          )}
 
           <section className="glass-panel sync-card">
             <div className="sync-card-title">Vector clocks</div>

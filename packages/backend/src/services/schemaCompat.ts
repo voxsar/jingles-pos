@@ -79,4 +79,15 @@ export async function ensureLocalSchemaCompat() {
       `ALTER TABLE "POSUser" ADD COLUMN "password_hash" TEXT`,
     );
   }
+
+  if (!(await hasTable('ConfigEntry'))) {
+    await prisma.$executeRawUnsafe(`
+      CREATE TABLE "ConfigEntry" (
+        "key" TEXT NOT NULL PRIMARY KEY,
+        "value" TEXT NOT NULL,
+        "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        "updatedAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+  }
 }

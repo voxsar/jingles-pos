@@ -324,6 +324,9 @@ export interface SyncStatusSummary {
   remoteVectorClock: VectorClock;
   lastSyncAt?: string;
   lastError?: string;
+  syncAuthConfigured?: boolean;
+  syncAuthIdentity?: string;
+  needsSyncAuth?: boolean;
 }
 
 export interface POSAuthLoginInput {
@@ -334,6 +337,12 @@ export interface POSAuthLoginInput {
 export interface POSAuthResult {
   token: string;
   user: POSUser;
+}
+
+export interface POSSyncTokenResult {
+  syncAuthConfigured: boolean;
+  syncAuthIdentity?: string;
+  userId: string;
 }
 
 export interface SyncHandshakeRequest {

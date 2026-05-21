@@ -566,6 +566,19 @@ button {
   margin-bottom: 14px;
 }
 
+.sync-auth-copy {
+  margin-bottom: 12px;
+  color: var(--ink-2);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.sync-auth-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 12px;
+}
+
 .sync-stat-grid,
 .sync-clock-grid {
   display: grid;
