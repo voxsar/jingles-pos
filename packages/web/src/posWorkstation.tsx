@@ -65,9 +65,30 @@ type SessionState = {
   terminalId: string;
 };
 
-type ProductViewMode = 'list' | 'tile';
+type CatalogCategoryTile = {
+  id: string;
+  name: string;
+  icon: string;
+  chip: string;
+  count: number;
+  subcategoryCount: number;
+};
+
+type CatalogSubcategoryTile = {
+  name: string;
+  chip: string;
+  count: number;
+};
+
 type HoldMode = 'hold' | 'recall';
 type MoneyModalMode = 'open' | 'close';
+
+const DEFAULT_CATALOG_PANE_WIDTH = 62;
+const MIN_CATALOG_PANE_WIDTH = 38;
+const MAX_CATALOG_PANE_WIDTH = 72;
+const MIN_CATALOG_PANEL_PX = 420;
+const MIN_CART_PANEL_PX = 380;
+const PANEL_RESIZER_WIDTH = 16;
 
 const PAYMENT_OPTIONS: Array<{ method: PaymentMethod; label: string; short: string }> = [
   { method: PaymentMethod.CASH, label: 'Cash', short: 'CA' },
@@ -78,6 +99,24 @@ const PAYMENT_OPTIONS: Array<{ method: PaymentMethod; label: string; short: stri
   { method: PaymentMethod.GIFT, label: 'Gift voucher', short: 'GV' },
   { method: PaymentMethod.SPLIT, label: 'Split payment', short: 'SP' },
 ];
+
+function clampCatalogPaneWidth(nextWidth: number, containerWidth: number | undefined): number {
+  if (containerWidth == null || containerWidth <= 0) {
+    return Math.min(MAX_CATALOG_PANE_WIDTH, Math.max(MIN_CATALOG_PANE_WIDTH, nextWidth));
+  }
+
+  const minWidth = Math.max(MIN_CATALOG_PANE_WIDTH, (MIN_CATALOG_PANEL_PX / containerWidth) * 100);
+  const maxWidth = Math.min(
+    MAX_CATALOG_PANE_WIDTH,
+    ((containerWidth - MIN_CART_PANEL_PX - PANEL_RESIZER_WIDTH) / containerWidth) * 100,
+  );
+
+  if (!Number.isFinite(minWidth) || !Number.isFinite(maxWidth) || minWidth >= maxWidth) {
+    return Math.min(MAX_CATALOG_PANE_WIDTH, Math.max(MIN_CATALOG_PANE_WIDTH, nextWidth));
+  }
+
+  return Math.min(maxWidth, Math.max(minWidth, nextWidth));
+}
 
 export default function PosWorkstation() {
   const navigate = useNavigate();
@@ -100,9 +139,10 @@ export default function PosWorkstation() {
   const [customerId, setCustomerId] = useState('');
   const [defaultTierLabel, setDefaultTierLabel] = useState('');
   const [billDiscount, setBillDiscount] = useState(0);
-  const [productView, setProductView] = useState<ProductViewMode>('list');
   const [activeCategoryId, setActiveCategoryId] = useState('all');
   const [activeSubcategory, setActiveSubcategory] = useState<string | null>(null);
+  const [catalogPaneWidth, setCatalogPaneWidth] = useState(DEFAULT_CATALOG_PANE_WIDTH);
+  const [isResizingCatalogPane, setIsResizingCatalogPane] = useState(false);
   const [notice, setNotice] = useState<Notice>(null);
 
   const [isSearchOpen, setIsSearchOpen] = useState(false);
@@ -121,16 +161,103 @@ export default function PosWorkstation() {
 
   const discountInputRef = useRef<HTMLInputElement>(null);
   const customerSelectRef = useRef<HTMLSelectElement>(null);
+  const workstationGridRef = useRef<HTMLDivElement>(null);
 
   const showNotice = useCallback((type: 'success' | 'error', text: string) => {
     setNotice({ type, text });
   }, []);
+
+  const clampPaneWidth = useCallback((nextWidth: number) => {
+    const containerWidth = workstationGridRef.current?.getBoundingClientRect().width;
+    return clampCatalogPaneWidth(nextWidth, containerWidth);
+  }, []);
+
+  const updateCatalogPaneWidthFromClientX = useCallback((clientX: number) => {
+    const rect = workstationGridRef.current?.getBoundingClientRect();
+    if (rect == null || rect.width <= PANEL_RESIZER_WIDTH) {
+      return;
+    }
+
+    const nextWidth = ((clientX - rect.left) / rect.width) * 100;
+    setCatalogPaneWidth(clampCatalogPaneWidth(nextWidth, rect.width));
+  }, []);
+
+  const handleCatalogPaneResizeStart = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+    if (window.matchMedia('(max-width: 1380px)').matches) {
+      return;
+    }
+
+    event.preventDefault();
+    setIsResizingCatalogPane(true);
+    updateCatalogPaneWidthFromClientX(event.clientX);
+  }, [updateCatalogPaneWidthFromClientX]);
+
+  const handleCatalogPaneResizeKeyDown = useCallback((event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (event.key === 'ArrowLeft') {
+      event.preventDefault();
+      setCatalogPaneWidth((previous) => clampPaneWidth(previous - 3));
+      return;
+    }
+
+    if (event.key === 'ArrowRight') {
+      event.preventDefault();
+      setCatalogPaneWidth((previous) => clampPaneWidth(previous + 3));
+      return;
+    }
+
+    if (event.key === 'Home') {
+      event.preventDefault();
+      setCatalogPaneWidth(clampPaneWidth(MIN_CATALOG_PANE_WIDTH));
+      return;
+    }
+
+    if (event.key === 'End') {
+      event.preventDefault();
+      setCatalogPaneWidth(clampPaneWidth(MAX_CATALOG_PANE_WIDTH));
+      return;
+    }
+
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      setCatalogPaneWidth(clampPaneWidth(DEFAULT_CATALOG_PANE_WIDTH));
+    }
+  }, [clampPaneWidth]);
 
   useEffect(() => {
     if (authUser == null) {
       setSession(null);
     }
   }, [authUser]);
+
+  useEffect(() => {
+    if (!isResizingCatalogPane) {
+      return undefined;
+    }
+
+    const handlePointerMove = (event: PointerEvent) => {
+      updateCatalogPaneWidthFromClientX(event.clientX);
+    };
+    const stopResizing = () => {
+      setIsResizingCatalogPane(false);
+    };
+    const previousCursor = document.body.style.cursor;
+    const previousUserSelect = document.body.style.userSelect;
+
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+
+    window.addEventListener('pointermove', handlePointerMove);
+    window.addEventListener('pointerup', stopResizing);
+    window.addEventListener('pointercancel', stopResizing);
+
+    return () => {
+      document.body.style.cursor = previousCursor;
+      document.body.style.userSelect = previousUserSelect;
+      window.removeEventListener('pointermove', handlePointerMove);
+      window.removeEventListener('pointerup', stopResizing);
+      window.removeEventListener('pointercancel', stopResizing);
+    };
+  }, [isResizingCatalogPane, updateCatalogPaneWidthFromClientX]);
 
   const currentTerminalId = session?.terminalId ?? selectedTerminalId ?? loadedTerminalId ?? DEFAULT_TERMINAL_ID;
 
@@ -158,39 +285,62 @@ export default function PosWorkstation() {
   const customerMap = useMemo(() => new Map(customers.map((customer) => [customer.id, customer])), [customers]);
   const userMap = useMemo(() => new Map(users.map((user) => [user.id, user])), [users]);
 
-  const categoryChips = useMemo(() => {
+  const categoryTiles = useMemo<CatalogCategoryTile[]>(() => {
     const counts = new Map<string, number>();
+    const subcategoriesByCategory = new Map<string, Set<string>>();
+
     for (const product of products) {
       counts.set(product.categoryId, (counts.get(product.categoryId) ?? 0) + 1);
+      if (product.subcategory) {
+        const bucket = subcategoriesByCategory.get(product.categoryId) ?? new Set<string>();
+        bucket.add(product.subcategory);
+        subcategoriesByCategory.set(product.categoryId, bucket);
+      }
     }
 
     const sorted = [...(bootstrapData?.categories ?? [])]
       .sort((left, right) => left.sortOrder - right.sortOrder)
       .map((category) => ({
         ...category,
-        chip: getCategoryToken(category.name),
+        chip: category.icon || getCategoryToken(category.name),
         count: counts.get(category.id) ?? 0,
+        subcategoryCount: subcategoriesByCategory.get(category.id)?.size ?? 0,
       }));
 
     return [
-      { id: 'all', name: 'All Items', icon: 'AL', sortOrder: 0, chip: 'AL', count: products.length },
+      {
+        id: 'all',
+        name: 'All Items',
+        icon: 'AL',
+        sortOrder: 0,
+        chip: 'AL',
+        count: products.length,
+        subcategoryCount: sorted.length,
+      },
       ...sorted,
     ];
   }, [bootstrapData?.categories, products]);
 
-  const subcategoryChips = useMemo(() => {
+  const subcategoryTiles = useMemo<CatalogSubcategoryTile[]>(() => {
     if (activeCategoryId === 'all') {
       return [];
     }
 
-    return Array.from(
-      new Set(
-        products
-          .filter((product) => product.categoryId === activeCategoryId)
-          .map((product) => product.subcategory)
-          .filter(Boolean),
-      ),
-    ).sort((left, right) => left.localeCompare(right));
+    const counts = new Map<string, number>();
+    for (const product of products) {
+      if (product.categoryId !== activeCategoryId || !product.subcategory) {
+        continue;
+      }
+      counts.set(product.subcategory, (counts.get(product.subcategory) ?? 0) + 1);
+    }
+
+    return Array.from(counts.entries())
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([name, count]) => ({
+        name,
+        chip: getCategoryToken(name),
+        count,
+      }));
   }, [activeCategoryId, products]);
 
   const visibleProducts = useMemo(() => {
@@ -204,6 +354,11 @@ export default function PosWorkstation() {
 
     return rows.sort((left, right) => left.sku.localeCompare(right.sku));
   }, [activeCategoryId, activeSubcategory, products]);
+
+  const activeCategory = useMemo(
+    () => categoryTiles.find((category) => category.id === activeCategoryId) ?? categoryTiles[0] ?? null,
+    [activeCategoryId, categoryTiles],
+  );
 
   const selectedCustomer = customers.find((customer) => customer.id === customerId) ?? customers[0] ?? null;
 
@@ -806,6 +961,10 @@ export default function PosWorkstation() {
   const terminalName = terminals.find((terminal) => terminal.id === currentTerminalId)?.name ?? 'POS Terminal';
   const sessionUser = session ? userMap.get(session.user.id) ?? session.user : null;
   const canTakePayment = cart.length > 0 && activeShift != null;
+  const workstationGridStyle = useMemo(
+    () => ({ '--catalog-pane-width': String(catalogPaneWidth) } as React.CSSProperties),
+    [catalogPaneWidth],
+  );
 
   if (isLoading) {
     return <LoadingScreen message="Loading POS workstation..." />;
@@ -875,11 +1034,16 @@ export default function PosWorkstation() {
         </div>
       )}
 
-      <div className="workstation-grid">
+      <div
+        className={`workstation-grid ${isResizingCatalogPane ? 'resizing' : ''}`}
+        ref={workstationGridRef}
+        style={workstationGridStyle}
+      >
         <ProductPanel
+          activeCategory={activeCategory}
           activeCategoryId={activeCategoryId}
           activeSubcategory={activeSubcategory}
-          categories={categoryChips}
+          categories={categoryTiles}
           onAddProduct={addProductToCart}
           onCategoryChange={(nextCategory) => {
             setActiveCategoryId(nextCategory);
@@ -887,11 +1051,25 @@ export default function PosWorkstation() {
           }}
           onOpenSearch={() => setIsSearchOpen(true)}
           onSubcategoryChange={setActiveSubcategory}
-          productView={productView}
           products={visibleProducts}
-          setProductView={setProductView}
-          subcategories={subcategoryChips}
+          subcategories={subcategoryTiles}
         />
+
+        <div
+          className={`panel-resizer ${isResizingCatalogPane ? 'active' : ''}`}
+          onDoubleClick={() => setCatalogPaneWidth(DEFAULT_CATALOG_PANE_WIDTH)}
+          onKeyDown={handleCatalogPaneResizeKeyDown}
+          onPointerDown={handleCatalogPaneResizeStart}
+          role="separator"
+          tabIndex={0}
+          aria-label="Resize catalog and cart panels"
+          aria-orientation="vertical"
+          aria-valuemin={MIN_CATALOG_PANE_WIDTH}
+          aria-valuemax={MAX_CATALOG_PANE_WIDTH}
+          aria-valuenow={Math.round(catalogPaneWidth)}
+        >
+          <span className="panel-resizer-handle" />
+        </div>
 
         <CartPanel
           activeHeldSaleId={activeHeldSaleId}
@@ -1252,20 +1430,38 @@ function HeaderBar(props: HeaderBarProps) {
 }
 
 type ProductPanelProps = {
+  activeCategory: CatalogCategoryTile | null;
   activeCategoryId: string;
   activeSubcategory: string | null;
-  categories: Array<{ id: string; name: string; chip: string; count: number }>;
+  categories: CatalogCategoryTile[];
   onAddProduct: (product: Product) => void;
   onCategoryChange: (nextCategory: string) => void;
   onOpenSearch: () => void;
   onSubcategoryChange: (nextSubcategory: string | null) => void;
-  productView: ProductViewMode;
   products: Product[];
-  setProductView: (view: ProductViewMode) => void;
-  subcategories: string[];
+  subcategories: CatalogSubcategoryTile[];
 };
 
 function ProductPanel(props: ProductPanelProps) {
+  const isRootView = props.activeCategoryId === 'all';
+  const isSubcategoryView = props.activeSubcategory != null;
+  const selectedCategory = isRootView ? null : props.activeCategory;
+  const rootCategories = props.categories.filter((category) => category.id !== 'all');
+  const scopeLabel = props.activeSubcategory ?? selectedCategory?.name ?? 'Catalog';
+
+  const handleNavigateRoot = () => {
+    props.onCategoryChange('all');
+    props.onSubcategoryChange(null);
+  };
+
+  const handleNavigateUp = () => {
+    if (isSubcategoryView) {
+      props.onSubcategoryChange(null);
+      return;
+    }
+    handleNavigateRoot();
+  };
+
   return (
     <section className="glass-panel product-panel">
       <div className="panel-head">
@@ -1273,85 +1469,156 @@ function ProductPanel(props: ProductPanelProps) {
           <span className="search-copy">Search products, SKU, or barcode</span>
           <kbd className="kbd">F3</kbd>
         </button>
-        <div className="seg-toggle">
-          <button
-            className={props.productView === 'list' ? 'active' : ''}
-            onClick={() => props.setProductView('list')}
-          >
-            List
-          </button>
-          <button
-            className={props.productView === 'tile' ? 'active' : ''}
-            onClick={() => props.setProductView('tile')}
-          >
-            Tiles
-          </button>
+        <div className="catalog-mode-pill">
+          Tile catalog
         </div>
       </div>
 
-      <div className="category-rail">
-        {props.categories.map((category) => (
-          <button
-            key={category.id}
-            className={`category-chip ${props.activeCategoryId === category.id ? 'active' : ''}`}
-            onClick={() => props.onCategoryChange(category.id)}
-          >
-            <span className="category-token">{category.chip}</span>
-            <span className="category-name">{category.name}</span>
-            <span className="category-count">{formatInteger(category.count)}</span>
-          </button>
-        ))}
-      </div>
+      <div className="catalog-browser">
+        <div className="catalog-toolbar">
+          <div className="catalog-toolbar-main">
+            <div className="catalog-breadcrumbs" aria-label="Catalog path">
+              <button
+                className={`catalog-crumb ${isRootView ? 'current' : ''}`}
+                onClick={handleNavigateRoot}
+              >
+                Catalog
+              </button>
+              {selectedCategory != null && (
+                <>
+                  <span className="catalog-crumb-separator">/</span>
+                  <button
+                    className={`catalog-crumb ${!isSubcategoryView ? 'current' : ''}`}
+                    onClick={() => props.onSubcategoryChange(null)}
+                  >
+                    {selectedCategory.name}
+                  </button>
+                </>
+              )}
+              {props.activeSubcategory != null && (
+                <>
+                  <span className="catalog-crumb-separator">/</span>
+                  <span className="catalog-crumb current">{props.activeSubcategory}</span>
+                </>
+              )}
+            </div>
 
-      {props.subcategories.length > 0 && (
-        <div className="subcategory-rail">
-          <button
-            className={`subcategory-chip ${props.activeSubcategory == null ? 'active' : ''}`}
-            onClick={() => props.onSubcategoryChange(null)}
-          >
-            All
-          </button>
-          {props.subcategories.map((subcategory) => (
-            <button
-              key={subcategory}
-              className={`subcategory-chip ${props.activeSubcategory === subcategory ? 'active' : ''}`}
-              onClick={() => props.onSubcategoryChange(subcategory)}
-            >
-              {subcategory}
+            <div className="section-title">
+              {isRootView
+                ? 'Catalog Root'
+                : props.activeSubcategory ?? selectedCategory?.name ?? 'Catalog'}
+            </div>
+            <div className="section-copy">
+              {isRootView
+                ? 'Open a category folder to browse its subcategories and products.'
+                : isSubcategoryView
+                  ? `Viewing the products inside ${props.activeSubcategory}.`
+                  : `Open a subcategory folder or add products directly from ${selectedCategory?.name ?? 'this category'}.`}
+            </div>
+          </div>
+          {!isRootView && (
+            <button className="ghost-button small" onClick={handleNavigateUp}>
+              Up one level
             </button>
-          ))}
+          )}
         </div>
-      )}
 
-      <div className="product-meta">
-        <span>{formatInteger(props.products.length)} products</span>
-        <span>Sorted by SKU</span>
-      </div>
-
-      <div className={props.productView === 'tile' ? 'product-tile-grid' : 'product-list'}>
-        {props.products.map((product) => (
-          props.productView === 'tile' ? (
-            <button key={product.id} className="product-tile" onClick={() => props.onAddProduct(product)}>
-              <div className="product-thumb">{getCategoryToken(product.subcategory || product.name)}</div>
-              <div className="product-name">{product.name}</div>
-              <div className="product-meta-line">{product.sku} - {product.subcategory}</div>
-              <div className="product-price">{formatCurrency(product.priceTiers[0]?.price ?? 0)}</div>
-              <div className="product-stock">Stock {formatInteger(product.stockOnHand)}</div>
-            </button>
+        {isRootView ? (
+          rootCategories.length === 0 ? (
+            <div className="empty-state product-empty">
+              <div className="empty-token">CAT</div>
+              <div className="empty-title">No categories available</div>
+              <div className="empty-copy">Load the catalog before browsing products.</div>
+            </div>
           ) : (
-            <button key={product.id} className="product-row" onClick={() => props.onAddProduct(product)}>
-              <div className="product-thumb compact">{getCategoryToken(product.subcategory || product.name)}</div>
-              <div className="product-row-copy">
-                <div className="product-name">{product.name}</div>
-                <div className="product-meta-line">{product.sku} - {product.subcategory} - {product.unitLabel}</div>
+            <div className="catalog-section">
+              <div className="product-meta">
+                <span>{formatInteger(rootCategories.length)} categories</span>
+                <span>Root folders</span>
               </div>
-              <div className="product-row-side">
-                <div className="product-price">{formatCurrency(product.priceTiers[0]?.price ?? 0)}</div>
-                <div className="product-stock">Stock {formatInteger(product.stockOnHand)}</div>
+              <div className="catalog-tile-grid category-tile-grid">
+                {rootCategories.map((category) => (
+                  <button
+                    key={category.id}
+                    className="catalog-tile category-tile"
+                    onClick={() => props.onCategoryChange(category.id)}
+                  >
+                    <div className="catalog-tile-main">
+                      <div className="catalog-token">{category.chip}</div>
+                      <div className="catalog-copy">
+                        <div className="catalog-name">{category.name}</div>
+                        <div className="catalog-caption">Open folder</div>
+                      </div>
+                    </div>
+                    <div className="catalog-metrics">
+                      <span>{formatInteger(category.count)} items</span>
+                      <span>{formatInteger(category.subcategoryCount)} subcategories</span>
+                    </div>
+                  </button>
+                ))}
               </div>
-            </button>
+            </div>
           )
-        ))}
+        ) : (
+          <>
+            {!isSubcategoryView && props.subcategories.length > 0 && (
+              <div className="catalog-section">
+                <div className="product-meta">
+                  <span>{formatInteger(props.subcategories.length)} subcategories</span>
+                  <span>{selectedCategory?.name ?? 'Category'} folders</span>
+                </div>
+
+                <div className="catalog-tile-grid subcategory-tile-grid">
+                  {props.subcategories.map((subcategory) => (
+                    <button
+                      key={subcategory.name}
+                      className="subcategory-tile"
+                      onClick={() => props.onSubcategoryChange(subcategory.name)}
+                    >
+                      <div className="subcategory-main">
+                        <div className="catalog-token small">{subcategory.chip}</div>
+                        <div className="catalog-copy">
+                          <div className="catalog-name">{subcategory.name}</div>
+                          <div className="catalog-caption">Open folder</div>
+                        </div>
+                      </div>
+                      <div className="catalog-metrics single">
+                        <span>{formatInteger(subcategory.count)} items</span>
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            <div className="product-results">
+              <div className="product-meta">
+                <span>{formatInteger(props.products.length)} products</span>
+                <span>{scopeLabel} | Sorted by SKU</span>
+              </div>
+
+              {props.products.length === 0 ? (
+                <div className="empty-state product-empty">
+                  <div className="empty-token">{selectedCategory?.chip ?? 'AL'}</div>
+                  <div className="empty-title">No products in this view</div>
+                  <div className="empty-copy">Pick another folder or use search to continue.</div>
+                </div>
+              ) : (
+                <div className="product-tile-grid">
+                  {props.products.map((product) => (
+                    <button key={product.id} className="product-tile" onClick={() => props.onAddProduct(product)}>
+                      <div className="product-thumb">{getCategoryToken(product.subcategory || product.name)}</div>
+                      <div className="product-name">{product.name}</div>
+                      <div className="product-meta-line">{product.sku} - {product.subcategory}</div>
+                      <div className="product-price">{formatCurrency(product.priceTiers[0]?.price ?? 0)}</div>
+                      <div className="product-stock">Stock {formatInteger(product.stockOnHand)}</div>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          </>
+        )}
       </div>
     </section>
   );
