@@ -5,6 +5,7 @@ import {
   CompleteSaleInput,
   Customer,
   HeldSaleSummary,
+  POSSyncRunResult,
   PaymentInput,
   PaymentMethod,
   POSBootstrap,
@@ -768,9 +769,15 @@ export default function PosWorkstation() {
   const handleSyncNow = useCallback(async () => {
     setIsSyncing(true);
     try {
-      await syncNow();
+      const result = await syncNow();
       await refreshWorkspace();
-      showNotice('success', 'Playback sync finished.');
+      const failureMessage = getSyncRunError(result);
+      if (failureMessage) {
+        showNotice('error', failureMessage);
+        return;
+      }
+
+      showNotice('success', formatSyncRunSuccess(result));
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Sync failed';
       showNotice('error', message);
@@ -851,9 +858,11 @@ export default function PosWorkstation() {
         onSignOut={handleSignOut}
         onOpenSync={() => navigate('/sync')}
         onSync={handleSyncNow}
+        needsSyncAuth={Boolean(syncStatus?.needsSyncAuth)}
         onZReport={() => void handleOpenZReport()}
         pendingEvents={syncStatus?.pendingEvents ?? 0}
         syncBadge={syncBadge}
+        syncOnline={Boolean(syncStatus?.online && !syncStatus?.needsSyncAuth)}
         terminalCode={terminalCode}
         terminalName={terminalName}
         todayBills={todaySales.length}
@@ -1179,12 +1188,14 @@ type HeaderBarProps = {
   conflictCount: number;
   isSyncing: boolean;
   onCashAction: () => void;
+  needsSyncAuth: boolean;
   onOpenSync: () => void;
   onSignOut: () => void;
   onSync: () => void;
   onZReport: () => void;
   pendingEvents: number;
   syncBadge: string;
+  syncOnline: boolean;
   terminalCode: string;
   terminalName: string;
   todayBills: number;
@@ -1201,7 +1212,7 @@ function HeaderBar(props: HeaderBarProps) {
           <div className="header-subtitle">{props.terminalCode} - {props.terminalName}</div>
         </div>
         <div className="status-pill">
-          <span className={`status-dot ${props.syncBadge.startsWith('Online') ? 'online' : 'offline'}`} />
+          <span className={`status-dot ${props.syncOnline ? 'online' : 'offline'}`} />
           {props.syncBadge}
         </div>
         {props.activeShift != null ? (
@@ -1211,6 +1222,7 @@ function HeaderBar(props: HeaderBarProps) {
         ) : (
           <div className="status-pill warning">No active shift</div>
         )}
+        {props.needsSyncAuth && <div className="status-pill danger">Reconnect host sync</div>}
         {props.pendingEvents > 0 && <div className="status-pill warning">{props.pendingEvents} pending</div>}
         {props.conflictCount > 0 && <div className="status-pill danger">{props.conflictCount} conflicts</div>}
       </div>
@@ -2333,10 +2345,12 @@ function formatSyncBadge(status: SyncStatusSummary | null): string {
     return 'Sync status unavailable';
   }
 
-  const state = status.online ? 'Online' : 'Offline';
+  const state = status.needsSyncAuth ? 'Auth needed' : status.online ? 'Online' : 'Offline';
   const parts = [state];
   if (status.pendingEvents > 0) {
     parts.push(`${status.pendingEvents} pending`);
+  } else if (status.needsSyncAuth) {
+    parts.push('Reconnect');
   } else {
     parts.push('Synced');
   }
@@ -2367,4 +2381,42 @@ function isToday(value: string): boolean {
 
 function roundToMoney(value: number): number {
   return Math.round(value * 100) / 100;
+}
+
+function getSyncRunError(result: POSSyncRunResult): string | null {
+  if (result.status.needsSyncAuth) {
+    return 'Host sync authentication is required. Open Sync Center and reconnect host sync.';
+  }
+
+  if (result.status.lastError) {
+    return result.status.lastError;
+  }
+
+  if (!result.status.online && result.status.pendingEvents > 0) {
+    return 'Sync did not finish. Pending local events are still queued.';
+  }
+
+  return null;
+}
+
+function formatSyncRunSuccess(result: POSSyncRunResult): string {
+  const parts: string[] = [];
+
+  if (result.accepted > 0) {
+    parts.push(`${result.accepted} local event${result.accepted === 1 ? '' : 's'} sent`);
+  }
+
+  if (result.remoteApplied > 0) {
+    parts.push(`${result.remoteApplied} remote event${result.remoteApplied === 1 ? '' : 's'} applied`);
+  }
+
+  if (result.conflicts > 0) {
+    parts.push(`${result.conflicts} conflict${result.conflicts === 1 ? '' : 's'} recorded`);
+  }
+
+  if (parts.length === 0) {
+    return 'Playback sync finished. Workstation is already up to date.';
+  }
+
+  return `Playback sync finished. ${parts.join(', ')}.`;
 }

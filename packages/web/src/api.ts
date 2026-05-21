@@ -2,6 +2,7 @@ import {
   CompleteSaleInput,
   POSAuthLoginInput,
   POSAuthResult,
+  POSSyncRunResult,
   POSSyncTokenResult,
   Product,
   POSSyncDashboard,
@@ -69,8 +70,12 @@ export async function logout(token: string): Promise<void> {
   await postJson<{ ok: true }>('/auth/logout', {}, { token });
 }
 
-export async function refreshHostSyncAuth(password: string, token: string): Promise<POSSyncTokenResult> {
-  return postJson<POSSyncTokenResult>('/auth/sync-token', { password }, { token });
+export async function refreshHostSyncAuth(
+  identifier: string,
+  password: string,
+  token: string,
+): Promise<POSSyncTokenResult> {
+  return postJson<POSSyncTokenResult>('/auth/sync-token', { identifier, password }, { token });
 }
 
 export async function bootstrapPOS(options?: { deviceId?: string; terminalId?: string }): Promise<POSBootstrap> {
@@ -157,8 +162,8 @@ export async function getSyncDashboard(options?: { deviceId?: string; terminalId
   return getJson<POSSyncDashboard>(`/local/sync/dashboard${params.size > 0 ? `?${params.toString()}` : ''}`);
 }
 
-export async function syncNow(options?: { deviceId?: string; terminalId?: string }) {
-  return postJson('/local/sync/now', {
+export async function syncNow(options?: { deviceId?: string; terminalId?: string }): Promise<POSSyncRunResult> {
+  return postJson<POSSyncRunResult>('/local/sync/now', {
     deviceId: options?.deviceId,
     terminalId: options?.terminalId,
   });

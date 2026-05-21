@@ -30,6 +30,7 @@ import prisma from '../prisma';
 import {
   getLocalPosDeviceId,
   getLocalPosTerminalId,
+  getPosSyncAppToken,
   getPosUpstreamUrl,
   isLocalPosBackendMode,
 } from '../localMode';
@@ -49,6 +50,9 @@ import {
 } from './syncCredentials';
 
 type Tx = Prisma.TransactionClient;
+const POS_SYNC_APP_TOKEN_HEADER = 'x-jingles-pos-app-token';
+const POS_SYNC_APP_TOKEN_REJECTED_ERROR =
+  'The POS app sync token was rejected by the inventory backend. Check the shared POS sync token configuration.';
 
 function parseJson<T>(value: unknown, fallback: T): T {
   if (value == null) {
@@ -1058,12 +1062,13 @@ async function buildLocalSyncStatusInTransaction(
   deviceId: string,
   terminalId: string,
 ): Promise<SyncStatusSummary> {
+  const appToken = getPosSyncAppToken();
   const [state, pendingEvents, conflictCount, localVectorClock, syncAuth] = await Promise.all([
     tx.syncDeviceState.findUnique({ where: { deviceId } }),
     tx.syncEvent.count({ where: { state: SyncEventState.PENDING } }),
     tx.syncConflict.count({ where: { status: SyncConflictStatus.OPEN } }),
     getServerVectorClock(tx),
-    readStoredSyncAuth(tx),
+    appToken ? Promise.resolve(null) : readStoredSyncAuth(tx),
   ]);
 
   return {
@@ -1074,10 +1079,14 @@ async function buildLocalSyncStatusInTransaction(
     localVectorClock,
     remoteVectorClock: normalizeClock(state?.confirmedVectorClock),
     lastSyncAt: state?.lastSyncAt?.toISOString(),
-    lastError: state?.lastError ?? undefined,
-    syncAuthConfigured: Boolean(syncAuth?.token),
+    lastError:
+      appToken && state?.lastError === HOST_SYNC_AUTH_REQUIRED_ERROR
+        ? undefined
+        : state?.lastError ?? undefined,
+    syncAuthConfigured: Boolean(appToken || syncAuth?.token),
     syncAuthIdentity: syncAuth?.identity,
-    needsSyncAuth: !syncAuth?.token,
+    syncAuthMode: appToken ? 'app_token' : syncAuth?.token ? 'user_token' : undefined,
+    needsSyncAuth: !appToken && !syncAuth?.token,
   };
 }
 
@@ -1252,8 +1261,9 @@ export async function appendRemoteEventsFromServer(
 }
 
 async function fetchUpstreamJson<T>(path: string, options?: { method?: 'GET' | 'POST'; body?: unknown }) {
-  const syncAuth = await readStoredSyncAuth();
-  if (!syncAuth?.token) {
+  const appToken = getPosSyncAppToken();
+  const syncAuth = appToken ? null : await readStoredSyncAuth();
+  if (!appToken && !syncAuth?.token) {
     throw new Error(HOST_SYNC_AUTH_REQUIRED_ERROR);
   }
 
@@ -1261,7 +1271,9 @@ async function fetchUpstreamJson<T>(path: string, options?: { method?: 'GET' | '
     method: options?.method ?? 'GET',
     headers: {
       'Content-Type': 'application/json',
-      Authorization: `Bearer ${syncAuth.token}`,
+      ...(appToken
+        ? { [POS_SYNC_APP_TOKEN_HEADER]: appToken }
+        : { Authorization: `Bearer ${syncAuth!.token}` }),
     },
     ...(typeof options?.body === 'undefined'
       ? {}
@@ -1271,8 +1283,12 @@ async function fetchUpstreamJson<T>(path: string, options?: { method?: 'GET' | '
   if (!response.ok) {
     const payload = await response.json().catch(() => ({ error: `HTTP ${response.status}` })) as { error?: string };
     if (response.status === 401 || response.status === 403) {
-      await clearStoredSyncAuth();
-      throw new Error(HOST_SYNC_AUTH_REQUIRED_ERROR);
+      if (!appToken) {
+        await clearStoredSyncAuth(prisma, { preserveIdentity: true });
+        throw new Error(HOST_SYNC_AUTH_REQUIRED_ERROR);
+      }
+
+      throw new Error(POS_SYNC_APP_TOKEN_REJECTED_ERROR);
     }
 
     throw new Error(payload.error || `HTTP ${response.status}`);

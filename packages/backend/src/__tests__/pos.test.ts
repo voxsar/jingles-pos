@@ -6,6 +6,15 @@ const mockTx = {
     findUnique: jest.fn(),
     upsert: jest.fn(),
   },
+  syncEvent: {
+    count: jest.fn(),
+  },
+  syncConflict: {
+    count: jest.fn(),
+  },
+  configEntry: {
+    findUnique: jest.fn(),
+  },
   pOSShift: {
     findUnique: jest.fn(),
   },
@@ -16,14 +25,26 @@ jest.mock('../prisma', () => ({
   default: {
     $transaction: async (callback: (tx: typeof mockTx) => unknown) => callback(mockTx),
     syncDeviceState: mockTx.syncDeviceState,
+    syncEvent: mockTx.syncEvent,
+    syncConflict: mockTx.syncConflict,
+    configEntry: mockTx.configEntry,
     pOSShift: mockTx.pOSShift,
   },
 }));
 
-const { buildZReport, confirmPlayback, getServerVectorClock } = require('../services/posSync') as typeof import('../services/posSync');
+const { buildZReport, confirmPlayback, getLocalSyncStatus, getServerVectorClock } = require('../services/posSync') as typeof import('../services/posSync');
+const originalPosSyncAppToken = process.env.JINGLES_POS_SYNC_APP_TOKEN;
+const originalLegacyPosSyncAppToken = process.env.POS_SYNC_APP_TOKEN;
 
 beforeEach(() => {
   jest.clearAllMocks();
+  process.env.JINGLES_POS_SYNC_APP_TOKEN = '';
+  process.env.POS_SYNC_APP_TOKEN = '';
+});
+
+afterAll(() => {
+  process.env.JINGLES_POS_SYNC_APP_TOKEN = originalPosSyncAppToken;
+  process.env.POS_SYNC_APP_TOKEN = originalLegacyPosSyncAppToken;
 });
 
 describe('event sourced POS backend services', () => {
@@ -112,5 +133,36 @@ describe('event sourced POS backend services', () => {
       countedDrawer: 650,
       variance: 10,
     });
+  });
+
+  it('treats the configured POS app token as workstation sync auth', async () => {
+    process.env.JINGLES_POS_SYNC_APP_TOKEN = 'shared-pos-token';
+    mockTx.syncDeviceState.findUnique.mockResolvedValue({
+      deviceId: 'device-term-03',
+      terminalId: 'terminal-03',
+      lastSequenceNum: 1,
+      confirmedVectorClock: '{}',
+      online: false,
+      lastError: 'Host sync authentication is required. Reconnect host sync.',
+      lastSyncAt: null,
+    });
+    mockTx.syncDeviceState.findMany.mockResolvedValue([
+      { deviceId: 'device-term-03', lastSequenceNum: 1 },
+    ]);
+    mockTx.syncEvent.count.mockResolvedValue(1);
+    mockTx.syncConflict.count.mockResolvedValue(0);
+
+    const status = await getLocalSyncStatus('device-term-03', 'terminal-03');
+
+    expect(status).toMatchObject({
+      deviceId: 'device-term-03',
+      pendingEvents: 1,
+      conflictCount: 0,
+      syncAuthConfigured: true,
+      syncAuthMode: 'app_token',
+      needsSyncAuth: false,
+      lastError: undefined,
+    });
+    expect(mockTx.configEntry.findUnique).not.toHaveBeenCalled();
   });
 });

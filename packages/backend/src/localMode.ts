@@ -33,3 +33,11 @@ export function getPosUpstreamUrl() {
 
   return trimTrailingSlash(configured);
 }
+
+export function getPosSyncAppToken() {
+  return (
+    process.env.JINGLES_POS_SYNC_APP_TOKEN?.trim() ||
+    process.env.POS_SYNC_APP_TOKEN?.trim() ||
+    ''
+  );
+}

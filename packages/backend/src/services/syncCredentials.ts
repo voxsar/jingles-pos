@@ -13,8 +13,8 @@ type ConfigStore = {
   };
 };
 
-type StoredSyncAuth = {
-  token: string;
+export type StoredSyncAuth = {
+  token?: string;
   userId?: string;
   identity?: string;
   updatedAt: string;
@@ -36,14 +36,18 @@ function parseStoredSyncAuth(value: string | null | undefined): StoredSyncAuth |
     const identity = 'identity' in parsed ? parsed.identity : null;
     const updatedAt = 'updatedAt' in parsed ? parsed.updatedAt : null;
 
-    if (typeof token !== 'string' || !token.trim()) {
+    const normalizedToken = typeof token === 'string' && token.trim() ? token.trim() : undefined;
+    const normalizedIdentity =
+      typeof identity === 'string' && identity.trim() ? identity.trim() : undefined;
+
+    if (!normalizedToken && !normalizedIdentity) {
       return null;
     }
 
     return {
-      token: token.trim(),
+      token: normalizedToken,
       userId: typeof userId === 'string' && userId.trim() ? userId.trim() : undefined,
-      identity: typeof identity === 'string' && identity.trim() ? identity.trim() : undefined,
+      identity: normalizedIdentity,
       updatedAt:
         typeof updatedAt === 'string' && updatedAt.trim()
           ? updatedAt
@@ -85,7 +89,33 @@ export async function storeStoredSyncAuth(
   });
 }
 
-export async function clearStoredSyncAuth(store: ConfigStore = prisma) {
+export async function clearStoredSyncAuth(
+  store: ConfigStore = prisma,
+  options?: { preserveIdentity?: boolean },
+) {
+  if (options?.preserveIdentity) {
+    const current = await readStoredSyncAuth(store);
+    if (current?.identity) {
+      await store.configEntry.upsert({
+        where: { key: HOST_SYNC_AUTH_KEY },
+        create: {
+          key: HOST_SYNC_AUTH_KEY,
+          value: JSON.stringify({
+            identity: current.identity,
+            updatedAt: new Date().toISOString(),
+          }),
+        },
+        update: {
+          value: JSON.stringify({
+            identity: current.identity,
+            updatedAt: new Date().toISOString(),
+          }),
+        },
+      });
+      return;
+    }
+  }
+
   await store.configEntry.deleteMany({
     where: { key: HOST_SYNC_AUTH_KEY },
   });

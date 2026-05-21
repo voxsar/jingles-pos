@@ -5,9 +5,14 @@ import prisma from '../prisma';
 import { getPosUpstreamUrl, isLocalPosBackendMode } from '../localMode';
 import { ensureSeedData } from '../seed';
 import {
-  clearStoredSyncAuth,
+  readStoredSyncAuth,
   storeStoredSyncAuth,
 } from '../services/syncCredentials';
+import {
+  clearStoredAuthSession,
+  getCachedAuthUserForToken,
+  storeAuthSession,
+} from '../services/authCache';
 
 const router = Router();
 const AUTH_SECRET =
@@ -59,6 +64,15 @@ function mapAuthUser(user: LocalAuthUser) {
   };
 }
 
+function mapStoredAuthUser(user: Pick<LocalAuthUser, 'id' | 'code' | 'email' | 'role'>): AuthPayload {
+  return {
+    id: user.id,
+    code: user.code,
+    email: user.email ?? undefined,
+    role: user.role,
+  };
+}
+
 async function findUserByIdentifier(identifier: string) {
   const normalized = identifier.trim();
   if (!normalized) {
@@ -88,17 +102,33 @@ function signToken(user: Pick<LocalAuthUser, 'id' | 'code' | 'email' | 'role'>) 
   );
 }
 
-function authenticate(req: AuthenticatedRequest, res: Response, next: NextFunction) {
+async function authenticate(req: AuthenticatedRequest, res: Response, next: NextFunction) {
   const header = req.headers.authorization;
   if (!header?.startsWith('Bearer ')) {
     res.status(401).json({ error: 'Missing authorization token' });
     return;
   }
 
+  const token = header.slice(7);
+
   try {
-    req.user = jwt.verify(header.slice(7), AUTH_SECRET) as AuthPayload;
+    req.user = jwt.verify(token, AUTH_SECRET) as AuthPayload;
     next();
   } catch {
+    if (isLocalPosBackendMode()) {
+      const cachedUser = await getCachedAuthUserForToken(token);
+      if (cachedUser) {
+        req.user = {
+          id: cachedUser.id,
+          code: cachedUser.code,
+          email: cachedUser.email ?? undefined,
+          role: cachedUser.role,
+        };
+        next();
+        return;
+      }
+    }
+
     res.status(401).json({ error: 'Invalid or expired token' });
   }
 }
@@ -118,6 +148,10 @@ function buildUnknownWorkstationUserError() {
 
 function looksLikeEmail(value: string) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value.trim());
+}
+
+function looksLikeLocalPlaceholderEmail(value: string | null | undefined) {
+  return typeof value === 'string' && value.trim().toLowerCase().endsWith('@jingles.local');
 }
 
 function parseUpstreamAuthPayload(payload: unknown): UpstreamAuthPayload | null {
@@ -290,11 +324,11 @@ async function requestUpstreamLogin(
     ? identifier.trim().toLowerCase()
     : existingUser?.email?.trim().toLowerCase() ?? '';
 
-  if (!email) {
+  if (!email || looksLikeLocalPlaceholderEmail(email)) {
     return {
       ok: false,
       status: 400,
-      error: 'Use the inventory email address for the first sign-in on this workstation.',
+      error: 'Use the real inventory email address for workstation sync and first-time hosted sign-in.',
     };
   }
 
@@ -407,14 +441,47 @@ async function tryLocalPasswordLogin(user: LocalAuthUser, password: string) {
 }
 
 async function rememberSyncAuthForUser(
-  user: Pick<LocalAuthUser, 'id' | 'email'>,
   upstreamUser: UpstreamAuthPayload,
 ) {
   await storeStoredSyncAuth({
     token: upstreamUser.token,
-    userId: user.id,
-    identity: user.email ?? upstreamUser.email,
+    identity: upstreamUser.email,
   });
+}
+
+async function resolveSyncIdentityInput(
+  identifier: string,
+): Promise<{ identifier: string; localUser: LocalAuthUser | null } | null> {
+  const requestedIdentifier = identifier.trim();
+  if (requestedIdentifier) {
+    return {
+      identifier: requestedIdentifier,
+      localUser: await findUserByIdentifier(requestedIdentifier),
+    };
+  }
+
+  const storedSyncAuth = await readStoredSyncAuth();
+  if (storedSyncAuth?.identity?.trim()) {
+    return {
+      identifier: storedSyncAuth.identity.trim(),
+      localUser: await findUserByIdentifier(storedSyncAuth.identity.trim()),
+    };
+  }
+
+  return null;
+}
+
+async function issueLocalSession(user: LocalAuthUser) {
+  const token = signToken(user);
+  await storeAuthSession({
+    token,
+    user: mapStoredAuthUser(user),
+  });
+
+  return {
+    token,
+    user: mapAuthUser(user),
+  };
 }
 
 router.post('/login', async (req: Request, res: Response) => {
@@ -433,18 +500,12 @@ router.post('/login', async (req: Request, res: Response) => {
       if (upstreamLogin?.ok) {
         const syncedUser = await upsertInventoryBackedUser(upstreamLogin.user, password, user);
         if (syncedUser) {
-          await rememberSyncAuthForUser(syncedUser, upstreamLogin.user);
-          return res.json({
-            token: signToken(syncedUser),
-            user: mapAuthUser(syncedUser),
-          });
+          await rememberSyncAuthForUser(upstreamLogin.user);
+          return res.json(await issueLocalSession(syncedUser));
         }
       }
 
-      return res.json({
-        token: signToken(user),
-        user: mapAuthUser(user),
-      });
+      return res.json(await issueLocalSession(user));
     }
 
     if (user && isSupportedPosRole(user.role) && user.pin === password) {
@@ -462,10 +523,7 @@ router.post('/login', async (req: Request, res: Response) => {
         return res.status(500).json({ error: 'POS login failed' });
       }
 
-      return res.json({
-        token: signToken(refreshedUser),
-        user: mapAuthUser(refreshedUser),
-      });
+      return res.json(await issueLocalSession(refreshedUser));
     }
 
     if (user && !isSupportedPosRole(user.role)) {
@@ -479,12 +537,9 @@ router.post('/login', async (req: Request, res: Response) => {
         return res.status(403).json({ error: 'This inventory account does not have POS access.' });
       }
 
-      await rememberSyncAuthForUser(syncedUser, upstreamLogin.user);
+      await rememberSyncAuthForUser(upstreamLogin.user);
 
-      return res.json({
-        token: signToken(syncedUser),
-        user: mapAuthUser(syncedUser),
-      });
+      return res.json(await issueLocalSession(syncedUser));
     }
 
     if (upstreamLogin && upstreamLogin.status >= 500) {
@@ -517,6 +572,7 @@ router.post('/sync-token', authenticate, async (req: AuthenticatedRequest, res: 
     }
 
     const password = typeof req.body.password === 'string' ? req.body.password.trim() : '';
+    const identifier = typeof req.body.identifier === 'string' ? req.body.identifier.trim() : '';
     if (!password) {
       return res.status(400).json({ error: 'Password is required' });
     }
@@ -528,30 +584,29 @@ router.post('/sync-token', authenticate, async (req: AuthenticatedRequest, res: 
       return res.status(404).json({ error: 'Authenticated user no longer exists' });
     }
 
-    if (!user.email) {
+    const syncIdentityInput = await resolveSyncIdentityInput(identifier);
+    if (!syncIdentityInput) {
       return res.status(400).json({
-        error: 'This POS user is not linked to an inventory email account yet.',
+        error: 'Enter the workstation host account before reconnecting sync.',
       });
     }
 
-    const upstreamLogin = await requestUpstreamLogin(user.email, password, user);
+    const upstreamLogin = await requestUpstreamLogin(
+      syncIdentityInput.identifier,
+      password,
+      syncIdentityInput.localUser,
+    );
     if (!upstreamLogin?.ok) {
       return res.status(upstreamLogin?.status ?? 503).json({
         error: upstreamLogin?.error ?? 'Unable to refresh host sync authentication.',
       });
     }
 
-    const syncedUser = await upsertInventoryBackedUser(upstreamLogin.user, password, user);
-    if (!syncedUser) {
-      return res.status(403).json({ error: 'This inventory account does not have POS access.' });
-    }
-
-    await rememberSyncAuthForUser(syncedUser, upstreamLogin.user);
+    await rememberSyncAuthForUser(upstreamLogin.user);
 
     return res.json({
       syncAuthConfigured: true,
-      syncAuthIdentity: syncedUser.email ?? upstreamLogin.user.email,
-      userId: syncedUser.id,
+      syncAuthIdentity: upstreamLogin.user.email,
     });
   } catch (error) {
     console.error(error);
@@ -578,7 +633,7 @@ router.get('/me', authenticate, async (req: AuthenticatedRequest, res: Response)
 });
 
 router.post('/logout', async (_req: Request, res: Response) => {
-  await clearStoredSyncAuth();
+  await clearStoredAuthSession();
   res.json({ ok: true });
 });
 

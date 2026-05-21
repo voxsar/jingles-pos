@@ -326,6 +326,7 @@ export interface SyncStatusSummary {
   lastError?: string;
   syncAuthConfigured?: boolean;
   syncAuthIdentity?: string;
+  syncAuthMode?: 'app_token' | 'user_token';
   needsSyncAuth?: boolean;
 }
 
@@ -342,7 +343,7 @@ export interface POSAuthResult {
 export interface POSSyncTokenResult {
   syncAuthConfigured: boolean;
   syncAuthIdentity?: string;
-  userId: string;
+  userId?: string;
 }
 
 export interface SyncHandshakeRequest {
@@ -388,4 +389,11 @@ export interface POSSyncDashboard {
   pendingEvents: SyncEvent[];
   recentEvents: SyncEvent[];
   conflicts: SyncConflict[];
+}
+
+export interface POSSyncRunResult {
+  accepted: number;
+  remoteApplied: number;
+  conflicts: number;
+  status: SyncStatusSummary;
 }

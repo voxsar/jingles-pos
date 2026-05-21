@@ -11,6 +11,26 @@ function readClockEntries(clock?: Record<string, number>) {
   return Object.entries(clock ?? {}) as Array<[string, number]>;
 }
 
+function getSyncRunError(result: Awaited<ReturnType<typeof syncNow>>): string | null {
+  if (result.status.needsSyncAuth) {
+    return 'Host sync authentication is required. Reconnect host sync for this workstation.';
+  }
+
+  if (result.status.lastError) {
+    return result.status.lastError;
+  }
+
+  if (!result.status.online && result.status.pendingEvents > 0) {
+    return 'Sync did not finish. Pending local events are still queued.';
+  }
+
+  return null;
+}
+
+function looksLikeLocalPlaceholderIdentity(value: string | null | undefined) {
+  return typeof value === 'string' && value.trim().toLowerCase().endsWith('@jingles.local');
+}
+
 export default function SyncPage() {
   const navigate = useNavigate();
   const { logout, token, user } = useAuth();
@@ -18,6 +38,7 @@ export default function SyncPage() {
   const [isLoading, setIsLoading] = useState(true);
   const [isSyncing, setIsSyncing] = useState(false);
   const [isRefreshingSyncAuth, setIsRefreshingSyncAuth] = useState(false);
+  const [syncIdentity, setSyncIdentity] = useState('');
   const [syncPassword, setSyncPassword] = useState('');
   const [error, setError] = useState<string | null>(null);
 
@@ -56,10 +77,18 @@ export default function SyncPage() {
     };
   }, [loadDashboard]);
 
+  useEffect(() => {
+    const nextIdentity = dashboard?.status?.syncAuthIdentity?.trim();
+    if (!syncIdentity.trim() && nextIdentity) {
+      setSyncIdentity(nextIdentity);
+    }
+  }, [dashboard?.status?.syncAuthIdentity, syncIdentity]);
+
   const handleSyncNow = useCallback(async () => {
     setIsSyncing(true);
     try {
-      await syncNow();
+      const result = await syncNow();
+      setError(getSyncRunError(result));
       await loadDashboard({ silent: true });
     } catch (nextError) {
       setError(nextError instanceof Error ? nextError.message : 'Sync failed');
@@ -74,6 +103,11 @@ export default function SyncPage() {
       return;
     }
 
+    if (!syncIdentity.trim()) {
+      setError('Enter the workstation host account before reconnecting sync.');
+      return;
+    }
+
     if (!syncPassword.trim()) {
       setError('Enter the host password to reconnect sync.');
       return;
@@ -81,7 +115,7 @@ export default function SyncPage() {
 
     setIsRefreshingSyncAuth(true);
     try {
-      await refreshHostSyncAuth(syncPassword, token);
+      await refreshHostSyncAuth(syncIdentity, syncPassword, token);
       setSyncPassword('');
       setError(null);
       await loadDashboard({ silent: true });
@@ -90,7 +124,7 @@ export default function SyncPage() {
     } finally {
       setIsRefreshingSyncAuth(false);
     }
-  }, [loadDashboard, syncPassword, token]);
+  }, [loadDashboard, syncIdentity, syncPassword, token]);
 
   const handleLogout = useCallback(async () => {
     await logout();
@@ -100,8 +134,16 @@ export default function SyncPage() {
   const status = dashboard?.status ?? null;
   const localClockEntries = readClockEntries(status?.localVectorClock);
   const remoteClockEntries = readClockEntries(status?.remoteVectorClock);
-  const syncIdentity = status?.syncAuthIdentity ?? user?.email ?? null;
-  const shouldShowSyncAuthCard = Boolean(status?.needsSyncAuth || status?.syncAuthConfigured || user?.email);
+  const savedSyncIdentity = status?.syncAuthIdentity ?? null;
+  const activeSyncIdentity = syncIdentity.trim() || savedSyncIdentity;
+  const usesAppToken = status?.syncAuthMode === 'app_token';
+  const hasLocalOnlySyncIdentity = !usesAppToken && looksLikeLocalPlaceholderIdentity(activeSyncIdentity);
+  const shouldShowSyncAuthCard = Boolean(status?.needsSyncAuth || status?.syncAuthConfigured || savedSyncIdentity);
+  const bannerMessage = error ?? (
+    status?.needsSyncAuth
+      ? 'Host sync authentication is required. Reconnect host sync for this workstation.'
+      : null
+  );
 
   return (
     <div className="screen-fill workstation-app sync-page">
@@ -133,9 +175,9 @@ export default function SyncPage() {
         </div>
       </header>
 
-      {error && (
+      {bannerMessage && (
         <div className="toast-banner error">
-          {error}
+          {bannerMessage}
         </div>
       )}
 
@@ -159,33 +201,62 @@ export default function SyncPage() {
 
           {shouldShowSyncAuthCard && (
             <section className="glass-panel sync-card">
-              <div className="sync-card-title">Host sync authentication</div>
+              <div className="sync-card-title">Sync authentication</div>
               <div className="sync-auth-copy">
-                {status?.syncAuthConfigured
-                  ? `Host sync is currently authenticated${syncIdentity ? ` as ${syncIdentity}` : ''}.`
-                  : `Host sync needs an inventory backend token${syncIdentity ? ` for ${syncIdentity}` : ''}.`}
+                {usesAppToken
+                  ? 'This workstation sync uses the configured POS app token. Cashier sign-in is not used for upstream sync.'
+                  : status?.syncAuthConfigured
+                  ? `Workstation sync is currently authenticated${savedSyncIdentity ? ` as ${savedSyncIdentity}` : ''}.`
+                  : savedSyncIdentity
+                    ? `This workstation will reconnect host sync as ${savedSyncIdentity}.`
+                    : 'This workstation needs a host sync account before it can push or pull.'}
               </div>
-              <label className="label-block" htmlFor="sync-host-password">
-                Host password
-              </label>
-              <input
-                id="sync-host-password"
-                autoComplete="current-password"
-                className="glass-input"
-                onChange={(event) => setSyncPassword(event.target.value)}
-                placeholder="Enter inventory password"
-                type="password"
-                value={syncPassword}
-              />
-              <div className="sync-auth-actions">
-                <button
-                  className="btn-primary"
-                  disabled={isRefreshingSyncAuth || !user?.email}
-                  onClick={() => void handleRefreshSyncAuth()}
-                >
-                  {isRefreshingSyncAuth ? 'Reconnecting...' : 'Reconnect host sync'}
-                </button>
-              </div>
+              {usesAppToken && (
+                <div className="sync-auth-copy">
+                  Set the same `JINGLES_POS_SYNC_APP_TOKEN` on this desktop app and the hosted inventory backend.
+                </div>
+              )}
+              {hasLocalOnlySyncIdentity && (
+                <div className="sync-auth-copy">
+                  The local `.local` cashier address will not work upstream. Enter the real inventory email for workstation sync.
+                </div>
+              )}
+              {!usesAppToken && (
+                <>
+                  <label className="label-block" htmlFor="sync-host-identity">
+                    Host account
+                  </label>
+                  <input
+                    id="sync-host-identity"
+                    autoComplete="username"
+                    className="glass-input"
+                    onChange={(event) => setSyncIdentity(event.target.value)}
+                    placeholder="Enter real inventory email for workstation sync"
+                    value={syncIdentity}
+                  />
+                  <label className="label-block" htmlFor="sync-host-password">
+                    Host password
+                  </label>
+                  <input
+                    id="sync-host-password"
+                    autoComplete="current-password"
+                    className="glass-input"
+                    onChange={(event) => setSyncPassword(event.target.value)}
+                    placeholder="Enter inventory password"
+                    type="password"
+                    value={syncPassword}
+                  />
+                  <div className="sync-auth-actions">
+                    <button
+                      className="btn-primary"
+                      disabled={isRefreshingSyncAuth}
+                      onClick={() => void handleRefreshSyncAuth()}
+                    >
+                      {isRefreshingSyncAuth ? 'Reconnecting...' : 'Reconnect host sync'}
+                    </button>
+                  </div>
+                </>
+              )}
             </section>
           )}
 
