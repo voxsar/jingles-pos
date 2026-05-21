@@ -1,10 +1,11 @@
-import { Router, Request, Response } from 'express';
+import { Router, Request, Response, NextFunction } from 'express';
 import { v4 as uuidv4 } from 'uuid';
 import {
   CompleteSaleInput,
   HeldSaleSummary,
   POSBootstrap,
   SaleStatus,
+  SharedCatalogSnapshot,
   ShiftStatus,
   SyncConflictStatus,
   SyncEventType,
@@ -19,8 +20,20 @@ import {
   getServerVectorClock,
   playbackEvents,
 } from '../services/posSync';
+import { syncSharedCatalogProjection } from '../sharedInventory';
 
 const router = Router();
+
+router.use(async (_req: Request, res: Response, next: NextFunction) => {
+  try {
+    await ensureSeedData();
+    res.locals.sharedCatalog = await syncSharedCatalogProjection();
+    next();
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Shared inventory catalog is unavailable' });
+  }
+});
 
 function parseJson<T>(value: unknown, fallback: T): T {
   if (value == null) {
@@ -68,6 +81,16 @@ function mapProduct(product: any) {
       isDefault: tier.isDefault ?? false,
     })),
   };
+}
+
+async function getProjectedProducts(catalog: SharedCatalogSnapshot) {
+  const rows = await prisma.product.findMany({
+    include: { batchPrices: true },
+    orderBy: { sku: 'asc' },
+  });
+
+  const projectedById = new Map(rows.map((row) => [row.id, mapProduct(row)]));
+  return catalog.products.map((product) => projectedById.get(product.id) ?? product);
 }
 
 function mapTerminal(terminal: any, branchMap: Map<string, any>) {
@@ -221,15 +244,13 @@ async function getUserMap(): Promise<Map<string, any>> {
 
 router.get('/bootstrap', async (req: Request, res: Response) => {
   try {
-    await ensureSeedData();
     const terminalId = typeof req.query.terminalId === 'string' ? req.query.terminalId : undefined;
-    const [branches, terminals, users, customers, categories, products, activeShift, heldSales, serverClock, conflictCount] = await Promise.all([
+    const catalog = res.locals.sharedCatalog as SharedCatalogSnapshot;
+    const [branches, terminals, users, customers, activeShift, heldSales, serverClock, conflictCount, products] = await Promise.all([
       prisma.branch.findMany({ orderBy: { code: 'asc' } }),
       prisma.terminal.findMany({ orderBy: { code: 'asc' } }),
       prisma.pOSUser.findMany({ orderBy: { code: 'asc' } }),
       prisma.customer.findMany({ orderBy: { name: 'asc' } }),
-      prisma.category.findMany({ orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }] }),
-      prisma.product.findMany({ include: { batchPrices: true }, orderBy: { sku: 'asc' } }),
       prisma.pOSShift.findFirst({
         where: {
           terminalId: terminalId ?? undefined,
@@ -244,6 +265,7 @@ router.get('/bootstrap', async (req: Request, res: Response) => {
       }),
       getServerVectorClock(),
       prisma.syncConflict.count({ where: { status: SyncConflictStatus.OPEN } }),
+      getProjectedProducts(catalog),
     ]);
 
     const userMap = new Map(users.map((user) => [user.id, user]));
@@ -253,8 +275,8 @@ router.get('/bootstrap', async (req: Request, res: Response) => {
       terminals: terminals.map((terminal) => mapTerminal(terminal, branchMap)),
       users: users.map(mapUser),
       customers: customers.map(mapCustomer),
-      categories: categories.map(mapCategory),
-      products: products.map(mapProduct),
+      categories: catalog.categories,
+      products,
       activeShift: activeShift ? mapShift(activeShift, userMap) : null,
       heldSales: heldSales.map((heldSale) => mapHeldSale(heldSale, userMap)),
       syncStatus: {
@@ -275,29 +297,30 @@ router.get('/bootstrap', async (req: Request, res: Response) => {
   }
 });
 
+router.get('/catalog/snapshot', async (_req: Request, res: Response) => {
+  const catalog = res.locals.sharedCatalog as SharedCatalogSnapshot;
+  return res.json(catalog);
+});
+
 router.get('/products/search', async (req: Request, res: Response) => {
   try {
-    await ensureSeedData();
+    const catalog = res.locals.sharedCatalog as SharedCatalogSnapshot;
     const q = typeof req.query.q === 'string' ? req.query.q.trim() : '';
     if (!q) {
       return res.status(400).json({ error: 'Query parameter q is required' });
     }
 
-    const rows = await prisma.product.findMany({
-      where: {
-        OR: [
-          { sku: { contains: q } },
-          { name: { contains: q } },
-          { barcode: q },
-          { subcategory: { contains: q } },
-        ],
-      },
-      include: { batchPrices: true },
-      take: 30,
-      orderBy: { sku: 'asc' },
-    });
+    const term = q.toLowerCase();
+    const rows = (await getProjectedProducts(catalog))
+      .filter((product) => (
+        product.sku.toLowerCase().includes(term) ||
+        product.name.toLowerCase().includes(term) ||
+        (product.barcode?.toLowerCase() ?? '') === term ||
+        product.subcategory.toLowerCase().includes(term)
+      ))
+      .slice(0, 30);
 
-    return res.json(rows.map(mapProduct));
+    return res.json(rows);
   } catch (error) {
     console.error(error);
     return res.status(500).json({ error: 'Product search failed' });
@@ -306,17 +329,15 @@ router.get('/products/search', async (req: Request, res: Response) => {
 
 router.get('/products/barcode/:barcode', async (req: Request, res: Response) => {
   try {
-    await ensureSeedData();
-    const row = await prisma.product.findUnique({
-      where: { barcode: req.params.barcode },
-      include: { batchPrices: true },
-    });
+    const catalog = res.locals.sharedCatalog as SharedCatalogSnapshot;
+    const row = (await getProjectedProducts(catalog))
+      .find((product) => product.barcode === req.params.barcode);
 
     if (!row) {
       return res.status(404).json({ error: 'Product not found' });
     }
 
-    return res.json(mapProduct(row));
+    return res.json(row);
   } catch (error) {
     console.error(error);
     return res.status(500).json({ error: 'Barcode lookup failed' });

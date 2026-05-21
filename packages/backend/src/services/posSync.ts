@@ -22,6 +22,11 @@ import {
   ZReportSummary,
 } from '@jingles/shared';
 import prisma from '../prisma';
+import {
+  applySharedInventoryReturn,
+  applySharedInventorySale,
+  applySharedInventoryVoid,
+} from '../sharedInventory';
 
 type Tx = Prisma.TransactionClient;
 
@@ -422,6 +427,18 @@ async function applySaleCompletedEvent(tx: Tx, event: SyncEvent<CompleteSaleInpu
       },
     });
   }
+
+  await applySharedInventorySale({
+    aggregateId: event.aggregateId,
+    receiptNumber: payload.receiptNumber,
+    terminalId: payload.terminalId,
+    lines: payload.lines.map((line) => ({
+      productId: line.productId,
+      sku: line.sku,
+      quantity: line.quantity,
+      name: line.name,
+    })),
+  });
 }
 
 async function applySaleVoidedEvent(
@@ -464,6 +481,19 @@ async function applySaleVoidedEvent(
       status: SaleStatus.VOIDED,
       lastVectorClock: json(event.vectorClock),
     },
+  });
+
+  await applySharedInventoryVoid({
+    aggregateId: sale.id,
+    receiptNumber: sale.receiptNumber,
+    terminalId: sale.terminalId,
+    reason: event.payload.reason ?? null,
+    lines: sale.lines.map((line) => ({
+      productId: line.productId,
+      sku: line.sku,
+      quantity: line.quantity,
+      name: line.name,
+    })),
   });
 }
 
@@ -534,6 +564,22 @@ async function applyReturnCreatedEvent(tx: Tx, event: SyncEvent<ReturnInput>): P
       },
     });
   }
+
+  await applySharedInventoryReturn({
+    aggregateId: event.aggregateId,
+    saleId: payload.saleId,
+    terminalId: payload.terminalId,
+    reason: payload.reason ?? null,
+    lines: payload.lines.map((line) => {
+      const saleLine = sale?.lines.find((entry) => entry.id === line.saleLineId);
+      return {
+        productId: line.productId,
+        sku: saleLine?.sku ?? line.productId,
+        quantity: line.quantity,
+        name: saleLine?.name,
+      };
+    }),
+  });
 }
 
 async function getAggregateClock(

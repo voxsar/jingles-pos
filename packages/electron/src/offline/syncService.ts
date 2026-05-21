@@ -1,6 +1,7 @@
 import {
   DEFAULT_DEVICE_ID,
   DEFAULT_TERMINAL_ID,
+  SharedCatalogSnapshot,
   SyncPlaybackResponse,
   SyncStatusSummary,
 } from '@jingles/shared';
@@ -9,6 +10,7 @@ import {
   getPendingSyncEvents,
   getSyncStatus,
   markEventsConfirmed,
+  replaceCatalogSnapshot,
   recordSyncFailure,
 } from './localDB';
 
@@ -34,6 +36,22 @@ async function postJson<T>(path: string, body: unknown): Promise<T> {
   }
 
   return response.json() as Promise<T>;
+}
+
+async function getJson<T>(path: string): Promise<T> {
+  const response = await fetch(`${BACKEND_URL}${path}`);
+  if (!response.ok) {
+    const payload = await response.json().catch(() => ({ error: `HTTP ${response.status}` })) as { error?: string };
+    throw new Error(payload.error || `HTTP ${response.status}`);
+  }
+
+  return response.json() as Promise<T>;
+}
+
+export async function refreshCatalogSnapshot(): Promise<SharedCatalogSnapshot> {
+  const snapshot = await getJson<SharedCatalogSnapshot>('/api/pos/catalog/snapshot');
+  replaceCatalogSnapshot(snapshot);
+  return snapshot;
 }
 
 export async function syncPlaybackLog(options?: {
@@ -68,6 +86,12 @@ export async function syncPlaybackLog(options?: {
       terminalId,
       vectorClock: updatedStatus.localVectorClock,
     });
+
+    try {
+      await refreshCatalogSnapshot();
+    } catch (catalogError: any) {
+      recordSyncFailure(`Catalog refresh failed: ${catalogError.message}`, deviceId, terminalId);
+    }
 
     return {
       accepted: playback.acceptedEventIds.length,

@@ -24,11 +24,10 @@ import {
   SaleStatus,
   SaleSummary,
   SAMPLE_BRANCHES,
-  SAMPLE_CATEGORIES,
   SAMPLE_CUSTOMERS,
-  SAMPLE_PRODUCTS,
   SAMPLE_TERMINALS,
   SAMPLE_USERS,
+  SharedCatalogSnapshot,
   ShiftCloseInput,
   ShiftOpenInput,
   ShiftStatus,
@@ -539,24 +538,14 @@ function initSchema(db: Database.Database): void {
 }
 
 function seedReferenceData(db: Database.Database): void {
-  const count = db.prepare('SELECT COUNT(*) AS count FROM products').get() as { count: number };
-  if (count.count > 0) {
-    for (const user of SAMPLE_USERS) {
-      db.prepare(`
-        UPDATE users
-        SET email = COALESCE(email, ?)
-        WHERE id = ?
-      `).run(user.email ?? null, user.id);
-    }
-    rebuildProductSearchIndex(db);
-    return;
-  }
-
   const transaction = db.transaction(() => {
     for (const branch of SAMPLE_BRANCHES) {
       db.prepare(`
         INSERT INTO branches (id, code, name)
         VALUES (?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          code = excluded.code,
+          name = excluded.name
       `).run(branch.id, branch.code, branch.name);
     }
 
@@ -564,6 +553,10 @@ function seedReferenceData(db: Database.Database): void {
       db.prepare(`
         INSERT INTO terminals (id, code, name, branch_id)
         VALUES (?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          code = excluded.code,
+          name = excluded.name,
+          branch_id = excluded.branch_id
       `).run(terminal.id, terminal.code, terminal.name, terminal.branchId);
     }
 
@@ -571,6 +564,13 @@ function seedReferenceData(db: Database.Database): void {
       db.prepare(`
         INSERT INTO users (id, code, email, name, initials, role, pin)
         VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          code = excluded.code,
+          email = COALESCE(users.email, excluded.email),
+          name = excluded.name,
+          initials = excluded.initials,
+          role = excluded.role,
+          pin = COALESCE(users.pin, excluded.pin)
       `).run(
         user.id,
         user.code,
@@ -586,17 +586,35 @@ function seedReferenceData(db: Database.Database): void {
       db.prepare(`
         INSERT INTO customers (id, code, name, tier, phone, email)
         VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          code = excluded.code,
+          name = excluded.name,
+          tier = excluded.tier,
+          phone = excluded.phone,
+          email = excluded.email
       `).run(customer.id, customer.code, customer.name, customer.tier, customer.phone ?? null, customer.email ?? null);
     }
+  });
 
-    for (const category of SAMPLE_CATEGORIES) {
+  transaction();
+  rebuildProductSearchIndex(db);
+}
+
+export function replaceCatalogSnapshot(snapshot: SharedCatalogSnapshot): void {
+  const db = getDB();
+  const transaction = db.transaction(() => {
+    db.prepare('DELETE FROM product_price_tiers').run();
+    db.prepare('DELETE FROM products').run();
+    db.prepare('DELETE FROM categories').run();
+
+    for (const category of snapshot.categories) {
       db.prepare(`
         INSERT INTO categories (id, name, icon, sort_order)
         VALUES (?, ?, ?, ?)
       `).run(category.id, category.name, category.icon, category.sortOrder);
     }
 
-    for (const product of SAMPLE_PRODUCTS) {
+    for (const product of snapshot.products) {
       db.prepare(`
         INSERT INTO products (
           id, sku, barcode, name, category_id, subcategory, pack_size,
@@ -609,9 +627,9 @@ function seedReferenceData(db: Database.Database): void {
         product.name,
         product.categoryId,
         product.subcategory,
-        product.packSize,
+        Math.max(1, Math.round(product.packSize || 1)),
         product.unitLabel,
-        product.stockOnHand,
+        Math.max(0, Math.round(product.stockOnHand)),
         product.description ?? null,
         stringifyJson({}),
       );

@@ -3,6 +3,7 @@ import express from 'express';
 import authRouter from './routes/auth';
 import posRouter from './routes/pos';
 import { ensureSeedData } from './seed';
+import { syncSharedCatalogProjection } from './sharedInventory';
 
 const app = express();
 const PORT = Number(process.env.PORT || 3001);
@@ -25,6 +26,7 @@ app.use('/api/pos', posRouter);
 
 async function startServer() {
   await ensureSeedData();
+  await syncSharedCatalogProjection({ force: true });
   app.listen(PORT, () => {
     console.log(`Backend server running on port ${PORT}`);
   });

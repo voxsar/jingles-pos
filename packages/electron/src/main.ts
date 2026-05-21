@@ -124,6 +124,12 @@ async function createWindow() {
 
 app.whenReady().then(async () => {
   try {
+    try {
+      await getRuntimeModules().syncService.refreshCatalogSnapshot();
+    } catch (error) {
+      appendStartupLog('Initial shared catalog refresh failed; continuing with the local cache.', error);
+    }
+
     await createWindow();
     emitSyncStatus();
   } catch (error) {

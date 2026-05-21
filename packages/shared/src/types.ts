@@ -75,6 +75,12 @@ export interface Product {
   priceTiers: ProductPriceTier[];
 }
 
+export interface SharedCatalogSnapshot {
+  generatedAt: string;
+  categories: Category[];
+  products: Product[];
+}
+
 export interface CartLine {
   uid: string;
   productId: string;

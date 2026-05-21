@@ -7,9 +7,11 @@ import {
   DEFAULT_CUSTOMER_ID,
   DEFAULT_PAYMENT_METHOD,
   DEFAULT_TERMINAL_ID,
+  SAMPLE_CATEGORIES,
   SAMPLE_PRODUCTS,
   SAMPLE_USERS,
   SaleStatus,
+  SharedCatalogSnapshot,
   ShiftStatus,
   SyncEventType,
   UserRole,
@@ -29,6 +31,7 @@ import {
   loginLocalUser,
   listHeldSales,
   openLocalShift,
+  replaceCatalogSnapshot,
   recallHeldSale,
   resetDB,
   saveHeldSale,
@@ -43,6 +46,14 @@ const TEST_DB_PATH = path.join(
 const DEFAULT_BRANCH_ID = 'branch-jingles-01';
 const PRODUCT = SAMPLE_PRODUCTS[0];
 const SALESPERSON = SAMPLE_USERS.find((user) => user.role === UserRole.SALESPERSON) ?? SAMPLE_USERS[0]!;
+
+function buildSampleCatalogSnapshot(): SharedCatalogSnapshot {
+  return {
+    generatedAt: new Date('2026-05-21T00:00:00.000Z').toISOString(),
+    categories: SAMPLE_CATEGORIES,
+    products: SAMPLE_PRODUCTS,
+  };
+}
 
 function buildCartLine(quantity: number = 1): CartLine {
   const tier = PRODUCT.priceTiers[0]!;
@@ -79,6 +90,7 @@ beforeEach(() => {
     fs.unlinkSync(TEST_DB_PATH);
   }
   getDB(TEST_DB_PATH);
+  replaceCatalogSnapshot(buildSampleCatalogSnapshot());
 });
 
 afterAll(() => {
