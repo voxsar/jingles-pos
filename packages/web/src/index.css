@@ -225,6 +225,12 @@ button {
   text-transform: uppercase;
 }
 
+.field-hint {
+  color: var(--ink-2);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
 .glass-input {
   width: 100%;
   border: 1px solid var(--line);

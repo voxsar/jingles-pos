@@ -45,7 +45,8 @@ export default function LoginPage() {
 
         <div className="login-heading">Sign in</div>
         <div className="login-copy">
-          Use the same session flow as Inventory, then continue into the local workstation and sync out later.
+          Use the same session flow as Inventory. On a new workstation, the first sign-in must use the inventory
+          email address before the employee code can be used offline.
         </div>
 
         <div className="auth-pill-row">
@@ -70,6 +71,10 @@ export default function LoginPage() {
               value={identifier}
               onChange={(event) => setIdentifier(event.target.value)}
             />
+            <div className="field-hint">
+              First workstation sign-in: use the inventory email. Employee code works after the account is cached
+              locally.
+            </div>
           </LabelBlock>
 
           <LabelBlock label="Password">

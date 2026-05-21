@@ -107,6 +107,15 @@ function isSupportedPosRole(role: string | null | undefined) {
   return role === 'CASHIER' || role === 'MANAGER';
 }
 
+function buildUnsupportedRoleError(role: string | null | undefined) {
+  const normalizedRole = role?.trim().toUpperCase() || 'UNKNOWN';
+  return `This account is marked as ${normalizedRole}. Only cashier and manager accounts can sign in to the POS workstation.`;
+}
+
+function buildUnknownWorkstationUserError() {
+  return 'Employee account was not recognised for this workstation. If this is the first sign-in on this device, use the inventory email address instead of the employee code.';
+}
+
 function looksLikeEmail(value: string) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value.trim());
 }
@@ -460,7 +469,7 @@ router.post('/login', async (req: Request, res: Response) => {
     }
 
     if (user && !isSupportedPosRole(user.role)) {
-      return res.status(401).json({ error: 'Employee account was not recognised for this workstation.' });
+      return res.status(401).json({ error: buildUnsupportedRoleError(user.role) });
     }
 
     const upstreamLogin = await requestUpstreamLogin(identifier, password, user);
@@ -492,7 +501,7 @@ router.post('/login', async (req: Request, res: Response) => {
       return res.status(upstreamLogin.status).json({ error: upstreamLogin.error });
     }
 
-    return res.status(401).json({ error: 'Employee account was not recognised for this workstation.' });
+    return res.status(401).json({ error: buildUnknownWorkstationUserError() });
   } catch (error) {
     console.error(error);
     return res.status(500).json({ error: 'POS login failed' });
