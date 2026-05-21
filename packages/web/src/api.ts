@@ -127,6 +127,13 @@ export async function getSale(saleId: string): Promise<SaleSummary> {
   return getJson<SaleSummary>(`/sales/${encodeURIComponent(saleId)}`);
 }
 
+export async function voidSale(
+  saleId: string,
+  input?: { reason?: string; managerId?: string; terminalId?: string },
+): Promise<SaleSummary> {
+  return postJson<SaleSummary>(`/sales/${encodeURIComponent(saleId)}/void`, input ?? {});
+}
+
 export async function createReturn(input: ReturnInput): Promise<{ id: string; saleId: string; totalRefund: number }> {
   return postJson<{ id: string; saleId: string; totalRefund: number }>('/returns', input);
 }
