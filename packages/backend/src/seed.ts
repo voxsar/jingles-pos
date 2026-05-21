@@ -9,7 +9,10 @@ import {
   SAMPLE_USERS,
 } from '@jingles/shared';
 
-export async function ensureSeedData(): Promise<void> {
+let seedReady = false;
+let seedPromise: Promise<void> | null = null;
+
+async function ensureSeedDataInternal(): Promise<void> {
   const [branchCount, userCount, customerCount, terminalCount, categoryCount, productCount] = await Promise.all([
     prisma.branch.count(),
     prisma.pOSUser.count(),
@@ -152,4 +155,27 @@ export async function ensureSeedData(): Promise<void> {
       await prisma.batchPrice.createMany({ data: batchPrices });
     }
   }
+}
+
+export async function ensureSeedData(): Promise<void> {
+  if (process.env.NODE_ENV === 'test') {
+    await ensureSeedDataInternal();
+    return;
+  }
+
+  if (seedReady) {
+    return;
+  }
+
+  if (!seedPromise) {
+    seedPromise = ensureSeedDataInternal()
+      .then(() => {
+        seedReady = true;
+      })
+      .finally(() => {
+        seedPromise = null;
+      });
+  }
+
+  await seedPromise;
 }

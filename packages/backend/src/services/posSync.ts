@@ -53,6 +53,13 @@ type Tx = Prisma.TransactionClient;
 const POS_SYNC_APP_TOKEN_HEADER = 'x-jingles-pos-app-token';
 const POS_SYNC_APP_TOKEN_REJECTED_ERROR =
   'The POS app sync token was rejected by the inventory backend. Check the shared POS sync token configuration.';
+type SyncRunResult = {
+  accepted: number;
+  remoteApplied: number;
+  conflicts: number;
+  status: SyncStatusSummary;
+};
+const inFlightSyncRuns = new Map<string, Promise<SyncRunResult>>();
 
 function parseJson<T>(value: unknown, fallback: T): T {
   if (value == null) {
@@ -1063,13 +1070,11 @@ async function buildLocalSyncStatusInTransaction(
   terminalId: string,
 ): Promise<SyncStatusSummary> {
   const appToken = getPosSyncAppToken();
-  const [state, pendingEvents, conflictCount, localVectorClock, syncAuth] = await Promise.all([
-    tx.syncDeviceState.findUnique({ where: { deviceId } }),
-    tx.syncEvent.count({ where: { state: SyncEventState.PENDING } }),
-    tx.syncConflict.count({ where: { status: SyncConflictStatus.OPEN } }),
-    getServerVectorClock(tx),
-    appToken ? Promise.resolve(null) : readStoredSyncAuth(tx),
-  ]);
+  const state = await tx.syncDeviceState.findUnique({ where: { deviceId } });
+  const pendingEvents = await tx.syncEvent.count({ where: { state: SyncEventState.PENDING } });
+  const conflictCount = await tx.syncConflict.count({ where: { status: SyncConflictStatus.OPEN } });
+  const localVectorClock = await getServerVectorClock(tx);
+  const syncAuth = appToken ? null : await readStoredSyncAuth(tx);
 
   return {
     online: state?.online ?? false,
@@ -1103,23 +1108,21 @@ export async function getLocalSyncDashboard(
   limit = 20,
 ): Promise<POSSyncDashboard> {
   return prisma.$transaction(async (tx) => {
-    const [status, pendingEvents, recentEvents, conflicts] = await Promise.all([
-      buildLocalSyncStatusInTransaction(tx, deviceId, terminalId),
-      tx.syncEvent.findMany({
-        where: { state: SyncEventState.PENDING },
-        orderBy: [{ createdAt: 'desc' }],
-        take: limit,
-      }),
-      tx.syncEvent.findMany({
-        orderBy: [{ createdAt: 'desc' }],
-        take: limit,
-      }),
-      tx.syncConflict.findMany({
-        where: { status: SyncConflictStatus.OPEN },
-        orderBy: [{ createdAt: 'desc' }],
-        take: limit,
-      }),
-    ]);
+    const status = await buildLocalSyncStatusInTransaction(tx, deviceId, terminalId);
+    const pendingEvents = await tx.syncEvent.findMany({
+      where: { state: SyncEventState.PENDING },
+      orderBy: [{ createdAt: 'desc' }],
+      take: limit,
+    });
+    const recentEvents = await tx.syncEvent.findMany({
+      orderBy: [{ createdAt: 'desc' }],
+      take: limit,
+    });
+    const conflicts = await tx.syncConflict.findMany({
+      where: { status: SyncConflictStatus.OPEN },
+      orderBy: [{ createdAt: 'desc' }],
+      take: limit,
+    });
 
     return {
       status,
@@ -1303,15 +1306,10 @@ export async function refreshLocalCatalogFromUpstream(): Promise<SharedCatalogSn
   return snapshot;
 }
 
-export async function syncWithUpstream(options?: {
+async function runSyncWithUpstream(options?: {
   deviceId?: string;
   terminalId?: string;
-}): Promise<{
-  accepted: number;
-  remoteApplied: number;
-  conflicts: number;
-  status: SyncStatusSummary;
-}> {
+}): Promise<SyncRunResult> {
   const deviceId = options?.deviceId ?? getLocalPosDeviceId();
   const terminalId = options?.terminalId ?? getLocalPosTerminalId();
 
@@ -1375,6 +1373,29 @@ export async function syncWithUpstream(options?: {
       status: await getLocalSyncStatus(deviceId, terminalId),
     };
   }
+}
+
+export async function syncWithUpstream(options?: {
+  deviceId?: string;
+  terminalId?: string;
+}): Promise<SyncRunResult> {
+  const deviceId = options?.deviceId ?? getLocalPosDeviceId();
+  const terminalId = options?.terminalId ?? getLocalPosTerminalId();
+  const key = `${deviceId}::${terminalId}`;
+  const existingRun = inFlightSyncRuns.get(key);
+  if (existingRun) {
+    return existingRun;
+  }
+
+  const nextRun = runSyncWithUpstream({ deviceId, terminalId })
+    .finally(() => {
+      if (inFlightSyncRuns.get(key) === nextRun) {
+        inFlightSyncRuns.delete(key);
+      }
+    });
+
+  inFlightSyncRuns.set(key, nextRun);
+  return nextRun;
 }
 
 export async function buildZReport(shiftId: string): Promise<ZReportSummary> {
