@@ -1,8 +1,12 @@
 import cors from 'cors';
 import express from 'express';
 import authRouter from './routes/auth';
+import { getLocalPosDeviceId, getLocalPosTerminalId, isLocalPosBackendMode } from './localMode';
 import posRouter from './routes/pos';
 import { ensureSeedData } from './seed';
+import { ensureLocalCatalogSearchIndex } from './services/localCatalog';
+import { ensureLocalSchemaCompat } from './services/schemaCompat';
+import { syncWithUpstream } from './services/posSync';
 import { syncSharedCatalogProjection } from './sharedInventory';
 
 const app = express();
@@ -25,11 +29,36 @@ app.use('/api/pos/auth', authRouter);
 app.use('/api/pos', posRouter);
 
 async function startServer() {
+  await ensureLocalSchemaCompat();
   await ensureSeedData();
-  await syncSharedCatalogProjection({ force: true });
+
+  if (isLocalPosBackendMode()) {
+    await ensureLocalCatalogSearchIndex();
+  } else {
+    await syncSharedCatalogProjection({ force: true });
+  }
+
   app.listen(PORT, () => {
     console.log(`Backend server running on port ${PORT}`);
   });
+
+  if (isLocalPosBackendMode()) {
+    const deviceId = getLocalPosDeviceId();
+    const terminalId = getLocalPosTerminalId();
+
+    const runSync = async () => {
+      try {
+        await syncWithUpstream({ deviceId, terminalId });
+      } catch (error) {
+        console.error('Background local sync failed', error);
+      }
+    };
+
+    void runSync();
+    setInterval(() => {
+      void runSync();
+    }, 20_000);
+  }
 }
 
 if (require.main === module) {

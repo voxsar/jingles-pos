@@ -7,9 +7,10 @@
   ],
   "scripts": {
     "build:shared": "npm run build --workspace=packages/shared",
+    "build:backend": "npm run build --workspace=packages/backend",
     "build:web": "npm run build --workspace=packages/web",
     "build:electron": "npm run build --workspace=packages/electron && npm run native:rebuild --workspace=packages/electron",
-    "build:desktop": "npm run build:shared && npm run build:web && npm run build:electron",
+    "build:desktop": "npm run build:shared && npm run build:backend && npm run build:web && npm run build:electron",
     "electron:deps": "npm run native:rebuild --workspace=packages/electron",
     "electron:run": "npm run build:desktop && npm run start --workspace=packages/electron",
     "electron:exe": "npm run build:desktop && npm run electron:pack --workspace=packages/electron",

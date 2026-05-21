@@ -1,6 +1,8 @@
 import { Router, Request, Response, NextFunction } from 'express';
 import { v4 as uuidv4 } from 'uuid';
 import {
+  DEFAULT_DEVICE_ID,
+  DEFAULT_TERMINAL_ID,
   CompleteSaleInput,
   HeldSaleSummary,
   POSBootstrap,
@@ -12,26 +14,45 @@ import {
   UserRole,
 } from '@jingles/shared';
 import prisma from '../prisma';
+import {
+  getLocalPosDeviceId,
+  getLocalPosTerminalId,
+  isLocalPosBackendMode,
+} from '../localMode';
 import { ensureSeedData } from '../seed';
 import {
+  applyLocalEvent,
   applyServerEvent,
+  getLocalSyncDashboard,
+  getLocalSyncStatus,
   buildZReport,
   confirmPlayback,
   getServerVectorClock,
   playbackEvents,
+  syncWithUpstream,
 } from '../services/posSync';
 import { syncSharedCatalogProjection } from '../sharedInventory';
+import {
+  getLocalCatalogSnapshot,
+  searchLocalCatalog,
+} from '../services/localCatalog';
 
 const router = Router();
 
 router.use(async (_req: Request, res: Response, next: NextFunction) => {
   try {
     await ensureSeedData();
-    res.locals.sharedCatalog = await syncSharedCatalogProjection();
+    if (!isLocalPosBackendMode()) {
+      res.locals.sharedCatalog = await syncSharedCatalogProjection();
+    }
     next();
   } catch (error) {
     console.error(error);
-    res.status(500).json({ error: 'Shared inventory catalog is unavailable' });
+    res.status(500).json({
+      error: isLocalPosBackendMode()
+        ? 'The local POS backend could not prepare its catalog cache.'
+        : 'Shared inventory catalog is unavailable',
+    });
   }
 });
 
@@ -91,6 +112,65 @@ async function getProjectedProducts(catalog: SharedCatalogSnapshot) {
 
   const projectedById = new Map(rows.map((row) => [row.id, mapProduct(row)]));
   return catalog.products.map((product) => projectedById.get(product.id) ?? product);
+}
+
+async function getCatalogSnapshot(res: Response) {
+  if (isLocalPosBackendMode()) {
+    return getLocalCatalogSnapshot();
+  }
+
+  return res.locals.sharedCatalog as SharedCatalogSnapshot;
+}
+
+async function getWorkstationProducts(res: Response) {
+  const catalog = await getCatalogSnapshot(res);
+  if (isLocalPosBackendMode()) {
+    return catalog.products;
+  }
+
+  return getProjectedProducts(catalog);
+}
+
+function resolveDeviceId(req: Request) {
+  if (typeof req.body?.deviceId === 'string' && req.body.deviceId.trim()) {
+    return req.body.deviceId.trim();
+  }
+
+  if (typeof req.query?.deviceId === 'string' && req.query.deviceId.trim()) {
+    return req.query.deviceId.trim();
+  }
+
+  return getLocalPosDeviceId();
+}
+
+function resolveTerminalId(req: Request) {
+  if (typeof req.body?.terminalId === 'string' && req.body.terminalId.trim()) {
+    return req.body.terminalId.trim();
+  }
+
+  if (typeof req.query?.terminalId === 'string' && req.query.terminalId.trim()) {
+    return req.query.terminalId.trim();
+  }
+
+  return getLocalPosTerminalId();
+}
+
+async function applyWorkstationEvent(req: Request, input: {
+  aggregateType: string;
+  aggregateId: string;
+  eventType: SyncEventType;
+  payload: unknown;
+  terminalId?: string | null;
+}) {
+  if (isLocalPosBackendMode()) {
+    return applyLocalEvent({
+      ...input,
+      terminalId: input.terminalId ?? resolveTerminalId(req),
+      deviceId: resolveDeviceId(req),
+    });
+  }
+
+  return applyServerEvent(input);
 }
 
 function mapTerminal(terminal: any, branchMap: Map<string, any>) {
@@ -245,8 +325,9 @@ async function getUserMap(): Promise<Map<string, any>> {
 router.get('/bootstrap', async (req: Request, res: Response) => {
   try {
     const terminalId = typeof req.query.terminalId === 'string' ? req.query.terminalId : undefined;
-    const catalog = res.locals.sharedCatalog as SharedCatalogSnapshot;
-    const [branches, terminals, users, customers, activeShift, heldSales, serverClock, conflictCount, products] = await Promise.all([
+    const deviceId = typeof req.query.deviceId === 'string' ? req.query.deviceId : undefined;
+    const [catalog, branches, terminals, users, customers, activeShift, heldSales, syncStatus, products] = await Promise.all([
+      getCatalogSnapshot(res),
       prisma.branch.findMany({ orderBy: { code: 'asc' } }),
       prisma.terminal.findMany({ orderBy: { code: 'asc' } }),
       prisma.pOSUser.findMany({ orderBy: { code: 'asc' } }),
@@ -263,9 +344,22 @@ router.get('/bootstrap', async (req: Request, res: Response) => {
         include: { lines: true },
         orderBy: { createdAt: 'desc' },
       }),
-      getServerVectorClock(),
-      prisma.syncConflict.count({ where: { status: SyncConflictStatus.OPEN } }),
-      getProjectedProducts(catalog),
+      isLocalPosBackendMode()
+        ? getLocalSyncStatus(deviceId ?? getLocalPosDeviceId(), terminalId ?? getLocalPosTerminalId())
+        : (async () => {
+            const serverClock = await getServerVectorClock();
+            const conflictCount = await prisma.syncConflict.count({ where: { status: SyncConflictStatus.OPEN } });
+            return {
+              online: true,
+              pendingEvents: 0,
+              conflictCount,
+              deviceId: deviceId ?? DEFAULT_DEVICE_ID,
+              localVectorClock: {},
+              remoteVectorClock: serverClock,
+              lastSyncAt: new Date().toISOString(),
+            };
+          })(),
+      getWorkstationProducts(res),
     ]);
 
     const userMap = new Map(users.map((user) => [user.id, user]));
@@ -279,15 +373,7 @@ router.get('/bootstrap', async (req: Request, res: Response) => {
       products,
       activeShift: activeShift ? mapShift(activeShift, userMap) : null,
       heldSales: heldSales.map((heldSale) => mapHeldSale(heldSale, userMap)),
-      syncStatus: {
-        online: true,
-        pendingEvents: 0,
-        conflictCount,
-        deviceId: typeof req.query.deviceId === 'string' ? req.query.deviceId : 'browser-client',
-        localVectorClock: {},
-        remoteVectorClock: serverClock,
-        lastSyncAt: new Date().toISOString(),
-      },
+      syncStatus,
     };
 
     return res.json(payload);
@@ -298,18 +384,22 @@ router.get('/bootstrap', async (req: Request, res: Response) => {
 });
 
 router.get('/catalog/snapshot', async (_req: Request, res: Response) => {
-  const catalog = res.locals.sharedCatalog as SharedCatalogSnapshot;
+  const catalog = await getCatalogSnapshot(res);
   return res.json(catalog);
 });
 
 router.get('/products/search', async (req: Request, res: Response) => {
   try {
-    const catalog = res.locals.sharedCatalog as SharedCatalogSnapshot;
     const q = typeof req.query.q === 'string' ? req.query.q.trim() : '';
     if (!q) {
       return res.status(400).json({ error: 'Query parameter q is required' });
     }
 
+    if (isLocalPosBackendMode()) {
+      return res.json(await searchLocalCatalog(q));
+    }
+
+    const catalog = await getCatalogSnapshot(res);
     const term = q.toLowerCase();
     const rows = (await getProjectedProducts(catalog))
       .filter((product) => (
@@ -329,8 +419,7 @@ router.get('/products/search', async (req: Request, res: Response) => {
 
 router.get('/products/barcode/:barcode', async (req: Request, res: Response) => {
   try {
-    const catalog = res.locals.sharedCatalog as SharedCatalogSnapshot;
-    const row = (await getProjectedProducts(catalog))
+    const row = (await getWorkstationProducts(res))
       .find((product) => product.barcode === req.params.barcode);
 
     if (!row) {
@@ -348,7 +437,7 @@ router.post('/shifts/open', async (req: Request, res: Response) => {
   try {
     await ensureSeedData();
     const shiftId = req.body.shiftId ?? uuidv4();
-    await applyServerEvent({
+    await applyWorkstationEvent(req, {
       aggregateType: 'shift',
       aggregateId: shiftId,
       eventType: SyncEventType.SHIFT_OPENED,
@@ -376,7 +465,7 @@ router.post('/shifts/open', async (req: Request, res: Response) => {
 router.post('/shifts/:id/close', async (req: Request, res: Response) => {
   try {
     await ensureSeedData();
-    await applyServerEvent({
+    await applyWorkstationEvent(req, {
       aggregateType: 'shift',
       aggregateId: req.params.id,
       eventType: SyncEventType.SHIFT_CLOSED,
@@ -440,7 +529,7 @@ router.post('/held-sales', async (req: Request, res: Response) => {
   try {
     await ensureSeedData();
     const heldSaleId = req.body.heldSaleId ?? uuidv4();
-    await applyServerEvent({
+    await applyWorkstationEvent(req, {
       aggregateType: 'held-sale',
       aggregateId: heldSaleId,
       eventType: SyncEventType.HELD_SALE_SAVED,
@@ -490,7 +579,7 @@ router.get('/held-sales', async (_req: Request, res: Response) => {
 router.post('/held-sales/:id/recall', async (req: Request, res: Response) => {
   try {
     await ensureSeedData();
-    await applyServerEvent({
+    await applyWorkstationEvent(req, {
       aggregateType: 'held-sale',
       aggregateId: req.params.id,
       eventType: SyncEventType.HELD_SALE_RECALLED,
@@ -537,7 +626,7 @@ router.post('/sales', async (req: Request, res: Response) => {
       marginTotal: req.body.marginTotal ?? 0,
     };
 
-    await applyServerEvent({
+    await applyWorkstationEvent(req, {
       aggregateType: 'sale',
       aggregateId: saleId,
       eventType: SyncEventType.SALE_COMPLETED,
@@ -598,7 +687,7 @@ router.get('/sales/:id', async (req: Request, res: Response) => {
 router.post('/sales/:id/void', async (req: Request, res: Response) => {
   try {
     await ensureSeedData();
-    await applyServerEvent({
+    await applyWorkstationEvent(req, {
       aggregateType: 'sale',
       aggregateId: req.params.id,
       eventType: SyncEventType.SALE_VOIDED,
@@ -630,7 +719,7 @@ router.post('/returns', async (req: Request, res: Response) => {
   try {
     await ensureSeedData();
     const returnId = req.body.returnId ?? uuidv4();
-    await applyServerEvent({
+    await applyWorkstationEvent(req, {
       aggregateType: 'return',
       aggregateId: returnId,
       eventType: SyncEventType.RETURN_CREATED,
@@ -652,6 +741,53 @@ router.post('/returns', async (req: Request, res: Response) => {
   } catch (error) {
     console.error(error);
     return res.status(500).json({ error: 'Failed to create return' });
+  }
+});
+
+router.get('/local/sync/status', async (req: Request, res: Response) => {
+  try {
+    await ensureSeedData();
+    return res.json(
+      await getLocalSyncStatus(
+        typeof req.query.deviceId === 'string' ? req.query.deviceId : getLocalPosDeviceId(),
+        typeof req.query.terminalId === 'string' ? req.query.terminalId : getLocalPosTerminalId(),
+      ),
+    );
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({ error: 'Failed to load local sync status' });
+  }
+});
+
+router.get('/local/sync/dashboard', async (req: Request, res: Response) => {
+  try {
+    await ensureSeedData();
+    const limit = typeof req.query.limit === 'string' ? Number(req.query.limit) : undefined;
+    return res.json(
+      await getLocalSyncDashboard(
+        typeof req.query.deviceId === 'string' ? req.query.deviceId : getLocalPosDeviceId(),
+        typeof req.query.terminalId === 'string' ? req.query.terminalId : getLocalPosTerminalId(),
+        Number.isFinite(limit) && limit && limit > 0 ? Math.min(limit, 100) : 20,
+      ),
+    );
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({ error: 'Failed to load local sync dashboard' });
+  }
+});
+
+router.post('/local/sync/now', async (req: Request, res: Response) => {
+  try {
+    await ensureSeedData();
+    return res.json(
+      await syncWithUpstream({
+        deviceId: typeof req.body.deviceId === 'string' ? req.body.deviceId : resolveDeviceId(req),
+        terminalId: typeof req.body.terminalId === 'string' ? req.body.terminalId : resolveTerminalId(req),
+      }),
+    );
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({ error: 'Local sync failed' });
   }
 });
 

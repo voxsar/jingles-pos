@@ -1,28 +1,33 @@
 import { contextBridge, ipcRenderer } from 'electron';
 
-contextBridge.exposeInMainWorld('posAPI', {
-  bootstrap: (options?: { deviceId?: string; terminalId?: string }) => ipcRenderer.invoke('pos:bootstrap', options),
-  login: (input: { identifier: string; password: string }) => ipcRenderer.invoke('pos:auth:login', input),
-  me: (token: string) => ipcRenderer.invoke('pos:auth:me', token),
-  logout: (token: string) => ipcRenderer.invoke('pos:auth:logout', token),
-  searchProducts: (query: string) => ipcRenderer.invoke('pos:searchProducts', query),
-  getShift: (terminalId: string) => ipcRenderer.invoke('pos:getShift', terminalId),
-  openShift: (input: unknown) => ipcRenderer.invoke('pos:openShift', input),
-  closeShift: (input: unknown) => ipcRenderer.invoke('pos:closeShift', input),
-  saveHeldSale: (input: unknown) => ipcRenderer.invoke('pos:saveHeldSale', input),
-  listHeldSales: () => ipcRenderer.invoke('pos:listHeldSales'),
-  recallHeldSale: (heldSaleId: string) => ipcRenderer.invoke('pos:recallHeldSale', heldSaleId),
-  createSale: (input: unknown) => ipcRenderer.invoke('pos:createSale', input),
-  listSales: () => ipcRenderer.invoke('pos:listSales'),
-  getSale: (saleId: string) => ipcRenderer.invoke('pos:getSale', saleId),
-  createReturn: (input: unknown) => ipcRenderer.invoke('pos:createReturn', input),
-  getZReport: (shiftId: string) => ipcRenderer.invoke('pos:getZReport', shiftId),
-  getSyncStatus: () => ipcRenderer.invoke('pos:getSyncStatus'),
-  getSyncDashboard: () => ipcRenderer.invoke('pos:getSyncDashboard'),
-  syncNow: () => ipcRenderer.invoke('pos:syncNow'),
-  onSyncStatus: (callback: (status: unknown) => void) => {
-    const listener = (_event: Electron.IpcRendererEvent, status: unknown) => callback(status);
-    ipcRenderer.on('pos:sync-status', listener);
-    return () => ipcRenderer.removeListener('pos:sync-status', listener);
+const FALLBACK_DESKTOP_LOCAL_API_URL = 'http://127.0.0.1:3631';
+
+function readDesktopLocalApiUrl() {
+  try {
+    const resolvedUrl = ipcRenderer.sendSync('app:backend-url-sync');
+    return typeof resolvedUrl === 'string' && resolvedUrl.trim()
+      ? resolvedUrl.trim()
+      : FALLBACK_DESKTOP_LOCAL_API_URL;
+  } catch (error) {
+    console.error('[Electron preload] Failed to resolve the desktop backend URL.', error);
+    return FALLBACK_DESKTOP_LOCAL_API_URL;
+  }
+}
+
+const DESKTOP_LOCAL_API_URL = readDesktopLocalApiUrl();
+
+contextBridge.exposeInMainWorld('electronAPI', {
+  app: {
+    backendUrl: DESKTOP_LOCAL_API_URL,
   },
 });
+
+declare global {
+  interface Window {
+    electronAPI?: {
+      app?: {
+        backendUrl?: string;
+      };
+    };
+  }
+}

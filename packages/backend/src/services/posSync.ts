@@ -3,9 +3,13 @@ import { v4 as uuidv4 } from 'uuid';
 import {
   CashCountMode,
   CompleteSaleInput,
+  DEFAULT_DEVICE_ID,
+  DEFAULT_TERMINAL_ID,
   HoldSaleInput,
+  POSSyncDashboard,
   ReturnInput,
   SaleStatus,
+  SharedCatalogSnapshot,
   ShiftCloseInput,
   ShiftOpenInput,
   ShiftStatus,
@@ -18,15 +22,26 @@ import {
   SyncEventType,
   SyncPlaybackRequest,
   SyncPlaybackResponse,
+  SyncStatusSummary,
   VectorClock,
   ZReportSummary,
 } from '@jingles/shared';
 import prisma from '../prisma';
 import {
+  getLocalPosDeviceId,
+  getLocalPosTerminalId,
+  getPosUpstreamUrl,
+  isLocalPosBackendMode,
+} from '../localMode';
+import {
   applySharedInventoryReturn,
   applySharedInventorySale,
   applySharedInventoryVoid,
 } from '../sharedInventory';
+import {
+  getLocalCatalogSnapshot,
+  replaceLocalCatalogSnapshot,
+} from './localCatalog';
 
 type Tx = Prisma.TransactionClient;
 
@@ -106,6 +121,10 @@ function json(value: unknown): string {
   return JSON.stringify(value ?? {});
 }
 
+function isConfirmedEvent(event: Pick<SyncEvent, 'state'>) {
+  return event.state === SyncEventState.CONFIRMED;
+}
+
 function eventWins(
   incoming: Pick<SyncEvent, 'deviceId' | 'sequenceNum' | 'conflictPolicy'>,
   current: Pick<SyncEvent, 'deviceId' | 'sequenceNum'>,
@@ -143,8 +162,12 @@ async function updateDeviceState(
   sequenceNum: number,
   vectorClock: VectorClock,
   confirmedVectorClock?: VectorClock,
+  options?: {
+    markLastSyncAt?: boolean;
+  },
 ): Promise<void> {
   const current = await tx.syncDeviceState.findUnique({ where: { deviceId } });
+  const markLastSyncAt = options?.markLastSyncAt ?? false;
   await tx.syncDeviceState.upsert({
     where: { deviceId },
     create: {
@@ -154,16 +177,20 @@ async function updateDeviceState(
       lastSequenceNum: sequenceNum,
       vectorClock: json(vectorClock),
       confirmedVectorClock: json(confirmedVectorClock ?? normalizeClock(current?.confirmedVectorClock)),
+      online: current?.online ?? false,
+      lastError: current?.lastError ?? null,
       lastSeenAt: new Date(),
-      lastSyncAt: new Date(),
+      lastSyncAt: markLastSyncAt ? new Date() : current?.lastSyncAt ?? null,
     },
     update: {
       terminalId: terminalId ?? current?.terminalId ?? null,
       lastSequenceNum: Math.max(sequenceNum, current?.lastSequenceNum ?? 0),
       vectorClock: json(vectorClock),
       confirmedVectorClock: json(confirmedVectorClock ?? normalizeClock(current?.confirmedVectorClock)),
+      online: current?.online ?? false,
+      lastError: current?.lastError ?? null,
       lastSeenAt: new Date(),
-      lastSyncAt: new Date(),
+      lastSyncAt: markLastSyncAt ? new Date() : current?.lastSyncAt ?? null,
     },
   });
 }
@@ -208,7 +235,7 @@ async function applyShiftOpenedEvent(tx: Tx, event: SyncEvent<ShiftOpenInput>): 
       status: ShiftStatus.OPEN,
       openingFloat: payload.openingFloat,
       notes: payload.notes ?? null,
-      synced: true,
+      synced: isConfirmedEvent(event),
       lastVectorClock: json(event.vectorClock),
     },
     update: {
@@ -218,7 +245,7 @@ async function applyShiftOpenedEvent(tx: Tx, event: SyncEvent<ShiftOpenInput>): 
       status: ShiftStatus.OPEN,
       openingFloat: payload.openingFloat,
       notes: payload.notes ?? null,
-      synced: true,
+      synced: isConfirmedEvent(event),
       lastVectorClock: json(event.vectorClock),
     },
   });
@@ -236,7 +263,7 @@ async function applyShiftClosedEvent(tx: Tx, event: SyncEvent<ShiftCloseInput>):
       notes: payload.notes ?? null,
       closedAt: new Date(),
       lastVectorClock: json(event.vectorClock),
-      synced: true,
+      synced: isConfirmedEvent(event),
     },
   });
 
@@ -383,7 +410,7 @@ async function applySaleCompletedEvent(tx: Tx, event: SyncEvent<CompleteSaleInpu
       heldSaleId: payload.heldSaleId ?? null,
       sourceDeviceId: event.deviceId,
       sourceSequenceNum: event.sequenceNum,
-      synced: true,
+      synced: isConfirmedEvent(event),
       lastVectorClock: json(event.vectorClock),
       lines: {
         create: payload.lines.map((line) => ({
@@ -428,17 +455,19 @@ async function applySaleCompletedEvent(tx: Tx, event: SyncEvent<CompleteSaleInpu
     });
   }
 
-  await applySharedInventorySale({
-    aggregateId: event.aggregateId,
-    receiptNumber: payload.receiptNumber,
-    terminalId: payload.terminalId,
-    lines: payload.lines.map((line) => ({
-      productId: line.productId,
-      sku: line.sku,
-      quantity: line.quantity,
-      name: line.name,
-    })),
-  });
+  if (!isLocalPosBackendMode()) {
+    await applySharedInventorySale({
+      aggregateId: event.aggregateId,
+      receiptNumber: payload.receiptNumber,
+      terminalId: payload.terminalId,
+      lines: payload.lines.map((line) => ({
+        productId: line.productId,
+        sku: line.sku,
+        quantity: line.quantity,
+        name: line.name,
+      })),
+    });
+  }
 }
 
 async function applySaleVoidedEvent(
@@ -483,18 +512,20 @@ async function applySaleVoidedEvent(
     },
   });
 
-  await applySharedInventoryVoid({
-    aggregateId: sale.id,
-    receiptNumber: sale.receiptNumber,
-    terminalId: sale.terminalId,
-    reason: event.payload.reason ?? null,
-    lines: sale.lines.map((line) => ({
-      productId: line.productId,
-      sku: line.sku,
-      quantity: line.quantity,
-      name: line.name,
-    })),
-  });
+  if (!isLocalPosBackendMode()) {
+    await applySharedInventoryVoid({
+      aggregateId: sale.id,
+      receiptNumber: sale.receiptNumber,
+      terminalId: sale.terminalId,
+      reason: event.payload.reason ?? null,
+      lines: sale.lines.map((line) => ({
+        productId: line.productId,
+        sku: line.sku,
+        quantity: line.quantity,
+        name: line.name,
+      })),
+    });
+  }
 }
 
 async function applyReturnCreatedEvent(tx: Tx, event: SyncEvent<ReturnInput>): Promise<void> {
@@ -565,21 +596,23 @@ async function applyReturnCreatedEvent(tx: Tx, event: SyncEvent<ReturnInput>): P
     });
   }
 
-  await applySharedInventoryReturn({
-    aggregateId: event.aggregateId,
-    saleId: payload.saleId,
-    terminalId: payload.terminalId,
-    reason: payload.reason ?? null,
-    lines: payload.lines.map((line) => {
-      const saleLine = sale?.lines.find((entry) => entry.id === line.saleLineId);
-      return {
-        productId: line.productId,
-        sku: saleLine?.sku ?? line.productId,
-        quantity: line.quantity,
-        name: saleLine?.name,
-      };
-    }),
-  });
+  if (!isLocalPosBackendMode()) {
+    await applySharedInventoryReturn({
+      aggregateId: event.aggregateId,
+      saleId: payload.saleId,
+      terminalId: payload.terminalId,
+      reason: payload.reason ?? null,
+      lines: payload.lines.map((line) => {
+        const saleLine = sale?.lines.find((entry) => entry.id === line.saleLineId);
+        return {
+          productId: line.productId,
+          sku: saleLine?.sku ?? line.productId,
+          quantity: line.quantity,
+          name: saleLine?.name,
+        };
+      }),
+    });
+  }
 }
 
 async function getAggregateClock(
@@ -781,6 +814,9 @@ function toStoredEventDto(event: {
 export async function appendEvent(
   tx: Tx,
   event: SyncEvent,
+  options?: {
+    preservePendingState?: boolean;
+  },
 ): Promise<{ storedEvent: SyncEvent; applied: boolean; conflict?: SyncConflict }> {
   const duplicate = await tx.syncEvent.findFirst({
     where: {
@@ -807,6 +843,13 @@ export async function appendEvent(
     applyEvent = eventWins(event, latestEvent);
   }
 
+  const storedState =
+    options?.preservePendingState
+      ? SyncEventState.PENDING
+      : applyEvent
+        ? SyncEventState.CONFIRMED
+        : SyncEventState.PENDING;
+
   const stored = await tx.syncEvent.create({
     data: {
       id: event.id,
@@ -820,7 +863,7 @@ export async function appendEvent(
       sequenceNum: event.sequenceNum,
       lamport: event.lamport ?? event.sequenceNum,
       conflictPolicy: event.conflictPolicy,
-      state: applyEvent ? SyncEventState.CONFIRMED : SyncEventState.PENDING,
+      state: storedState,
       appliedAt: applyEvent ? new Date() : null,
     },
   });
@@ -829,7 +872,9 @@ export async function appendEvent(
     await applyProjectionEvent(tx, event);
   }
 
-  await updateDeviceState(tx, event.deviceId, stored.terminalId, event.sequenceNum, event.vectorClock);
+  await updateDeviceState(tx, event.deviceId, stored.terminalId, event.sequenceNum, event.vectorClock, undefined, {
+    markLastSyncAt: false,
+  });
 
   return { storedEvent: toStoredEventDto(stored), applied: applyEvent, conflict };
 }
@@ -867,6 +912,39 @@ export async function createServerEvent(
   };
 }
 
+export async function createLocalEvent(
+  tx: Tx,
+  input: {
+    aggregateType: string;
+    aggregateId: string;
+    eventType: SyncEventType;
+    payload: unknown;
+    terminalId?: string | null;
+    deviceId?: string;
+  },
+): Promise<SyncEvent> {
+  const deviceId = input.deviceId ?? getLocalPosDeviceId();
+  const currentState = await tx.syncDeviceState.findUnique({ where: { deviceId } });
+  const nextSequence = (currentState?.lastSequenceNum ?? 0) + 1;
+  const clock = await getServerVectorClock(tx);
+  clock[deviceId] = nextSequence;
+
+  return {
+    id: uuidv4(),
+    aggregateType: input.aggregateType,
+    aggregateId: input.aggregateId,
+    eventType: input.eventType,
+    payload: input.payload,
+    deviceId,
+    sequenceNum: nextSequence,
+    lamport: nextSequence,
+    vectorClock: clock,
+    conflictPolicy: resolveConflictPolicy(input.eventType),
+    state: SyncEventState.PENDING,
+    createdAt: new Date().toISOString(),
+  };
+}
+
 export async function applyServerEvent(
   input: {
     aggregateType: string;
@@ -880,6 +958,23 @@ export async function applyServerEvent(
   return prisma.$transaction(async (tx) => {
     const event = await createServerEvent(tx, input);
     await appendEvent(tx, event);
+    return event;
+  });
+}
+
+export async function applyLocalEvent(
+  input: {
+    aggregateType: string;
+    aggregateId: string;
+    eventType: SyncEventType;
+    payload: unknown;
+    terminalId?: string | null;
+    deviceId?: string;
+  },
+): Promise<SyncEvent> {
+  return prisma.$transaction(async (tx) => {
+    const event = await createLocalEvent(tx, input);
+    await appendEvent(tx, event, { preservePendingState: true });
     return event;
   });
 }
@@ -934,12 +1029,16 @@ export async function confirmPlayback(input: SyncConfirmRequest): Promise<Vector
         lastSequenceNum: state?.lastSequenceNum ?? 0,
         vectorClock: json(normalizeClock(state?.vectorClock)),
         confirmedVectorClock: json(input.vectorClock),
+        online: true,
+        lastError: null,
         lastSeenAt: new Date(),
         lastSyncAt: new Date(),
       },
       update: {
         terminalId: input.terminalId,
         confirmedVectorClock: json(input.vectorClock),
+        online: true,
+        lastError: null,
         lastSeenAt: new Date(),
         lastSyncAt: new Date(),
       },
@@ -947,6 +1046,299 @@ export async function confirmPlayback(input: SyncConfirmRequest): Promise<Vector
 
     return getServerVectorClock(tx);
   });
+}
+
+async function buildLocalSyncStatusInTransaction(
+  tx: Tx,
+  deviceId: string,
+  terminalId: string,
+): Promise<SyncStatusSummary> {
+  const [state, pendingEvents, conflictCount, localVectorClock] = await Promise.all([
+    tx.syncDeviceState.findUnique({ where: { deviceId } }),
+    tx.syncEvent.count({ where: { state: SyncEventState.PENDING } }),
+    tx.syncConflict.count({ where: { status: SyncConflictStatus.OPEN } }),
+    getServerVectorClock(tx),
+  ]);
+
+  return {
+    online: state?.online ?? false,
+    pendingEvents,
+    conflictCount,
+    deviceId,
+    localVectorClock,
+    remoteVectorClock: normalizeClock(state?.confirmedVectorClock),
+    lastSyncAt: state?.lastSyncAt?.toISOString(),
+    lastError: state?.lastError ?? undefined,
+  };
+}
+
+export async function getLocalSyncStatus(
+  deviceId: string = getLocalPosDeviceId(),
+  terminalId: string = getLocalPosTerminalId(),
+): Promise<SyncStatusSummary> {
+  return prisma.$transaction((tx) => buildLocalSyncStatusInTransaction(tx, deviceId, terminalId));
+}
+
+export async function getLocalSyncDashboard(
+  deviceId: string = getLocalPosDeviceId(),
+  terminalId: string = getLocalPosTerminalId(),
+  limit = 20,
+): Promise<POSSyncDashboard> {
+  return prisma.$transaction(async (tx) => {
+    const [status, pendingEvents, recentEvents, conflicts] = await Promise.all([
+      buildLocalSyncStatusInTransaction(tx, deviceId, terminalId),
+      tx.syncEvent.findMany({
+        where: { state: SyncEventState.PENDING },
+        orderBy: [{ createdAt: 'desc' }],
+        take: limit,
+      }),
+      tx.syncEvent.findMany({
+        orderBy: [{ createdAt: 'desc' }],
+        take: limit,
+      }),
+      tx.syncConflict.findMany({
+        where: { status: SyncConflictStatus.OPEN },
+        orderBy: [{ createdAt: 'desc' }],
+        take: limit,
+      }),
+    ]);
+
+    return {
+      status,
+      pendingEvents: pendingEvents.map(toStoredEventDto),
+      recentEvents: recentEvents.map(toStoredEventDto),
+      conflicts: conflicts.map(toConflictDto),
+    };
+  });
+}
+
+async function updateAggregateSyncState(
+  tx: Tx,
+  events: Array<{ aggregateType: string; aggregateId: string }>,
+  synced: boolean,
+) {
+  const shiftIds = Array.from(
+    new Set(events.filter((event) => event.aggregateType === 'shift').map((event) => event.aggregateId)),
+  );
+  const saleIds = Array.from(
+    new Set(events.filter((event) => event.aggregateType === 'sale').map((event) => event.aggregateId)),
+  );
+
+  if (shiftIds.length > 0) {
+    await tx.pOSShift.updateMany({
+      where: { id: { in: shiftIds } },
+      data: { synced },
+    });
+  }
+
+  if (saleIds.length > 0) {
+    await tx.sale.updateMany({
+      where: { id: { in: saleIds } },
+      data: { synced },
+    });
+  }
+}
+
+export async function markLocalEventsConfirmed(
+  eventIds: string[],
+  serverVectorClock: VectorClock,
+  deviceId: string = getLocalPosDeviceId(),
+  terminalId: string = getLocalPosTerminalId(),
+) {
+  return prisma.$transaction(async (tx) => {
+    if (eventIds.length > 0) {
+      await tx.syncEvent.updateMany({
+        where: { id: { in: eventIds } },
+        data: { state: SyncEventState.CONFIRMED },
+      });
+
+      const events = await tx.syncEvent.findMany({
+        where: { id: { in: eventIds } },
+        select: { aggregateType: true, aggregateId: true },
+      });
+      await updateAggregateSyncState(tx, events, true);
+    }
+
+    const state = await tx.syncDeviceState.findUnique({ where: { deviceId } });
+    await tx.syncDeviceState.upsert({
+      where: { deviceId },
+      create: {
+        id: state?.id ?? `sync-device-${deviceId}`,
+        deviceId,
+        terminalId,
+        lastSequenceNum: state?.lastSequenceNum ?? 0,
+        vectorClock: json(await getServerVectorClock(tx)),
+        confirmedVectorClock: json(serverVectorClock),
+        online: true,
+        lastError: null,
+        lastSeenAt: new Date(),
+        lastSyncAt: new Date(),
+      },
+      update: {
+        terminalId,
+        vectorClock: json(await getServerVectorClock(tx)),
+        confirmedVectorClock: json(serverVectorClock),
+        online: true,
+        lastError: null,
+        lastSeenAt: new Date(),
+        lastSyncAt: new Date(),
+      },
+    });
+  });
+}
+
+export async function recordLocalSyncFailure(
+  errorMessage: string,
+  deviceId: string = getLocalPosDeviceId(),
+  terminalId: string = getLocalPosTerminalId(),
+) {
+  return prisma.$transaction(async (tx) => {
+    const state = await tx.syncDeviceState.findUnique({ where: { deviceId } });
+    await tx.syncDeviceState.upsert({
+      where: { deviceId },
+      create: {
+        id: state?.id ?? `sync-device-${deviceId}`,
+        deviceId,
+        terminalId,
+        lastSequenceNum: state?.lastSequenceNum ?? 0,
+        vectorClock: json(normalizeClock(state?.vectorClock)),
+        confirmedVectorClock: json(normalizeClock(state?.confirmedVectorClock)),
+        online: false,
+        lastError: errorMessage,
+        lastSeenAt: new Date(),
+        lastSyncAt: state?.lastSyncAt ?? null,
+      },
+      update: {
+        terminalId,
+        online: false,
+        lastError: errorMessage,
+        lastSeenAt: new Date(),
+      },
+    });
+  });
+}
+
+export async function appendRemoteEventsFromServer(
+  events: SyncEvent[],
+): Promise<SyncConflict[]> {
+  return prisma.$transaction(async (tx) => {
+    const conflicts: SyncConflict[] = [];
+
+    for (const event of events) {
+      const result = await appendEvent(
+        tx,
+        {
+          ...event,
+          state: SyncEventState.CONFIRMED,
+        },
+      );
+
+      if (result.conflict) {
+        conflicts.push(result.conflict);
+      }
+    }
+
+    return conflicts;
+  });
+}
+
+async function fetchUpstreamJson<T>(path: string, options?: { method?: 'GET' | 'POST'; body?: unknown }) {
+  const response = await fetch(`${getPosUpstreamUrl()}${path}`, {
+    method: options?.method ?? 'GET',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    ...(typeof options?.body === 'undefined'
+      ? {}
+      : { body: JSON.stringify(options.body) }),
+  });
+
+  if (!response.ok) {
+    const payload = await response.json().catch(() => ({ error: `HTTP ${response.status}` })) as { error?: string };
+    throw new Error(payload.error || `HTTP ${response.status}`);
+  }
+
+  return response.json() as Promise<T>;
+}
+
+export async function refreshLocalCatalogFromUpstream(): Promise<SharedCatalogSnapshot> {
+  const snapshot = await fetchUpstreamJson<SharedCatalogSnapshot>('/api/pos/catalog/snapshot');
+  await replaceLocalCatalogSnapshot(snapshot);
+  return snapshot;
+}
+
+export async function syncWithUpstream(options?: {
+  deviceId?: string;
+  terminalId?: string;
+}): Promise<{
+  accepted: number;
+  remoteApplied: number;
+  conflicts: number;
+  status: SyncStatusSummary;
+}> {
+  const deviceId = options?.deviceId ?? getLocalPosDeviceId();
+  const terminalId = options?.terminalId ?? getLocalPosTerminalId();
+
+  try {
+    const currentStatus = await getLocalSyncStatus(deviceId, terminalId);
+    await fetchUpstreamJson('/api/pos/sync/handshake', {
+      method: 'POST',
+      body: {
+        deviceId,
+        terminalId,
+        vectorClock: currentStatus.localVectorClock,
+      },
+    });
+
+    const pendingEvents = await prisma.syncEvent.findMany({
+      where: { state: SyncEventState.PENDING },
+      orderBy: [{ createdAt: 'asc' }],
+    });
+
+    const playback = await fetchUpstreamJson<SyncPlaybackResponse>('/api/pos/sync/playback', {
+      method: 'POST',
+      body: {
+        deviceId,
+        terminalId,
+        vectorClock: currentStatus.localVectorClock,
+        events: pendingEvents.map(toStoredEventDto),
+      } satisfies SyncPlaybackRequest,
+    });
+
+    const remoteConflicts = await appendRemoteEventsFromServer(playback.remoteEvents);
+    await markLocalEventsConfirmed(playback.acceptedEventIds, playback.serverVectorClock, deviceId, terminalId);
+
+    const updatedStatus = await getLocalSyncStatus(deviceId, terminalId);
+    await fetchUpstreamJson('/api/pos/sync/confirm', {
+      method: 'POST',
+      body: {
+        deviceId,
+        terminalId,
+        vectorClock: updatedStatus.localVectorClock,
+      } satisfies SyncConfirmRequest,
+    });
+
+    try {
+      await refreshLocalCatalogFromUpstream();
+    } catch (catalogError: any) {
+      await recordLocalSyncFailure(`Catalog refresh failed: ${catalogError.message}`, deviceId, terminalId);
+    }
+
+    return {
+      accepted: playback.acceptedEventIds.length,
+      remoteApplied: playback.remoteEvents.length,
+      conflicts: playback.conflicts.length + remoteConflicts.length,
+      status: await getLocalSyncStatus(deviceId, terminalId),
+    };
+  } catch (error: any) {
+    await recordLocalSyncFailure(error.message, deviceId, terminalId);
+    return {
+      accepted: 0,
+      remoteApplied: 0,
+      conflicts: 0,
+      status: await getLocalSyncStatus(deviceId, terminalId),
+    };
+  }
 }
 
 export async function buildZReport(shiftId: string): Promise<ZReportSummary> {
