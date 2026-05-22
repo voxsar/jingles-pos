@@ -93,6 +93,7 @@ function mapProduct(product: any) {
     unitLabel: product.unitLabel ?? 'pcs',
     stockOnHand: product.stockOnHand ?? 0,
     description: product.description ?? undefined,
+    variants: parseJson(product.variantsJson, []),
     priceTiers: sortTiers(product.batchPrices ?? []).map((tier: any) => ({
       id: tier.id,
       label: tier.label ?? (tier.minQty > 0 ? `Bulk ${tier.minQty}+` : 'Retail'),
@@ -111,7 +112,18 @@ async function getProjectedProducts(catalog: SharedCatalogSnapshot) {
   });
 
   const projectedById = new Map(rows.map((row) => [row.id, mapProduct(row)]));
-  return catalog.products.map((product) => projectedById.get(product.id) ?? product);
+  return catalog.products.map((product) => {
+    const projected = projectedById.get(product.id);
+    if (!projected) {
+      return product;
+    }
+
+    return {
+      ...product,
+      ...projected,
+      variants: projected.variants ?? product.variants ?? [],
+    };
+  });
 }
 
 async function getCatalogSnapshot(res: Response) {
@@ -255,6 +267,10 @@ function mapSale(sale: any, userMap: Map<string, any>) {
       productId: line.productId,
       sku: line.sku,
       name: line.name,
+      variantId: line.variantId ?? undefined,
+      variantCode: line.variantCode ?? undefined,
+      variantName: line.variantName ?? undefined,
+      variantAttributes: parseJson(line.variantAttributesJson, undefined),
       subcategory: line.subcategory ?? '',
       quantity: line.quantity,
       unitPrice: line.unitPrice,
@@ -302,6 +318,10 @@ function mapHeldSale(heldSale: any, userMap: Map<string, any>): HeldSaleSummary 
       productId: line.productId,
       sku: line.sku,
       name: line.name,
+      variantId: line.variantId ?? undefined,
+      variantCode: line.variantCode ?? undefined,
+      variantName: line.variantName ?? undefined,
+      variantAttributes: parseJson(line.variantAttributesJson, undefined),
       subcategory: line.subcategory ?? '',
       quantity: line.quantity,
       unitPrice: line.unitPrice,

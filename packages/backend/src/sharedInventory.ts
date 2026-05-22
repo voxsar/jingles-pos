@@ -1,7 +1,12 @@
 import { randomUUID } from 'crypto';
 import type { PoolClient } from 'pg';
 import { Pool } from 'pg';
-import type { ProductPriceTier, SharedCatalogSnapshot } from '@jingles/shared';
+import type {
+  ProductPriceTier,
+  ProductVariant,
+  ProductVariantAttributeValue,
+  SharedCatalogSnapshot,
+} from '@jingles/shared';
 import prisma from './prisma';
 
 type SharedCategoryRow = {
@@ -26,11 +31,30 @@ type SharedSkuRow = {
   stock_on_hand: number | string | null;
 };
 
+type SharedVariantRow = {
+  sku_id: string;
+  variant_id: string;
+  variant_code: string;
+  variant_name: string | null;
+  variant_stock_on_hand: number | string | null;
+  attribute_id: string | null;
+  attribute_name: string | null;
+  attribute_type: string | null;
+  attribute_sort_order: number | null;
+  value_id: string | null;
+  value_display_name: string | null;
+  value_represented_value: string | null;
+  value_sort_order: number | null;
+};
+
 type SharedSaleLine = {
   productId: string;
   sku: string;
   quantity: number;
   name?: string;
+  variantId?: string | null;
+  variantCode?: string | null;
+  variantName?: string | null;
 };
 
 type SharedInventoryChange = {
@@ -125,6 +149,10 @@ function normalizeNumber(value: unknown, fallback = 0): number {
   return fallback;
 }
 
+function stringifyJson(value: unknown): string {
+  return JSON.stringify(value ?? null);
+}
+
 function buildPriceTiers(row: SharedSkuRow): ProductPriceTier[] {
   const tiers: ProductPriceTier[] = [];
 
@@ -205,9 +233,66 @@ function buildPriceTiers(row: SharedSkuRow): ProductPriceTier[] {
     }));
 }
 
+function buildProductVariants(rows: SharedVariantRow[]): Map<string, ProductVariant[]> {
+  const variantsByProduct = new Map<string, Map<string, ProductVariant>>();
+
+  for (const row of rows) {
+    const productVariants = variantsByProduct.get(row.sku_id) ?? new Map<string, ProductVariant>();
+    const variant = productVariants.get(row.variant_id) ?? {
+      id: row.variant_id,
+      productId: row.sku_id,
+      variantCode: row.variant_code,
+      name: row.variant_name ?? undefined,
+      stockOnHand: normalizeNumber(row.variant_stock_on_hand),
+      attributes: [],
+    };
+
+    if (row.attribute_id && row.value_id) {
+      const alreadyPresent = variant.attributes.some((entry) => (
+        entry.attributeId === row.attribute_id && entry.valueId === row.value_id
+      ));
+
+      if (!alreadyPresent) {
+        variant.attributes.push({
+          attributeId: row.attribute_id,
+          attributeName: row.attribute_name ?? row.attribute_id,
+          attributeType: (row.attribute_type as ProductVariantAttributeValue['attributeType']) ?? undefined,
+          valueId: row.value_id,
+          value: row.value_display_name ?? row.value_represented_value ?? row.value_id,
+          representedValue: row.value_represented_value ?? undefined,
+          sortOrder: row.attribute_sort_order ?? row.value_sort_order ?? 0,
+        });
+      }
+    }
+
+    productVariants.set(row.variant_id, variant);
+    variantsByProduct.set(row.sku_id, productVariants);
+  }
+
+  return new Map(
+    Array.from(variantsByProduct.entries()).map(([skuId, variants]) => [
+      skuId,
+      Array.from(variants.values())
+        .map((variant) => ({
+          ...variant,
+          attributes: [...variant.attributes].sort((left, right) => {
+            if ((left.sortOrder ?? 0) !== (right.sortOrder ?? 0)) {
+              return (left.sortOrder ?? 0) - (right.sortOrder ?? 0);
+            }
+            if (left.attributeName !== right.attributeName) {
+              return left.attributeName.localeCompare(right.attributeName);
+            }
+            return left.value.localeCompare(right.value);
+          }),
+        }))
+        .sort((left, right) => left.variantCode.localeCompare(right.variantCode)),
+    ]),
+  );
+}
+
 async function fetchSharedCatalogSnapshotFromSource(): Promise<SharedCatalogSnapshot> {
   const inventory = getSharedInventoryPool();
-  const [categoriesResult, skuResult] = await Promise.all([
+  const [categoriesResult, skuResult, variantResult] = await Promise.all([
     inventory.query<SharedCategoryRow>(
       `
         SELECT id, name, parent_id, sort_order
@@ -250,6 +335,47 @@ async function fetchSharedCatalogSnapshotFromSource(): Promise<SharedCatalogSnap
       `,
       [SHELF_READY_STATE],
     ),
+    inventory.query<SharedVariantRow>(
+      `
+        WITH variant_stock AS (
+          SELECT variant_id, COALESCE(SUM(quantity), 0) AS stock_on_hand
+          FROM inventory_records
+          WHERE state = $1
+            AND variant_id IS NOT NULL
+          GROUP BY variant_id
+        )
+        SELECT
+          v.sku_id,
+          v.id AS variant_id,
+          v.variant_code,
+          v.name AS variant_name,
+          COALESCE(vs.stock_on_hand, 0) AS variant_stock_on_hand,
+          a.id AS attribute_id,
+          a.name AS attribute_name,
+          a.type AS attribute_type,
+          a.sort_order AS attribute_sort_order,
+          av.id AS value_id,
+          av.display_name AS value_display_name,
+          av.represented_value AS value_represented_value,
+          av.sort_order AS value_sort_order
+        FROM sku_variants v
+        INNER JOIN skus s ON s.id = v.sku_id
+        LEFT JOIN variant_stock vs ON vs.variant_id = v.id
+        LEFT JOIN sku_variant_values svv ON svv.variant_id = v.id
+        LEFT JOIN attributes a ON a.id = svv.attribute_id
+        LEFT JOIN attribute_values av ON av.id = svv.attribute_value_id
+        WHERE s.is_active = TRUE
+          AND v.is_active = TRUE
+        ORDER BY
+          s.sku_code ASC,
+          v.variant_code ASC,
+          COALESCE(a.sort_order, 0) ASC,
+          a.name ASC,
+          COALESCE(av.sort_order, 0) ASC,
+          av.display_name ASC
+      `,
+      [SHELF_READY_STATE],
+    ),
   ]);
 
   const categoriesById = new Map(categoriesResult.rows.map((category) => [category.id, category]));
@@ -264,6 +390,7 @@ async function fetchSharedCatalogSnapshotFromSource(): Promise<SharedCatalogSnap
       },
     ]),
   );
+  const variantsByProduct = buildProductVariants(variantResult.rows);
 
   const products = skuResult.rows.map((row) => {
     const categoryMeta = resolveRootCategory(row.category_id, categoriesById);
@@ -279,6 +406,7 @@ async function fetchSharedCatalogSnapshotFromSource(): Promise<SharedCatalogSnap
       stockOnHand: normalizeNumber(row.stock_on_hand),
       description: row.description ?? undefined,
       priceTiers: buildPriceTiers(row),
+      variants: variantsByProduct.get(row.id) ?? [],
     };
   });
 
@@ -362,6 +490,7 @@ async function syncProjection(snapshot: SharedCatalogSnapshot): Promise<void> {
           unitLabel: product.unitLabel,
           stockOnHand: Math.max(0, Math.round(product.stockOnHand)),
           description: product.description ?? null,
+          variantsJson: stringifyJson(product.variants ?? []),
         },
         create: {
           id: product.id,
@@ -375,6 +504,7 @@ async function syncProjection(snapshot: SharedCatalogSnapshot): Promise<void> {
           unitLabel: product.unitLabel,
           stockOnHand: Math.max(0, Math.round(product.stockOnHand)),
           description: product.description ?? null,
+          variantsJson: stringifyJson(product.variants ?? []),
         },
       });
 
@@ -517,11 +647,15 @@ export async function applySharedInventorySale(
           FROM inventory_records
           WHERE sku_id = $1
             AND state = $2
+            AND (
+              ($3::text IS NULL AND variant_id IS NULL)
+              OR variant_id = $3
+            )
             AND quantity > 0
           ORDER BY updated_at ASC, created_at ASC
           FOR UPDATE
         `,
-        [line.productId, SHELF_READY_STATE],
+        [line.productId, SHELF_READY_STATE, line.variantId ?? null],
       );
 
       const totalBefore = recordResult.rows.reduce(
@@ -590,6 +724,9 @@ export async function applySharedInventorySale(
             skuId: line.productId,
             skuCode: line.sku,
             productName: line.name ?? null,
+            variantId: line.variantId ?? null,
+            variantCode: line.variantCode ?? null,
+            variantName: line.variantName ?? null,
           }),
         ],
       );
@@ -636,17 +773,19 @@ async function applySharedInventoryIncrease(
           INSERT INTO inventory_records (
             id,
             sku_id,
+            variant_id,
             quantity,
             state,
             source_event_id,
             terminal_id,
             version
           )
-          VALUES ($1, $2, $3, $4, $5, $6, 1)
+          VALUES ($1, $2, $3, $4, $5, $6, $7, 1)
         `,
         [
           recordId,
           line.productId,
+          line.variantId ?? null,
           quantity,
           SHELF_READY_STATE,
           input.aggregateId,
@@ -685,6 +824,9 @@ async function applySharedInventoryIncrease(
             skuId: line.productId,
             skuCode: line.sku,
             productName: line.name ?? null,
+            variantId: line.variantId ?? null,
+            variantCode: line.variantCode ?? null,
+            variantName: line.variantName ?? null,
           }),
         ],
       );

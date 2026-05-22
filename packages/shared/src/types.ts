@@ -61,6 +61,27 @@ export interface ProductPriceTier {
   isDefault?: boolean;
 }
 
+export type ProductVariantAttributeType = 'dropdown' | 'text' | 'numeric' | 'boolean' | 'color';
+
+export interface ProductVariantAttributeValue {
+  attributeId: string;
+  attributeName: string;
+  attributeType?: ProductVariantAttributeType;
+  valueId: string;
+  value: string;
+  representedValue?: string;
+  sortOrder?: number;
+}
+
+export interface ProductVariant {
+  id: string;
+  productId: string;
+  variantCode: string;
+  name?: string;
+  stockOnHand: number;
+  attributes: ProductVariantAttributeValue[];
+}
+
 export interface Product {
   id: string;
   sku: string;
@@ -73,6 +94,7 @@ export interface Product {
   stockOnHand: number;
   description?: string;
   priceTiers: ProductPriceTier[];
+  variants?: ProductVariant[];
 }
 
 export interface SharedCatalogSnapshot {
@@ -87,6 +109,10 @@ export interface CartLine {
   sku: string;
   name: string;
   barcode?: string;
+  variantId?: string;
+  variantCode?: string;
+  variantName?: string;
+  variantAttributes?: ProductVariantAttributeValue[];
   categoryId: string;
   subcategory: string;
   packSize: number;
@@ -140,6 +166,10 @@ export interface HeldSaleLine {
   productId: string;
   sku: string;
   name: string;
+  variantId?: string;
+  variantCode?: string;
+  variantName?: string;
+  variantAttributes?: ProductVariantAttributeValue[];
   subcategory: string;
   quantity: number;
   unitPrice: number;
@@ -178,6 +208,10 @@ export interface SaleLineSummary {
   productId: string;
   sku: string;
   name: string;
+  variantId?: string;
+  variantCode?: string;
+  variantName?: string;
+  variantAttributes?: ProductVariantAttributeValue[];
   subcategory: string;
   quantity: number;
   unitPrice: number;
@@ -281,6 +315,7 @@ export interface ReturnInput {
   lines: Array<{
     saleLineId: string;
     productId: string;
+    variantId?: string;
     quantity: number;
     refundAmount: number;
   }>;
@@ -344,6 +379,26 @@ export interface POSSyncTokenResult {
   syncAuthConfigured: boolean;
   syncAuthIdentity?: string;
   userId?: string;
+}
+
+export type POSThemeMode = 'light' | 'dark';
+
+export interface POSDesktopSettings {
+  syncUrl: string;
+  databasePath: string;
+  backupDirectory: string;
+  themeMode: POSThemeMode;
+}
+
+export interface POSDesktopSettingsSaveResult {
+  settings: POSDesktopSettings;
+  restartedBackend: boolean;
+  copiedDatabase: boolean;
+}
+
+export interface POSDesktopBackupResult {
+  filePath: string;
+  createdAt: string;
 }
 
 export interface SyncHandshakeRequest {

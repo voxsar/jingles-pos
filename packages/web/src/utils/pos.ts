@@ -5,6 +5,7 @@ import {
   POSUser,
   Product,
   ProductPriceTier,
+  ProductVariant,
 } from '@jingles/shared';
 
 export interface DenominationDefinition {
@@ -89,6 +90,7 @@ export function createCartLine(
   product: Product,
   salesperson: POSUser,
   preferredTierLabels: string[] = [],
+  variant?: ProductVariant,
 ): CartLine {
   const tier = pickPriceTier(product.priceTiers, preferredTierLabels);
   const estimatedCostBasis = roundCurrency(tier.price * 0.65);
@@ -96,9 +98,13 @@ export function createCartLine(
   return recalculateCartLine({
     uid: `line-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
     productId: product.id,
-    sku: product.sku,
+    sku: variant?.variantCode ?? product.sku,
     name: product.name,
     barcode: product.barcode,
+    variantId: variant?.id,
+    variantCode: variant?.variantCode,
+    variantName: variant?.name ?? undefined,
+    variantAttributes: variant?.attributes,
     categoryId: product.categoryId,
     subcategory: product.subcategory,
     packSize: product.packSize,
@@ -112,9 +118,43 @@ export function createCartLine(
     discountPercent: 0,
     discountAmount: 0,
     costBasis: estimatedCostBasis,
-    stockOnHand: product.stockOnHand,
+    stockOnHand: variant?.stockOnHand ?? product.stockOnHand,
     lineTotal: tier.price,
   });
+}
+
+export function getProductVariantLabel(variant: ProductVariant): string {
+  if (variant.name?.trim()) {
+    return variant.name.trim();
+  }
+
+  if (variant.attributes.length === 1) {
+    return variant.attributes[0]?.value ?? variant.variantCode;
+  }
+
+  if (variant.attributes.length > 1) {
+    return variant.attributes.map((attribute) => attribute.value).join(' / ');
+  }
+
+  return variant.variantCode;
+}
+
+export function getLineVariantSummary(
+  line: Pick<CartLine, 'variantName' | 'variantCode' | 'variantAttributes'>,
+): string | null {
+  if (line.variantName?.trim()) {
+    return line.variantName.trim();
+  }
+
+  if ((line.variantAttributes?.length ?? 0) > 0) {
+    return line.variantAttributes!.map((attribute) => attribute.value).join(' / ');
+  }
+
+  if (line.variantCode?.trim()) {
+    return line.variantCode.trim();
+  }
+
+  return null;
 }
 
 export function resolvePrice(

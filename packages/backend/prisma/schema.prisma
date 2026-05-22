@@ -68,6 +68,7 @@ model Product {
   unitLabel       String      @default("pcs")
   stockOnHand     Int         @default(0)
   description     String?
+  variantsJson    String?     @map("variants_json")
   lastVectorClock String?
   createdAt       DateTime    @default(now())
   updatedAt       DateTime    @updatedAt
@@ -186,6 +187,10 @@ model SaleLine {
   sku              String
   name             String
   barcode          String?
+  variantId        String?
+  variantCode      String?
+  variantName      String?
+  variantAttributesJson String? @map("variant_attributes_json")
   subcategory      String   @default("")
   salespersonId    String?
   quantity         Int
@@ -239,6 +244,10 @@ model HeldSaleLine {
   productId       String
   sku             String
   name            String
+  variantId       String?
+  variantCode     String?
+  variantName     String?
+  variantAttributesJson String? @map("variant_attributes_json")
   subcategory     String   @default("")
   salespersonId   String?
   quantity        Int
@@ -271,6 +280,7 @@ model ReturnLine {
   returnId     String
   saleLineId   String
   productId    String
+  variantId    String?
   quantity     Int
   refundAmount Float
   return       Return   @relation(fields: [returnId], references: [id])

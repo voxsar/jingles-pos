@@ -20,6 +20,7 @@ import {
   POSUser,
   Product,
   ProductPriceTier,
+  ProductVariant,
   ReturnInput,
   SaleStatus,
   SaleSummary,
@@ -60,6 +61,30 @@ function parseJson<T>(value: string | null | undefined, fallback: T): T {
 
 function stringifyJson(value: unknown): string {
   return JSON.stringify(value ?? {});
+}
+
+function parseProductVariants(value: string | null | undefined): ProductVariant[] {
+  const parsed = parseJson<ProductVariant[]>(value, []);
+  return Array.isArray(parsed) ? parsed : [];
+}
+
+function applyVariantStockDelta(
+  variants: ProductVariant[],
+  variantId: string | null | undefined,
+  delta: number,
+): ProductVariant[] {
+  if (!variantId) {
+    return variants;
+  }
+
+  return variants.map((variant) => (
+    variant.id === variantId
+      ? {
+          ...variant,
+          stockOnHand: variant.stockOnHand + delta,
+        }
+      : variant
+  ));
 }
 
 function normalizeClock(value: string | null | undefined): VectorClock {
@@ -295,6 +320,7 @@ function initSchema(db: Database.Database): void {
       unit_label TEXT NOT NULL DEFAULT 'pcs',
       stock_on_hand INTEGER NOT NULL DEFAULT 0,
       description TEXT,
+      variants_json TEXT,
       last_vector_clock TEXT DEFAULT '{}'
     );
 
@@ -356,6 +382,10 @@ function initSchema(db: Database.Database): void {
       product_id TEXT NOT NULL,
       sku TEXT NOT NULL,
       name TEXT NOT NULL,
+      variant_id TEXT,
+      variant_code TEXT,
+      variant_name TEXT,
+      variant_attributes_json TEXT,
       subcategory TEXT NOT NULL,
       quantity INTEGER NOT NULL,
       unit_price REAL NOT NULL,
@@ -396,6 +426,10 @@ function initSchema(db: Database.Database): void {
       sku TEXT NOT NULL,
       name TEXT NOT NULL,
       barcode TEXT,
+      variant_id TEXT,
+      variant_code TEXT,
+      variant_name TEXT,
+      variant_attributes_json TEXT,
       subcategory TEXT NOT NULL,
       quantity INTEGER NOT NULL,
       unit_price REAL NOT NULL,
@@ -437,6 +471,7 @@ function initSchema(db: Database.Database): void {
       return_id TEXT NOT NULL,
       sale_line_id TEXT NOT NULL,
       product_id TEXT NOT NULL,
+      variant_id TEXT,
       quantity INTEGER NOT NULL,
       refund_amount REAL NOT NULL
     );
@@ -532,6 +567,16 @@ function initSchema(db: Database.Database): void {
   `);
 
   ensureColumn(db, 'users', 'email', 'TEXT');
+  ensureColumn(db, 'products', 'variants_json', 'TEXT');
+  ensureColumn(db, 'held_sale_lines', 'variant_id', 'TEXT');
+  ensureColumn(db, 'held_sale_lines', 'variant_code', 'TEXT');
+  ensureColumn(db, 'held_sale_lines', 'variant_name', 'TEXT');
+  ensureColumn(db, 'held_sale_lines', 'variant_attributes_json', 'TEXT');
+  ensureColumn(db, 'sale_lines', 'variant_id', 'TEXT');
+  ensureColumn(db, 'sale_lines', 'variant_code', 'TEXT');
+  ensureColumn(db, 'sale_lines', 'variant_name', 'TEXT');
+  ensureColumn(db, 'sale_lines', 'variant_attributes_json', 'TEXT');
+  ensureColumn(db, 'return_lines', 'variant_id', 'TEXT');
   db.exec(`
     CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
   `);
@@ -618,8 +663,8 @@ export function replaceCatalogSnapshot(snapshot: SharedCatalogSnapshot): void {
       db.prepare(`
         INSERT INTO products (
           id, sku, barcode, name, category_id, subcategory, pack_size,
-          unit_label, stock_on_hand, description, last_vector_clock
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          unit_label, stock_on_hand, description, variants_json, last_vector_clock
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         product.id,
         product.sku,
@@ -631,6 +676,7 @@ export function replaceCatalogSnapshot(snapshot: SharedCatalogSnapshot): void {
         product.unitLabel,
         Math.max(0, Math.round(product.stockOnHand)),
         product.description ?? null,
+        JSON.stringify(product.variants ?? []),
         stringifyJson({}),
       );
 
@@ -813,6 +859,7 @@ function mapProductRow(row: any, tiersByProduct: Map<string, ProductPriceTier[]>
     unitLabel: row.unit_label,
     stockOnHand: row.stock_on_hand,
     description: row.description ?? undefined,
+    variants: parseProductVariants(row.variants_json ?? row.variantsJson),
     priceTiers: tiersByProduct.get(row.id) ?? [],
   };
 }
@@ -821,6 +868,47 @@ function getProducts(db: Database.Database): Product[] {
   const tiersByProduct = getPriceTiersByProduct(db);
   const rows = db.prepare('SELECT * FROM products ORDER BY sku ASC').all() as any[];
   return rows.map((row) => mapProductRow(row, tiersByProduct));
+}
+
+function getAvailableLineStock(db: Database.Database, line: Pick<CartLine, 'productId' | 'variantId'>): number {
+  const row = db.prepare('SELECT stock_on_hand, variants_json FROM products WHERE id = ?').get(line.productId) as any;
+  if (!row) {
+    return 0;
+  }
+
+  if (!line.variantId) {
+    return Number(row.stock_on_hand ?? 0);
+  }
+
+  const variant = parseProductVariants(row.variants_json).find((entry) => entry.id === line.variantId);
+  return Number(variant?.stockOnHand ?? 0);
+}
+
+function updateProductStockRow(
+  db: Database.Database,
+  input: {
+    productId: string;
+    variantId?: string | null;
+    delta: number;
+    vectorClock: VectorClock;
+  },
+): void {
+  const row = db.prepare('SELECT variants_json FROM products WHERE id = ?').get(input.productId) as any;
+  const nextVariantsJson = input.variantId
+    ? stringifyJson(
+        applyVariantStockDelta(
+          parseProductVariants(row?.variants_json),
+          input.variantId,
+          input.delta,
+        ),
+      )
+    : row?.variants_json ?? null;
+
+  db.prepare(`
+    UPDATE products
+    SET stock_on_hand = stock_on_hand + ?, variants_json = ?, last_vector_clock = ?
+    WHERE id = ?
+  `).run(input.delta, nextVariantsJson, stringifyJson(input.vectorClock), input.productId);
 }
 
 function getAggregateClock(db: Database.Database, aggregateType: string, aggregateId: string): VectorClock {
@@ -1063,16 +1151,21 @@ function replaceHeldSaleLines(db: Database.Database, heldSaleId: string, lines: 
   for (const line of lines) {
     db.prepare(`
       INSERT INTO held_sale_lines (
-        id, held_sale_id, product_id, sku, name, subcategory, quantity,
+        id, held_sale_id, product_id, sku, name, variant_id, variant_code,
+        variant_name, variant_attributes_json, subcategory, quantity,
         unit_price, tier_label, discount_percent, discount_amount,
         salesperson_id, cost_basis, line_total
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       line.uid,
       heldSaleId,
       line.productId,
       line.sku,
       line.name,
+      line.variantId ?? null,
+      line.variantCode ?? null,
+      line.variantName ?? null,
+      line.variantAttributes ? stringifyJson(line.variantAttributes) : null,
       line.subcategory,
       line.quantity,
       line.unitPrice,
@@ -1151,10 +1244,11 @@ function replaceSaleLines(db: Database.Database, saleId: string, lines: CartLine
     const marginAmount = line.quantity * (line.unitPrice - line.costBasis) - line.discountAmount;
     db.prepare(`
       INSERT INTO sale_lines (
-        id, sale_id, product_id, sku, name, barcode, subcategory,
-        quantity, unit_price, tier_label, discount_percent, discount_amount,
+        id, sale_id, product_id, sku, name, barcode, variant_id, variant_code,
+        variant_name, variant_attributes_json, subcategory, quantity,
+        unit_price, tier_label, discount_percent, discount_amount,
         salesperson_id, cost_basis, margin_amount, line_total
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       line.uid,
       saleId,
@@ -1162,6 +1256,10 @@ function replaceSaleLines(db: Database.Database, saleId: string, lines: CartLine
       line.sku,
       line.name,
       line.barcode ?? null,
+      line.variantId ?? null,
+      line.variantCode ?? null,
+      line.variantName ?? null,
+      line.variantAttributes ? stringifyJson(line.variantAttributes) : null,
       line.subcategory,
       line.quantity,
       line.unitPrice,
@@ -1197,8 +1295,8 @@ function replacePayments(db: Database.Database, saleId: string, payments: Paymen
 
 function assertSufficientStock(db: Database.Database, lines: CartLine[]): void {
   for (const line of lines) {
-    const row = db.prepare('SELECT stock_on_hand FROM products WHERE id = ?').get(line.productId) as any;
-    if (!row || row.stock_on_hand < line.quantity) {
+    const available = getAvailableLineStock(db, line);
+    if (available < line.quantity) {
       throw new Error(`Insufficient local stock for ${line.sku}`);
     }
   }
@@ -1212,11 +1310,12 @@ function applySaleCompleted(db: Database.Database, event: SyncEvent<CompleteSale
   }
 
   for (const line of payload.lines) {
-    db.prepare(`
-      UPDATE products
-      SET stock_on_hand = stock_on_hand - ?, last_vector_clock = ?
-      WHERE id = ?
-    `).run(line.quantity, stringifyJson(event.vectorClock), line.productId);
+    updateProductStockRow(db, {
+      productId: line.productId,
+      variantId: line.variantId,
+      delta: -line.quantity,
+      vectorClock: event.vectorClock,
+    });
   }
 
   db.prepare(`
@@ -1271,13 +1370,14 @@ function applySaleVoided(db: Database.Database, event: SyncEvent<{ saleId: strin
     return;
   }
 
-  const lines = db.prepare('SELECT product_id, quantity FROM sale_lines WHERE sale_id = ?').all(event.payload.saleId) as any[];
+  const lines = db.prepare('SELECT product_id, variant_id, quantity FROM sale_lines WHERE sale_id = ?').all(event.payload.saleId) as any[];
   for (const line of lines) {
-    db.prepare(`
-      UPDATE products
-      SET stock_on_hand = stock_on_hand + ?, last_vector_clock = ?
-      WHERE id = ?
-    `).run(line.quantity, stringifyJson(event.vectorClock), line.product_id);
+    updateProductStockRow(db, {
+      productId: line.product_id,
+      variantId: line.variant_id,
+      delta: line.quantity,
+      vectorClock: event.vectorClock,
+    });
   }
 
   db.prepare(`
@@ -1320,15 +1420,24 @@ function applyReturnCreated(db: Database.Database, event: SyncEvent<ReturnInput>
 
   for (const line of payload.lines) {
     db.prepare(`
-      INSERT INTO return_lines (id, return_id, sale_line_id, product_id, quantity, refund_amount)
-      VALUES (?, ?, ?, ?, ?, ?)
-    `).run(uuidv4(), event.aggregateId, line.saleLineId, line.productId, line.quantity, line.refundAmount);
+      INSERT INTO return_lines (id, return_id, sale_line_id, product_id, variant_id, quantity, refund_amount)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      uuidv4(),
+      event.aggregateId,
+      line.saleLineId,
+      line.productId,
+      line.variantId ?? null,
+      line.quantity,
+      line.refundAmount,
+    );
 
-    db.prepare(`
-      UPDATE products
-      SET stock_on_hand = stock_on_hand + ?, last_vector_clock = ?
-      WHERE id = ?
-    `).run(line.quantity, stringifyJson(event.vectorClock), line.productId);
+    updateProductStockRow(db, {
+      productId: line.productId,
+      variantId: line.variantId,
+      delta: line.quantity,
+      vectorClock: event.vectorClock,
+    });
   }
 
   db.prepare(`
@@ -1537,6 +1646,10 @@ function mapHeldSaleRows(db: Database.Database, userMap: Map<string, POSUser>): 
         productId: line.product_id,
         sku: line.sku,
         name: line.name,
+        variantId: line.variant_id ?? undefined,
+        variantCode: line.variant_code ?? undefined,
+        variantName: line.variant_name ?? undefined,
+        variantAttributes: parseJson(line.variant_attributes_json, undefined),
         subcategory: line.subcategory,
         quantity: line.quantity,
         unitPrice: line.unit_price,
@@ -1597,6 +1710,10 @@ function mapSales(db: Database.Database, userMap: Map<string, POSUser>): SaleSum
       productId: line.product_id,
       sku: line.sku,
       name: line.name,
+      variantId: line.variant_id ?? undefined,
+      variantCode: line.variant_code ?? undefined,
+      variantName: line.variant_name ?? undefined,
+      variantAttributes: parseJson(line.variant_attributes_json, undefined),
       subcategory: line.subcategory,
       quantity: line.quantity,
       unitPrice: line.unit_price,

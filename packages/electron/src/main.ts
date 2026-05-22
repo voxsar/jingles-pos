@@ -1,7 +1,13 @@
 import fs from 'fs';
 import path from 'path';
-import { app, BrowserWindow, dialog, ipcMain } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, type OpenDialogOptions } from 'electron';
 import { getDesktopLocalApiUrl, startLocalApiServer, type LocalApiServer } from './backend/localApi';
+import {
+  copyDatabaseSnapshotIfNeeded,
+  createDesktopBackup,
+  readDesktopSettings,
+  saveDesktopSettings,
+} from './desktopSettings';
 
 let mainWindow: BrowserWindow | null = null;
 let localApiServer: LocalApiServer | null = null;
@@ -113,10 +119,16 @@ async function stopLocalApiServer() {
   }
 }
 
+async function restartLocalApiServer() {
+  await stopLocalApiServer();
+  localApiServer = await startLocalApiServer();
+  return localApiServer;
+}
+
 app.whenReady().then(async () => {
   try {
     app.setAppUserModelId('com.jingles.pos');
-    localApiServer = await startLocalApiServer();
+    localApiServer = await restartLocalApiServer();
     await createWindow();
   } catch (error) {
     showStartupError('Jingles POS failed to start', 'Desktop startup aborted before the window was ready.', error);
@@ -141,4 +153,71 @@ ipcMain.on('app:backend-url-sync', (event) => {
 
 ipcMain.handle('app:backend-url', () => {
   return localApiServer?.url ?? getDesktopLocalApiUrl();
+});
+
+ipcMain.handle('desktop-settings:get', () => {
+  return readDesktopSettings();
+});
+
+ipcMain.handle('desktop-settings:pick-database-path', async (_event, currentPath?: string) => {
+  const dialogOptions = {
+    title: 'Choose POS database file',
+    defaultPath: currentPath || readDesktopSettings().databasePath,
+    filters: [
+      { name: 'SQLite Database', extensions: ['sqlite', 'db'] },
+      { name: 'All Files', extensions: ['*'] },
+    ],
+  };
+  const selection = mainWindow
+    ? await dialog.showSaveDialog(mainWindow, dialogOptions)
+    : await dialog.showSaveDialog(dialogOptions);
+
+  return selection.canceled ? null : selection.filePath ?? null;
+});
+
+ipcMain.handle('desktop-settings:pick-backup-directory', async (_event, currentPath?: string) => {
+  const dialogOptions = {
+    title: 'Choose backup directory',
+    defaultPath: currentPath || readDesktopSettings().backupDirectory,
+    properties: ['openDirectory', 'createDirectory'] as OpenDialogOptions['properties'],
+  };
+  const selection = mainWindow
+    ? await dialog.showOpenDialog(mainWindow, dialogOptions)
+    : await dialog.showOpenDialog(dialogOptions);
+
+  return selection.canceled ? null : selection.filePaths[0] ?? null;
+});
+
+ipcMain.handle('desktop-settings:backup-now', async () => {
+  return createDesktopBackup();
+});
+
+ipcMain.handle('desktop-settings:save', async (_event, nextSettings) => {
+  const previousSettings = readDesktopSettings();
+  const savedSettings = saveDesktopSettings(nextSettings ?? {});
+  const copiedDatabase = await copyDatabaseSnapshotIfNeeded(
+    previousSettings.databasePath,
+    savedSettings.databasePath,
+  );
+  const shouldRestartBackend =
+    savedSettings.syncUrl !== previousSettings.syncUrl ||
+    savedSettings.databasePath !== previousSettings.databasePath;
+
+  try {
+    if (shouldRestartBackend) {
+      await restartLocalApiServer();
+    }
+
+    return {
+      settings: savedSettings,
+      restartedBackend: shouldRestartBackend,
+      copiedDatabase,
+    };
+  } catch (error) {
+    saveDesktopSettings(previousSettings);
+    if (shouldRestartBackend) {
+      await restartLocalApiServer();
+    }
+    throw error;
+  }
 });

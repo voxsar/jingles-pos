@@ -1,5 +1,5 @@
 import path from 'path';
-import type { ProductPriceTier, Product, SharedCatalogSnapshot } from '@jingles/shared';
+import type { ProductPriceTier, Product, ProductVariant, SharedCatalogSnapshot } from '@jingles/shared';
 import prisma from '../prisma';
 import { isLocalPosBackendMode } from '../localMode';
 
@@ -14,6 +14,7 @@ type LocalProductRow = {
   unitLabel: string;
   stockOnHand: number;
   description: string | null;
+  variantsJson: string | null;
 };
 
 type DirectSqliteStatement = {
@@ -85,6 +86,19 @@ function sortTiers<T extends { priority: number; minQty: number }>(tiers: T[]): 
   });
 }
 
+function parseVariantsJson(value: string | null | undefined): ProductVariant[] {
+  if (!value) {
+    return [];
+  }
+
+  try {
+    const parsed = JSON.parse(value) as ProductVariant[];
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
 function mapPriceTiers(
   tiers: Array<{
     id: string;
@@ -130,6 +144,7 @@ function mapProductRow(
     stockOnHand: product.stockOnHand ?? 0,
     description: product.description ?? undefined,
     priceTiers: mapPriceTiers(tiers),
+    variants: parseVariantsJson(product.variantsJson),
   };
 }
 
@@ -301,8 +316,8 @@ function replaceLocalCatalogSnapshotDirect(snapshot: SharedCatalogSnapshot) {
     const insertProduct = db.prepare(`
       INSERT INTO "Product" (
         id, sku, barcode, name, price, categoryId, subcategory, packSize,
-        unitLabel, stockOnHand, description, lastVectorClock, createdAt, updatedAt
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+        unitLabel, stockOnHand, description, variants_json, lastVectorClock, createdAt, updatedAt
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
     `);
     const insertBatchPrice = db.prepare(`
       INSERT INTO "BatchPrice" (id, productId, label, minQty, price, priority, isDefault, createdAt)
@@ -334,6 +349,7 @@ function replaceLocalCatalogSnapshotDirect(snapshot: SharedCatalogSnapshot) {
           product.unitLabel,
           Math.max(0, Math.round(product.stockOnHand)),
           product.description ?? null,
+          JSON.stringify(product.variants ?? []),
           '{}',
         );
 
@@ -415,6 +431,7 @@ export async function replaceLocalCatalogSnapshot(snapshot: SharedCatalogSnapsho
     unitLabel: product.unitLabel,
     stockOnHand: Math.max(0, Math.round(product.stockOnHand)),
     description: product.description ?? null,
+    variantsJson: JSON.stringify(product.variants ?? []),
     lastVectorClock: '{}',
   }));
   const batchPriceRows = snapshot.products.flatMap((product) =>

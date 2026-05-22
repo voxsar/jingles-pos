@@ -7,6 +7,7 @@ import {
   DEFAULT_TERMINAL_ID,
   HoldSaleInput,
   POSSyncDashboard,
+  ProductVariant,
   ReturnInput,
   SaleStatus,
   SharedCatalogSnapshot,
@@ -135,6 +136,68 @@ function resolveConflictPolicy(eventType: SyncEventType): SyncConflictPolicy {
 
 function json(value: unknown): string {
   return JSON.stringify(value ?? {});
+}
+
+function parseProductVariants(value: unknown): ProductVariant[] {
+  const parsed = parseJson<ProductVariant[]>(value, []);
+  return Array.isArray(parsed) ? parsed : [];
+}
+
+function applyVariantStockDelta(
+  variants: ProductVariant[],
+  variantId: string | null | undefined,
+  delta: number,
+): ProductVariant[] {
+  if (!variantId) {
+    return variants;
+  }
+
+  return variants.map((variant) => (
+    variant.id === variantId
+      ? {
+          ...variant,
+          stockOnHand: variant.stockOnHand + delta,
+        }
+      : variant
+  ));
+}
+
+async function updateProductStock(
+  tx: Tx,
+  input: {
+    productId: string;
+    variantId?: string | null;
+    delta: number;
+    vectorClock: VectorClock;
+  },
+): Promise<void> {
+  const variantsJson = input.variantId
+    ? (
+        await tx.product.findUnique({
+          where: { id: input.productId },
+          select: { variantsJson: true },
+        })
+      )?.variantsJson
+    : null;
+
+  await tx.product.update({
+    where: { id: input.productId },
+    data: {
+      stockOnHand: input.delta >= 0
+        ? { increment: input.delta }
+        : { decrement: Math.abs(input.delta) },
+      variantsJson: input.variantId
+        ? JSON.stringify(
+            applyVariantStockDelta(
+              parseProductVariants(variantsJson),
+              input.variantId,
+              input.delta,
+            ),
+          )
+        : undefined,
+      lastVectorClock: json(input.vectorClock),
+    },
+  });
 }
 
 function isConfirmedEvent(event: Pick<SyncEvent, 'state'>) {
@@ -353,6 +416,10 @@ async function applyHeldSaleSavedEvent(tx: Tx, event: SyncEvent<HoldSaleInput>):
         productId: line.productId,
         sku: line.sku,
         name: line.name,
+        variantId: line.variantId ?? null,
+        variantCode: line.variantCode ?? null,
+        variantName: line.variantName ?? null,
+        variantAttributesJson: line.variantAttributes ? json(line.variantAttributes) : null,
         subcategory: line.subcategory,
         salespersonId: line.salespersonId,
         quantity: line.quantity,
@@ -388,12 +455,11 @@ async function applySaleCompletedEvent(tx: Tx, event: SyncEvent<CompleteSaleInpu
   }
 
   for (const line of payload.lines) {
-    await tx.product.update({
-      where: { id: line.productId },
-      data: {
-        stockOnHand: { decrement: line.quantity },
-        lastVectorClock: json(event.vectorClock),
-      },
+    await updateProductStock(tx, {
+      productId: line.productId,
+      variantId: line.variantId,
+      delta: -line.quantity,
+      vectorClock: event.vectorClock,
     });
 
     await tx.inventoryEvent.create({
@@ -435,6 +501,10 @@ async function applySaleCompletedEvent(tx: Tx, event: SyncEvent<CompleteSaleInpu
           sku: line.sku,
           name: line.name,
           barcode: line.barcode ?? null,
+          variantId: line.variantId ?? null,
+          variantCode: line.variantCode ?? null,
+          variantName: line.variantName ?? null,
+          variantAttributesJson: line.variantAttributes ? json(line.variantAttributes) : null,
           subcategory: line.subcategory,
           salespersonId: line.salespersonId,
           quantity: line.quantity,
@@ -481,6 +551,9 @@ async function applySaleCompletedEvent(tx: Tx, event: SyncEvent<CompleteSaleInpu
         sku: line.sku,
         quantity: line.quantity,
         name: line.name,
+        variantId: line.variantId ?? null,
+        variantCode: line.variantCode ?? null,
+        variantName: line.variantName ?? null,
       })),
     });
   }
@@ -500,12 +573,11 @@ async function applySaleVoidedEvent(
   }
 
   for (const line of sale.lines) {
-    await tx.product.update({
-      where: { id: line.productId },
-      data: {
-        stockOnHand: { increment: line.quantity },
-        lastVectorClock: json(event.vectorClock),
-      },
+    await updateProductStock(tx, {
+      productId: line.productId,
+      variantId: line.variantId,
+      delta: line.quantity,
+      vectorClock: event.vectorClock,
     });
 
     await tx.inventoryEvent.create({
@@ -539,6 +611,9 @@ async function applySaleVoidedEvent(
         sku: line.sku,
         quantity: line.quantity,
         name: line.name,
+        variantId: line.variantId ?? null,
+        variantCode: line.variantCode ?? null,
+        variantName: line.variantName ?? null,
       })),
     });
   }
@@ -559,12 +634,11 @@ async function applyReturnCreatedEvent(tx: Tx, event: SyncEvent<ReturnInput>): P
   const totalRefund = payload.lines.reduce((sum, line) => sum + line.refundAmount, 0);
 
   for (const line of payload.lines) {
-    await tx.product.update({
-      where: { id: line.productId },
-      data: {
-        stockOnHand: { increment: line.quantity },
-        lastVectorClock: json(event.vectorClock),
-      },
+    await updateProductStock(tx, {
+      productId: line.productId,
+      variantId: line.variantId,
+      delta: line.quantity,
+      vectorClock: event.vectorClock,
     });
 
     await tx.inventoryEvent.create({
@@ -595,6 +669,7 @@ async function applyReturnCreatedEvent(tx: Tx, event: SyncEvent<ReturnInput>): P
           id: uuidv4(),
           saleLineId: line.saleLineId,
           productId: line.productId,
+          variantId: line.variantId ?? null,
           quantity: line.quantity,
           refundAmount: line.refundAmount,
         })),
@@ -625,6 +700,9 @@ async function applyReturnCreatedEvent(tx: Tx, event: SyncEvent<ReturnInput>): P
           sku: saleLine?.sku ?? line.productId,
           quantity: line.quantity,
           name: saleLine?.name,
+          variantId: line.variantId ?? saleLine?.variantId ?? null,
+          variantCode: saleLine?.variantCode ?? null,
+          variantName: saleLine?.variantName ?? null,
         };
       }),
     });

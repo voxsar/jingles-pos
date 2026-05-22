@@ -5,6 +5,8 @@ import {
   CompleteSaleInput,
   Customer,
   HeldSaleSummary,
+  POSDesktopSettings,
+  POSThemeMode,
   POSSyncRunResult,
   PaymentInput,
   PaymentMethod,
@@ -12,6 +14,7 @@ import {
   POSUser,
   Product,
   ProductPriceTier,
+  ProductVariant,
   ReturnInput,
   SaleSummary,
   ShiftSummary,
@@ -37,6 +40,17 @@ import {
 } from './api';
 import { useAuth } from './auth/AuthContext';
 import {
+  buildFallbackDesktopSettings,
+  createDesktopBackup,
+  hasDesktopSettingsBridge,
+  loadDesktopSettings,
+  persistThemeMode,
+  pickDesktopBackupDirectory,
+  pickDesktopDatabasePath,
+  readStoredThemeMode,
+  saveDesktopSettings as saveDesktopSettingsToBridge,
+} from './desktopSettings';
+import {
   buildCashDeclaration,
   calcCartTotals,
   createCartLine,
@@ -48,6 +62,8 @@ import {
   formatTime,
   generateHoldNumber,
   generateReceiptNumber,
+  getLineVariantSummary,
+  getProductVariantLabel,
   getNameInitials,
   pickPriceTier,
   recalculateCartLine,
@@ -82,6 +98,12 @@ type CatalogSubcategoryTile = {
 
 type HoldMode = 'hold' | 'recall';
 type MoneyModalMode = 'open' | 'close';
+
+type VariantSelectionRequest = {
+  initialVariantId?: string | null;
+  lineId?: string | null;
+  product: Product;
+};
 
 const DEFAULT_CATALOG_PANE_WIDTH = 62;
 const MIN_CATALOG_PANE_WIDTH = 38;
@@ -146,6 +168,7 @@ export default function PosWorkstation() {
   const [notice, setNotice] = useState<Notice>(null);
 
   const [isSearchOpen, setIsSearchOpen] = useState(false);
+  const [variantSelection, setVariantSelection] = useState<VariantSelectionRequest | null>(null);
   const [isPaymentOpen, setIsPaymentOpen] = useState(false);
   const [isHoldOpen, setIsHoldOpen] = useState(false);
   const [holdMode, setHoldMode] = useState<HoldMode>('hold');
@@ -158,13 +181,47 @@ export default function PosWorkstation() {
   const [activeHeldSaleId, setActiveHeldSaleId] = useState<string | null>(null);
   const [receiptSale, setReceiptSale] = useState<SaleSummary | null>(null);
   const [isSyncing, setIsSyncing] = useState(false);
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [isSettingsLoading, setIsSettingsLoading] = useState(false);
+  const [isSettingsSaving, setIsSettingsSaving] = useState(false);
+  const [isCreatingBackup, setIsCreatingBackup] = useState(false);
+  const [appliedThemeMode, setAppliedThemeMode] = useState<POSThemeMode>(() => readStoredThemeMode());
+  const [desktopSettings, setDesktopSettings] = useState<POSDesktopSettings | null>(() => (
+    buildFallbackDesktopSettings(readStoredThemeMode())
+  ));
+  const [settingsDraft, setSettingsDraft] = useState<POSDesktopSettings | null>(() => (
+    buildFallbackDesktopSettings(readStoredThemeMode())
+  ));
+  const [chromeOffsets, setChromeOffsets] = useState({ top: 136, bottom: 140 });
 
   const discountInputRef = useRef<HTMLInputElement>(null);
   const customerSelectRef = useRef<HTMLSelectElement>(null);
+  const headerBarRef = useRef<HTMLElement>(null);
+  const actionBarRef = useRef<HTMLDivElement>(null);
   const workstationGridRef = useRef<HTMLDivElement>(null);
 
   const showNotice = useCallback((type: 'success' | 'error', text: string) => {
     setNotice({ type, text });
+  }, []);
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = appliedThemeMode;
+    persistThemeMode(appliedThemeMode);
+  }, [appliedThemeMode]);
+
+  const loadDesktopSettingsIntoState = useCallback(async () => {
+    const fallback = buildFallbackDesktopSettings(readStoredThemeMode());
+    if (!hasDesktopSettingsBridge()) {
+      setDesktopSettings(fallback);
+      setSettingsDraft(fallback);
+      return fallback;
+    }
+
+    const loaded = await loadDesktopSettings();
+    setDesktopSettings(loaded);
+    setSettingsDraft(loaded);
+    setAppliedThemeMode(loaded.themeMode);
+    return loaded;
   }, []);
 
   const clampPaneWidth = useCallback((nextWidth: number) => {
@@ -230,6 +287,13 @@ export default function PosWorkstation() {
   }, [authUser]);
 
   useEffect(() => {
+    void loadDesktopSettingsIntoState().catch(() => {
+      setDesktopSettings(buildFallbackDesktopSettings(readStoredThemeMode()));
+      setSettingsDraft(buildFallbackDesktopSettings(readStoredThemeMode()));
+    });
+  }, [loadDesktopSettingsIntoState]);
+
+  useEffect(() => {
     if (!isResizingCatalogPane) {
       return undefined;
     }
@@ -259,6 +323,41 @@ export default function PosWorkstation() {
     };
   }, [isResizingCatalogPane, updateCatalogPaneWidthFromClientX]);
 
+  useEffect(() => {
+    const updateChromeOffsets = () => {
+      setChromeOffsets({
+        top: (headerBarRef.current?.offsetHeight ?? 112) + 8,
+        bottom: (actionBarRef.current?.offsetHeight ?? 108) + 8,
+      });
+    };
+
+    updateChromeOffsets();
+    window.addEventListener('resize', updateChromeOffsets);
+
+    if (typeof ResizeObserver === 'undefined') {
+      return () => {
+        window.removeEventListener('resize', updateChromeOffsets);
+      };
+    }
+
+    const resizeObserver = new ResizeObserver(() => {
+      updateChromeOffsets();
+    });
+
+    if (headerBarRef.current != null) {
+      resizeObserver.observe(headerBarRef.current);
+    }
+
+    if (actionBarRef.current != null) {
+      resizeObserver.observe(actionBarRef.current);
+    }
+
+    return () => {
+      resizeObserver.disconnect();
+      window.removeEventListener('resize', updateChromeOffsets);
+    };
+  }, []);
+
   const currentTerminalId = session?.terminalId ?? selectedTerminalId ?? loadedTerminalId ?? DEFAULT_TERMINAL_ID;
 
   const branches = bootstrapData?.branches ?? [];
@@ -282,6 +381,10 @@ export default function PosWorkstation() {
   }, [users]);
 
   const productMap = useMemo(() => new Map(products.map((product) => [product.id, product])), [products]);
+  const productsWithVariants = useMemo(
+    () => new Set(products.filter((product) => (product.variants?.length ?? 0) > 0).map((product) => product.id)),
+    [products],
+  );
   const customerMap = useMemo(() => new Map(customers.map((customer) => [customer.id, customer])), [customers]);
   const userMap = useMemo(() => new Map(users.map((user) => [user.id, user])), [users]);
 
@@ -443,6 +546,106 @@ export default function PosWorkstation() {
     [currentTerminalId, reloadBootstrap, reloadSales],
   );
 
+  const handleOpenSettings = useCallback(async () => {
+    setIsSettingsOpen(true);
+    setIsSettingsLoading(true);
+
+    try {
+      const loaded = await loadDesktopSettingsIntoState();
+      setSettingsDraft(loaded);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to load workstation settings';
+      showNotice('error', message);
+    } finally {
+      setIsSettingsLoading(false);
+    }
+  }, [loadDesktopSettingsIntoState, showNotice]);
+
+  const handleSaveSettings = useCallback(async () => {
+    if (settingsDraft == null) {
+      return;
+    }
+
+    setIsSettingsSaving(true);
+
+    try {
+      if (hasDesktopSettingsBridge()) {
+        const result = await saveDesktopSettingsToBridge(settingsDraft);
+        setDesktopSettings(result.settings);
+        setSettingsDraft(result.settings);
+        setAppliedThemeMode(result.settings.themeMode);
+        await refreshWorkspace({ includeSales: true });
+        showNotice(
+          'success',
+          result.restartedBackend
+            ? `Settings saved. The local backend restarted${result.copiedDatabase ? ' and copied the current database to the new path' : ''}.`
+            : 'Settings saved.',
+        );
+      } else {
+        setDesktopSettings(settingsDraft);
+        setAppliedThemeMode(settingsDraft.themeMode);
+        showNotice('success', 'Theme saved for this browser session.');
+      }
+
+      setIsSettingsOpen(false);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to save workstation settings';
+      showNotice('error', message);
+    } finally {
+      setIsSettingsSaving(false);
+    }
+  }, [refreshWorkspace, settingsDraft, showNotice]);
+
+  const handlePickDatabaseLocation = useCallback(async () => {
+    if (settingsDraft == null) {
+      return;
+    }
+
+    try {
+      const filePath = await pickDesktopDatabasePath(settingsDraft.databasePath);
+      if (filePath) {
+        setSettingsDraft((previous: POSDesktopSettings | null) => (
+          previous ? { ...previous, databasePath: filePath } : previous
+        ));
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to pick a database file';
+      showNotice('error', message);
+    }
+  }, [settingsDraft, showNotice]);
+
+  const handlePickBackupDirectory = useCallback(async () => {
+    if (settingsDraft == null) {
+      return;
+    }
+
+    try {
+      const directoryPath = await pickDesktopBackupDirectory(settingsDraft.backupDirectory);
+      if (directoryPath) {
+        setSettingsDraft((previous: POSDesktopSettings | null) => (
+          previous ? { ...previous, backupDirectory: directoryPath } : previous
+        ));
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to pick a backup directory';
+      showNotice('error', message);
+    }
+  }, [settingsDraft, showNotice]);
+
+  const handleCreateBackup = useCallback(async () => {
+    setIsCreatingBackup(true);
+
+    try {
+      const result = await createDesktopBackup();
+      showNotice('success', `Backup created at ${result.filePath}`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to create a database backup';
+      showNotice('error', message);
+    } finally {
+      setIsCreatingBackup(false);
+    }
+  }, [showNotice]);
+
   useEffect(() => {
     void reloadBootstrap(DEFAULT_TERMINAL_ID);
   }, [reloadBootstrap]);
@@ -561,6 +764,7 @@ export default function PosWorkstation() {
 
   const closeOverlayStack = useCallback(() => {
     setIsSearchOpen(false);
+    setVariantSelection(null);
     setIsPaymentOpen(false);
     setIsHoldOpen(false);
     setMoneyMode(null);
@@ -633,36 +837,41 @@ export default function PosWorkstation() {
     }
   }, [customerMap]);
 
-  const addProductToCart = useCallback((product: Product) => {
+  const preferredTierLabels = useMemo(() => ([
+    defaultTierLabel,
+    selectedCustomer?.tier ?? '',
+    'Retail',
+  ].filter(Boolean)), [defaultTierLabel, selectedCustomer?.tier]);
+
+  const addProductToCart = useCallback((product: Product, variant?: ProductVariant) => {
     const salesperson = salespeople[0] ?? users[0];
     if (salesperson == null) {
       showNotice('error', 'No cashier or salesperson is configured for the workstation.');
       return;
     }
 
-    const preferredLabels = [
-      defaultTierLabel,
-      selectedCustomer?.tier ?? '',
-      'Retail',
-    ].filter(Boolean);
-
     setCart((previous) => {
-      const existing = previous.find((line) => line.productId === product.id && line.tierLabel === pickPriceTier(product.priceTiers, preferredLabels).label);
+      const tier = pickPriceTier(product.priceTiers, preferredTierLabels);
+      const existing = previous.find((line) => (
+        line.productId === product.id
+        && (line.variantId ?? null) === (variant?.id ?? null)
+        && line.tierLabel === tier.label
+      ));
       if (existing) {
         return previous.map((line) => (
           line.uid === existing.uid
             ? recalculateCartLine({
               ...line,
               quantity: line.quantity + 1,
-              stockOnHand: product.stockOnHand,
+              stockOnHand: variant?.stockOnHand ?? product.stockOnHand,
             })
             : line
         ));
       }
 
-      return [...previous, createCartLine(product, salesperson, preferredLabels)];
+      return [...previous, createCartLine(product, salesperson, preferredTierLabels, variant)];
     });
-  }, [defaultTierLabel, salespeople, selectedCustomer?.tier, showNotice, users]);
+  }, [preferredTierLabels, salespeople, showNotice, users]);
 
   const updateCartLineById = useCallback((lineId: string, updater: (line: CartLine) => CartLine | null) => {
     setCart((previous) => previous.flatMap((line) => {
@@ -674,6 +883,78 @@ export default function PosWorkstation() {
       return updated == null ? [] : [updated];
     }));
   }, []);
+
+  const applyVariantToCartLine = useCallback((
+    lineId: string,
+    product: Product,
+    variant: ProductVariant,
+  ) => {
+    updateCartLineById(lineId, (line) => {
+      const tier = pickPriceTier(product.priceTiers, [line.tierLabel, ...preferredTierLabels]);
+      return recalculateCartLine({
+        ...line,
+        sku: variant.variantCode,
+        name: product.name,
+        barcode: product.barcode,
+        variantId: variant.id,
+        variantCode: variant.variantCode,
+        variantName: variant.name ?? undefined,
+        variantAttributes: variant.attributes,
+        categoryId: product.categoryId,
+        subcategory: product.subcategory,
+        packSize: product.packSize,
+        unitPrice: tier.price,
+        tierLabel: tier.label,
+        priceTiers: product.priceTiers,
+        stockOnHand: variant.stockOnHand,
+      });
+    });
+  }, [preferredTierLabels, updateCartLineById]);
+
+  const handleProductPick = useCallback((product: Product) => {
+    if ((product.variants?.length ?? 0) > 0) {
+      setVariantSelection({
+        product,
+        initialVariantId: product.variants?.[0]?.id ?? null,
+      });
+      return;
+    }
+
+    addProductToCart(product);
+  }, [addProductToCart]);
+
+  const handleLineVariantChange = useCallback((lineId: string) => {
+    const line = cart.find((entry) => entry.uid === lineId);
+    if (!line) {
+      return;
+    }
+
+    const product = productMap.get(line.productId);
+    if (!product || (product.variants?.length ?? 0) === 0) {
+      showNotice('error', 'No variants are available for this product.');
+      return;
+    }
+
+    setVariantSelection({
+      product,
+      lineId,
+      initialVariantId: line.variantId ?? product.variants?.[0]?.id ?? null,
+    });
+  }, [cart, productMap, showNotice]);
+
+  const handleVariantSelectionComplete = useCallback((variant: ProductVariant) => {
+    if (variantSelection == null) {
+      return;
+    }
+
+    if (variantSelection.lineId) {
+      applyVariantToCartLine(variantSelection.lineId, variantSelection.product, variant);
+    } else {
+      addProductToCart(variantSelection.product, variant);
+    }
+
+    setVariantSelection(null);
+  }, [addProductToCart, applyVariantToCartLine, variantSelection]);
 
   const handleOpenShift = useCallback(async (counts: Record<string, number>) => {
     if (session == null) {
@@ -779,6 +1060,7 @@ export default function PosWorkstation() {
       const recalled = await recallHeldSale(heldSale.id);
       const restoredCart = recalled.lines.map((line) => {
         const product = productMap.get(line.productId);
+        const variant = product?.variants?.find((entry) => entry.id === line.variantId);
         const tier = product != null
           ? pickPriceTier(product.priceTiers, [line.tierLabel])
           : { id: `${line.id}-tier`, label: line.tierLabel, price: line.unitPrice, priority: 0 };
@@ -791,6 +1073,10 @@ export default function PosWorkstation() {
           sku: line.sku,
           name: line.name,
           barcode: product?.barcode,
+          variantId: line.variantId,
+          variantCode: line.variantCode,
+          variantName: line.variantName,
+          variantAttributes: line.variantAttributes,
           categoryId: product?.categoryId ?? 'uncategorized',
           subcategory: line.subcategory,
           packSize: product?.packSize ?? 1,
@@ -804,7 +1090,7 @@ export default function PosWorkstation() {
           discountPercent: line.discountPercent,
           discountAmount: line.discountAmount,
           costBasis: line.costBasis,
-          stockOnHand: product?.stockOnHand ?? line.quantity,
+          stockOnHand: variant?.stockOnHand ?? product?.stockOnHand ?? line.quantity,
           lineTotal: line.lineTotal,
         });
       });
@@ -892,6 +1178,7 @@ export default function PosWorkstation() {
       .map((line) => ({
         saleLineId: line.id,
         productId: line.productId,
+        variantId: line.variantId,
         quantity: draft.quantities[line.id] ?? 0,
         refundAmount: roundToMoney(line.unitPrice * (draft.quantities[line.id] ?? 0)),
       }))
@@ -961,9 +1248,13 @@ export default function PosWorkstation() {
   const terminalName = terminals.find((terminal) => terminal.id === currentTerminalId)?.name ?? 'POS Terminal';
   const sessionUser = session ? userMap.get(session.user.id) ?? session.user : null;
   const canTakePayment = cart.length > 0 && activeShift != null;
-  const workstationGridStyle = useMemo(
-    () => ({ '--catalog-pane-width': String(catalogPaneWidth) } as React.CSSProperties),
-    [catalogPaneWidth],
+  const workstationLayoutStyle = useMemo(
+    () => ({
+      '--catalog-pane-width': String(catalogPaneWidth),
+      '--workstation-top-space': `${chromeOffsets.top}px`,
+      '--workstation-bottom-space': `${chromeOffsets.bottom}px`,
+    } as React.CSSProperties),
+    [catalogPaneWidth, chromeOffsets.bottom, chromeOffsets.top],
   );
 
   if (isLoading) {
@@ -1004,7 +1295,7 @@ export default function PosWorkstation() {
   }
 
   return (
-    <div className="screen-fill workstation-app">
+    <div className="screen-fill workstation-app" style={workstationLayoutStyle}>
       <div className="bg-layer bg-layer-gradient" />
       <div className="bg-layer bg-layer-grid" />
 
@@ -1012,8 +1303,10 @@ export default function PosWorkstation() {
         activeShift={activeShift}
         cashierName={sessionUser?.name ?? session.user.name}
         conflictCount={syncStatus?.conflictCount ?? 0}
+        elementRef={headerBarRef}
         isSyncing={isSyncing}
         onCashAction={() => setMoneyMode(activeShift == null ? 'open' : 'close')}
+        onOpenSettings={() => void handleOpenSettings()}
         onSignOut={handleSignOut}
         onOpenSync={() => navigate('/sync')}
         onSync={handleSyncNow}
@@ -1037,14 +1330,13 @@ export default function PosWorkstation() {
       <div
         className={`workstation-grid ${isResizingCatalogPane ? 'resizing' : ''}`}
         ref={workstationGridRef}
-        style={workstationGridStyle}
       >
         <ProductPanel
           activeCategory={activeCategory}
           activeCategoryId={activeCategoryId}
           activeSubcategory={activeSubcategory}
           categories={categoryTiles}
-          onAddProduct={addProductToCart}
+          onAddProduct={handleProductPick}
           onCategoryChange={(nextCategory) => {
             setActiveCategoryId(nextCategory);
             setActiveSubcategory(null);
@@ -1104,6 +1396,7 @@ export default function PosWorkstation() {
             setVoidLineId(lineId);
             setIsVoidOpen(true);
           }}
+          onLineVariantChange={handleLineVariantChange}
           onLineSalespersonChange={(lineId, salespersonId) => {
             const salesperson = userMap.get(salespersonId);
             if (salesperson == null) {
@@ -1129,11 +1422,13 @@ export default function PosWorkstation() {
           onPay={() => setIsPaymentOpen(true)}
           salespeople={salespeople}
           totals={totals}
+          variantProductIds={productsWithVariants}
         />
       </div>
 
       <ActionBar
         canTakePayment={canTakePayment}
+        elementRef={actionBarRef}
         onCashAction={() => setMoneyMode(activeShift == null ? 'open' : 'close')}
         onCustomer={() => customerSelectRef.current?.focus()}
         onDiscount={() => discountInputRef.current?.focus()}
@@ -1155,9 +1450,37 @@ export default function PosWorkstation() {
           products={products}
           onClose={() => setIsSearchOpen(false)}
           onPick={(product) => {
-            addProductToCart(product);
             setIsSearchOpen(false);
+            handleProductPick(product);
           }}
+        />
+      )}
+
+      {variantSelection != null && (
+        <VariantSelectionModal
+          initialVariantId={variantSelection.initialVariantId ?? null}
+          onClose={() => setVariantSelection(null)}
+          onConfirm={handleVariantSelectionComplete}
+          product={variantSelection.product}
+        />
+      )}
+
+      {isSettingsOpen && (
+        <SettingsModal
+          draft={settingsDraft}
+          hasDesktopBridge={hasDesktopSettingsBridge()}
+          isBackingUp={isCreatingBackup}
+          isLoading={isSettingsLoading}
+          isSaving={isSettingsSaving}
+          onBackupNow={() => void handleCreateBackup()}
+          onBrowseBackupDirectory={() => void handlePickBackupDirectory()}
+          onBrowseDatabasePath={() => void handlePickDatabaseLocation()}
+          onClose={() => {
+            setIsSettingsOpen(false);
+            setSettingsDraft(desktopSettings);
+          }}
+          onDraftChange={setSettingsDraft}
+          onSave={() => void handleSaveSettings()}
         />
       )}
 
@@ -1364,8 +1687,10 @@ type HeaderBarProps = {
   activeShift: ShiftSummary | null;
   cashierName: string;
   conflictCount: number;
+  elementRef?: React.Ref<HTMLElement>;
   isSyncing: boolean;
   onCashAction: () => void;
+  onOpenSettings: () => void;
   needsSyncAuth: boolean;
   onOpenSync: () => void;
   onSignOut: () => void;
@@ -1381,8 +1706,43 @@ type HeaderBarProps = {
 };
 
 function HeaderBar(props: HeaderBarProps) {
+  const [isAccountMenuOpen, setIsAccountMenuOpen] = useState(false);
+  const accountMenuRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!isAccountMenuOpen) {
+      return undefined;
+    }
+
+    const handlePointerDown = (event: PointerEvent) => {
+      if (accountMenuRef.current?.contains(event.target as Node)) {
+        return;
+      }
+      setIsAccountMenuOpen(false);
+    };
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setIsAccountMenuOpen(false);
+      }
+    };
+
+    window.addEventListener('pointerdown', handlePointerDown);
+    window.addEventListener('keydown', handleKeyDown);
+
+    return () => {
+      window.removeEventListener('pointerdown', handlePointerDown);
+      window.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [isAccountMenuOpen]);
+
+  const handleAccountAction = (action: () => void) => {
+    setIsAccountMenuOpen(false);
+    action();
+  };
+
   return (
-    <header className="glass-bar workstation-header">
+    <header ref={props.elementRef} className="glass-bar workstation-header">
       <div className="header-left">
         <div className="brand-mark small">JP</div>
         <div>
@@ -1408,22 +1768,69 @@ function HeaderBar(props: HeaderBarProps) {
       <div className="header-right">
         <MetricCard label="Today" value={formatCurrency(props.todayRevenue)} />
         <MetricCard label="Bills" value={String(props.todayBills)} />
-        <MetricCard label="Cashier" value={props.cashierName} />
-        <button className="ghost-button" onClick={props.onSync} disabled={props.isSyncing}>
-          {props.isSyncing ? 'Syncing...' : 'Sync now'}
-        </button>
-        <button className="ghost-button" onClick={props.onOpenSync}>
-          Sync center
-        </button>
         <button className="ghost-button" onClick={props.onCashAction}>
           Cash
         </button>
-        <button className="ghost-button" onClick={props.onZReport}>
-          Reports
-        </button>
-        <button className="ghost-button danger" onClick={props.onSignOut}>
-          Sign out
-        </button>
+        <div className="account-menu" ref={accountMenuRef}>
+          <button
+            aria-expanded={isAccountMenuOpen}
+            aria-haspopup="menu"
+            className={`ghost-button account-menu-trigger ${isAccountMenuOpen ? 'open' : ''}`}
+            onClick={() => setIsAccountMenuOpen((previous) => !previous)}
+          >
+            <span className="account-menu-trigger-copy">
+              <span className="account-menu-trigger-label">Account</span>
+              <span className="account-menu-trigger-name">{props.cashierName}</span>
+            </span>
+            <span className="account-menu-caret" aria-hidden="true">{isAccountMenuOpen ? '▲' : '▼'}</span>
+          </button>
+
+          {isAccountMenuOpen && (
+            <div className="glass-panel account-menu-popover" role="menu">
+              <div className="account-menu-section-label">Cashier</div>
+              <div className="account-menu-user">{props.cashierName}</div>
+              {props.needsSyncAuth && (
+                <div className="account-menu-warning">Host sync needs attention before the next push.</div>
+              )}
+              <button
+                className="account-menu-item"
+                onClick={() => handleAccountAction(props.onOpenSettings)}
+                role="menuitem"
+              >
+                Settings
+              </button>
+              <button
+                className="account-menu-item"
+                onClick={() => handleAccountAction(props.onSync)}
+                disabled={props.isSyncing}
+                role="menuitem"
+              >
+                {props.isSyncing ? 'Syncing...' : 'Sync now'}
+              </button>
+              <button
+                className="account-menu-item"
+                onClick={() => handleAccountAction(props.onOpenSync)}
+                role="menuitem"
+              >
+                Sync center
+              </button>
+              <button
+                className="account-menu-item"
+                onClick={() => handleAccountAction(props.onZReport)}
+                role="menuitem"
+              >
+                Reports
+              </button>
+              <button
+                className="account-menu-item danger"
+                onClick={() => handleAccountAction(props.onSignOut)}
+                role="menuitem"
+              >
+                Sign out
+              </button>
+            </div>
+          )}
+        </div>
       </div>
     </header>
   );
@@ -1544,7 +1951,6 @@ function ProductPanel(props: ProductPanelProps) {
                     onClick={() => props.onCategoryChange(category.id)}
                   >
                     <div className="catalog-tile-main">
-                      <div className="catalog-token">{category.chip}</div>
                       <div className="catalog-copy">
                         <div className="catalog-name">{category.name}</div>
                         <div className="catalog-caption">Open folder</div>
@@ -1576,7 +1982,6 @@ function ProductPanel(props: ProductPanelProps) {
                       onClick={() => props.onSubcategoryChange(subcategory.name)}
                     >
                       <div className="subcategory-main">
-                        <div className="catalog-token small">{subcategory.chip}</div>
                         <div className="catalog-copy">
                           <div className="catalog-name">{subcategory.name}</div>
                           <div className="catalog-caption">Open folder</div>
@@ -1607,11 +2012,15 @@ function ProductPanel(props: ProductPanelProps) {
                 <div className="product-tile-grid">
                   {props.products.map((product) => (
                     <button key={product.id} className="product-tile" onClick={() => props.onAddProduct(product)}>
-                      <div className="product-thumb">{getCategoryToken(product.subcategory || product.name)}</div>
                       <div className="product-name">{product.name}</div>
-                      <div className="product-meta-line">{product.sku} - {product.subcategory}</div>
-                      <div className="product-price">{formatCurrency(product.priceTiers[0]?.price ?? 0)}</div>
-                      <div className="product-stock">Stock {formatInteger(product.stockOnHand)}</div>
+                      <div className="product-meta-line">
+                        {product.sku} - {product.subcategory}
+                        {(product.variants?.length ?? 0) > 0 ? ` - ${formatInteger(product.variants?.length ?? 0)} variants` : ''}
+                      </div>
+                      <div className="product-tile-footer">
+                        <div className="product-stock">Stock {formatInteger(product.stockOnHand)}</div>
+                        <div className="product-price">{formatCurrency(product.priceTiers[0]?.price ?? 0)}</div>
+                      </div>
                     </button>
                   ))}
                 </div>
@@ -1643,11 +2052,13 @@ type CartPanelProps = {
   onLineDiscountChange: (lineId: string, discountPercent: number) => void;
   onLineQtyChange: (lineId: string, quantity: number) => void;
   onLineRemove: (lineId: string) => void;
+  onLineVariantChange: (lineId: string) => void;
   onLineSalespersonChange: (lineId: string, salespersonId: string) => void;
   onLineTierChange: (lineId: string, tierLabel: string) => void;
   onPay: () => void;
   salespeople: POSUser[];
   totals: ReturnType<typeof calcCartTotals>;
+  variantProductIds: Set<string>;
 };
 
 function CartPanel(props: CartPanelProps) {
@@ -1704,11 +2115,13 @@ function CartPanel(props: CartPanelProps) {
         ) : (
           props.cart.map((line) => (
             <div key={line.uid} className="cart-line">
-              <div className="cart-thumb">{getCategoryToken(line.subcategory || line.name)}</div>
               <div className="cart-line-body">
                 <div className="cart-line-top">
                   <div>
                     <div className="cart-line-name">{line.name}</div>
+                    {getLineVariantSummary(line) != null && (
+                      <div className="cart-line-variant">{getLineVariantSummary(line)}</div>
+                    )}
                     <div className="cart-line-meta">{line.sku} - stock {formatInteger(line.stockOnHand)}</div>
                   </div>
                   <button className="line-remove" onClick={() => props.onLineRemove(line.uid)}>
@@ -1716,39 +2129,54 @@ function CartPanel(props: CartPanelProps) {
                   </button>
                 </div>
 
+                {props.variantProductIds.has(line.productId) && (
+                  <button className="line-variant-button" onClick={() => props.onLineVariantChange(line.uid)}>
+                    {getLineVariantSummary(line) != null ? 'Change variant' : 'Choose variant'}
+                  </button>
+                )}
+
                 <div className="cart-line-controls">
-                  <div className="qty-stepper">
-                    <button onClick={() => props.onLineQtyChange(line.uid, line.quantity - 1)}>-</button>
-                    <input
-                      value={line.quantity}
-                      onChange={(event) => props.onLineQtyChange(line.uid, Number(event.target.value) || 1)}
-                    />
-                    <button onClick={() => props.onLineQtyChange(line.uid, line.quantity + 1)}>+</button>
+                  <div className="mini-field">
+                    <span>Qty</span>
+                    <div className="qty-stepper">
+                      <button onClick={() => props.onLineQtyChange(line.uid, line.quantity - 1)}>-</button>
+                      <input
+                        value={line.quantity}
+                        onChange={(event) => props.onLineQtyChange(line.uid, Number(event.target.value) || 1)}
+                      />
+                      <button onClick={() => props.onLineQtyChange(line.uid, line.quantity + 1)}>+</button>
+                    </div>
                   </div>
 
-                  <select
-                    className="line-select"
-                    value={line.tierLabel}
-                    onChange={(event) => props.onLineTierChange(line.uid, event.target.value)}
-                  >
-                    {line.priceTiers.map((tier) => (
-                      <option key={tier.id} value={tier.label}>
-                        {tier.label} - {formatCurrency(tier.price)}
-                      </option>
-                    ))}
-                  </select>
+                  <label className="mini-field">
+                    <span>Tier</span>
+                    <select
+                      className="line-select"
+                      value={line.tierLabel}
+                      onChange={(event) => props.onLineTierChange(line.uid, event.target.value)}
+                    >
+                      {line.priceTiers.map((tier) => (
+                        <option key={tier.id} value={tier.label}>
+                          {tier.label} - {formatCurrency(tier.price)}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
 
-                  <select
-                    className="line-select"
-                    value={line.salespersonId}
-                    onChange={(event) => props.onLineSalespersonChange(line.uid, event.target.value)}
-                  >
-                    {props.salespeople.map((salesperson) => (
-                      <option key={salesperson.id} value={salesperson.id}>
-                        {salesperson.initials} - {salesperson.name}
-                      </option>
-                    ))}
-                  </select>
+                  <label className="mini-field">
+                    <span>Staff</span>
+                    <select
+                      className="line-select"
+                      value={line.salespersonId}
+                      onChange={(event) => props.onLineSalespersonChange(line.uid, event.target.value)}
+                    >
+                      {props.salespeople.map((salesperson) => (
+                        <option key={salesperson.id} value={salesperson.id}>
+                          {salesperson.initials} - {salesperson.name}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
 
                   <label className="mini-field">
                     <span>Disc %</span>
@@ -1761,7 +2189,10 @@ function CartPanel(props: CartPanelProps) {
                     />
                   </label>
 
-                  <div className="line-total">{formatCurrency(line.lineTotal)}</div>
+                  <div className="mini-field line-total-field">
+                    <span>Total</span>
+                    <div className="line-total">{formatCurrency(line.lineTotal)}</div>
+                  </div>
                 </div>
               </div>
             </div>
@@ -1823,6 +2254,7 @@ function CartPanel(props: CartPanelProps) {
 
 type ActionBarProps = {
   canTakePayment: boolean;
+  elementRef?: React.Ref<HTMLDivElement>;
   onCashAction: () => void;
   onCustomer: () => void;
   onDiscount: () => void;
@@ -1838,7 +2270,7 @@ type ActionBarProps = {
 
 function ActionBar(props: ActionBarProps) {
   return (
-    <div className="glass-bar action-bar">
+    <div ref={props.elementRef} className="glass-bar action-bar">
       <ActionButton shortcut="F3" label="Search" onClick={props.onSearch} />
       <ActionButton shortcut="F4" label="Hold" onClick={props.onHold} />
       <ActionButton shortcut="F5" label="Recall" onClick={props.onRecall} />
@@ -1869,8 +2301,11 @@ function ActionButton(
       disabled={props.disabled}
       onClick={props.onClick}
     >
-      <b>{props.shortcut}</b>
-      <span>{props.label}</span>
+      <span className="action-button-line">
+        <b>{props.shortcut}</b>
+        <span className="action-button-separator">-</span>
+        <span className="action-button-label">{props.label}</span>
+      </span>
     </button>
   );
 }
@@ -1913,6 +2348,184 @@ function ModalShell(
         <div className="modal-body">{props.children}</div>
       </div>
     </div>
+  );
+}
+
+function SettingsModal(
+  props: {
+    draft: POSDesktopSettings | null;
+    hasDesktopBridge: boolean;
+    isBackingUp: boolean;
+    isLoading: boolean;
+    isSaving: boolean;
+    onBackupNow: () => void;
+    onBrowseBackupDirectory: () => void;
+    onBrowseDatabasePath: () => void;
+    onClose: () => void;
+    onDraftChange: React.Dispatch<React.SetStateAction<POSDesktopSettings | null>>;
+    onSave: () => void;
+  },
+) {
+  const settings = props.draft;
+
+  const updateDraft = <K extends keyof POSDesktopSettings>(key: K, value: POSDesktopSettings[K]) => {
+    props.onDraftChange((previous: POSDesktopSettings | null) => (
+      previous ? { ...previous, [key]: value } : previous
+    ));
+  };
+
+  return (
+    <ModalShell onClose={props.onClose} title="Workstation settings" width="wide">
+      <div className="settings-layout">
+        {!props.hasDesktopBridge && (
+          <div className="inline-alert info">
+            Desktop storage settings are only available inside the Electron app. Theme changes can still be saved for this browser.
+          </div>
+        )}
+
+        {props.isLoading || settings == null ? (
+          <div className="empty-state compact">
+            <div className="empty-title">Loading workstation settings...</div>
+          </div>
+        ) : (
+          <>
+            <div className="settings-grid">
+              <section className="settings-card">
+                <div className="settings-card-head">
+                  <div>
+                    <div className="section-kicker">Sync</div>
+                    <div className="section-title">Host connection</div>
+                  </div>
+                  <div className="report-chip mono">Applies immediately after save</div>
+                </div>
+
+                <LabelBlock label="Sync URL">
+                  <input
+                    className="glass-input"
+                    disabled={props.isSaving || !props.hasDesktopBridge}
+                    value={settings.syncUrl}
+                    onChange={(event) => updateDraft('syncUrl', event.target.value)}
+                  />
+                </LabelBlock>
+
+                <div className="field-hint">
+                  Used by login refresh and playback-log sync against the hosted inventory backend.
+                </div>
+              </section>
+
+              <section className="settings-card">
+                <div className="settings-card-head">
+                  <div>
+                    <div className="section-kicker">Storage</div>
+                    <div className="section-title">SQLite database</div>
+                  </div>
+                  <div className="report-chip mono">Backend restart on save</div>
+                </div>
+
+                <LabelBlock label="Database location">
+                  <input
+                    className="glass-input"
+                    disabled={props.isSaving || !props.hasDesktopBridge}
+                    value={settings.databasePath}
+                    onChange={(event) => updateDraft('databasePath', event.target.value)}
+                  />
+                </LabelBlock>
+
+                <div className="settings-inline-actions">
+                  <button
+                    className="ghost-button"
+                    disabled={props.isSaving || !props.hasDesktopBridge}
+                    onClick={props.onBrowseDatabasePath}
+                  >
+                    Browse database
+                  </button>
+                </div>
+
+                <div className="field-hint">
+                  When you choose a new empty file path, the current database is copied there before the backend switches over.
+                </div>
+              </section>
+
+              <section className="settings-card">
+                <div className="settings-card-head">
+                  <div>
+                    <div className="section-kicker">Backup</div>
+                    <div className="section-title">Backup location</div>
+                  </div>
+                  <div className="report-chip mono">SQLite snapshot backup</div>
+                </div>
+
+                <LabelBlock label="Backup directory">
+                  <input
+                    className="glass-input"
+                    disabled={props.isSaving || !props.hasDesktopBridge}
+                    value={settings.backupDirectory}
+                    onChange={(event) => updateDraft('backupDirectory', event.target.value)}
+                  />
+                </LabelBlock>
+
+                <div className="settings-inline-actions">
+                  <button
+                    className="ghost-button"
+                    disabled={props.isSaving || !props.hasDesktopBridge}
+                    onClick={props.onBrowseBackupDirectory}
+                  >
+                    Choose folder
+                  </button>
+                  <button
+                    className="ghost-button"
+                    disabled={props.isBackingUp || !props.hasDesktopBridge}
+                    onClick={props.onBackupNow}
+                  >
+                    {props.isBackingUp ? 'Backing up...' : 'Back up now'}
+                  </button>
+                </div>
+
+                <div className="field-hint">
+                  Backups are written as timestamped SQLite files so you can archive or restore them separately.
+                </div>
+              </section>
+
+              <section className="settings-card">
+                <div className="settings-card-head">
+                  <div>
+                    <div className="section-kicker">Appearance</div>
+                    <div className="section-title">Theme</div>
+                  </div>
+                  <div className="report-chip mono">Renderer only</div>
+                </div>
+
+                <div className="theme-option-row">
+                  <button
+                    className={`theme-option ${settings.themeMode === 'light' ? 'active' : ''}`}
+                    onClick={() => updateDraft('themeMode', 'light')}
+                  >
+                    <span className="theme-option-title">Light</span>
+                    <span className="theme-option-copy">Warm glass panels and bright catalog surfaces.</span>
+                  </button>
+                  <button
+                    className={`theme-option ${settings.themeMode === 'dark' ? 'active' : ''}`}
+                    onClick={() => updateDraft('themeMode', 'dark')}
+                  >
+                    <span className="theme-option-title">Dark</span>
+                    <span className="theme-option-copy">Low-glare workstation view for long billing sessions.</span>
+                  </button>
+                </div>
+              </section>
+            </div>
+
+            <div className="modal-actions">
+              <button className="ghost-button" onClick={props.onClose}>
+                Cancel
+              </button>
+              <button className="btn-primary" disabled={props.isSaving || settings == null} onClick={props.onSave}>
+                {props.isSaving ? 'Saving settings...' : 'Save settings'}
+              </button>
+            </div>
+          </>
+        )}
+      </div>
+    </ModalShell>
   );
 }
 
@@ -2042,7 +2655,10 @@ function SearchOverlay(
               <div className="product-thumb compact">{getCategoryToken(product.subcategory || product.name)}</div>
               <div className="search-result-copy">
                 <div>{product.name}</div>
-                <div>{product.sku} - {product.subcategory} - stock {formatInteger(product.stockOnHand)}</div>
+                <div>
+                  {product.sku} - {product.subcategory} - stock {formatInteger(product.stockOnHand)}
+                  {(product.variants?.length ?? 0) > 0 ? ` - ${formatInteger(product.variants?.length ?? 0)} variants` : ''}
+                </div>
               </div>
               <div className="search-result-price">{formatCurrency(product.priceTiers[0]?.price ?? 0)}</div>
             </button>
@@ -2053,6 +2669,259 @@ function SearchOverlay(
             </div>
           )}
         </div>
+      </div>
+    </ModalShell>
+  );
+}
+
+type VariantAttributeGroup = {
+  id: string;
+  name: string;
+  type?: ProductVariant['attributes'][number]['attributeType'];
+  values: Array<{
+    id: string;
+    label: string;
+    representedValue?: string;
+    sortOrder: number;
+  }>;
+};
+
+function buildVariantSelectionMap(variant?: ProductVariant | null): Record<string, string> {
+  return Object.fromEntries((variant?.attributes ?? []).map((attribute) => [attribute.attributeId, attribute.valueId]));
+}
+
+function variantMatchesSelection(
+  variant: ProductVariant,
+  selection: Record<string, string>,
+  ignoreAttributeId?: string,
+): boolean {
+  for (const [attributeId, valueId] of Object.entries(selection)) {
+    if (!valueId || attributeId === ignoreAttributeId) {
+      continue;
+    }
+
+    if (!variant.attributes.some((attribute) => (
+      attribute.attributeId === attributeId
+      && attribute.valueId === valueId
+    ))) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+function collectVariantAttributeGroups(variants: ProductVariant[]): VariantAttributeGroup[] {
+  const groups = new Map<
+    string,
+    {
+      id: string;
+      name: string;
+      type?: VariantAttributeGroup['type'];
+      values: Map<string, VariantAttributeGroup['values'][number]>;
+    }
+  >();
+
+  for (const variant of variants) {
+    for (const attribute of variant.attributes) {
+      const group = groups.get(attribute.attributeId) ?? {
+        id: attribute.attributeId,
+        name: attribute.attributeName,
+        type: attribute.attributeType,
+        values: new Map<string, VariantAttributeGroup['values'][number]>(),
+      };
+
+      if (!groups.has(attribute.attributeId)) {
+        groups.set(attribute.attributeId, group);
+      }
+
+      if (!group.values.has(attribute.valueId)) {
+        group.values.set(attribute.valueId, {
+          id: attribute.valueId,
+          label: attribute.value,
+          representedValue: attribute.representedValue,
+          sortOrder: attribute.sortOrder ?? Number.MAX_SAFE_INTEGER,
+        });
+      }
+    }
+  }
+
+  return Array.from(groups.values()).map((group) => ({
+    id: group.id,
+    name: group.name,
+    type: group.type,
+    values: Array.from(group.values.values()).sort((left, right) => {
+      if (left.sortOrder !== right.sortOrder) {
+        return left.sortOrder - right.sortOrder;
+      }
+
+      return left.label.localeCompare(right.label);
+    }),
+  }));
+}
+
+function VariantSelectionModal(
+  props: {
+    initialVariantId?: string | null;
+    onClose: () => void;
+    onConfirm: (variant: ProductVariant) => void;
+    product: Product;
+  },
+) {
+  const variants = useMemo(() => props.product.variants ?? [], [props.product.variants]);
+  const attributeGroups = useMemo(() => collectVariantAttributeGroups(variants), [variants]);
+  const isSingleAxis = attributeGroups.length <= 1;
+  const resolvedInitialVariant = useMemo(
+    () => variants.find((variant) => variant.id === props.initialVariantId) ?? variants[0] ?? null,
+    [props.initialVariantId, variants],
+  );
+  const [selectedVariantId, setSelectedVariantId] = useState<string | null>(resolvedInitialVariant?.id ?? null);
+  const [selectedValues, setSelectedValues] = useState<Record<string, string>>(() => (
+    buildVariantSelectionMap(resolvedInitialVariant)
+  ));
+
+  useEffect(() => {
+    setSelectedVariantId(resolvedInitialVariant?.id ?? null);
+    setSelectedValues(buildVariantSelectionMap(resolvedInitialVariant));
+  }, [props.initialVariantId, props.product.id, resolvedInitialVariant?.id]);
+
+  const selectedVariant = useMemo(
+    () => variants.find((variant) => variant.id === selectedVariantId)
+      ?? variants.find((variant) => variantMatchesSelection(variant, selectedValues))
+      ?? resolvedInitialVariant
+      ?? null,
+    [resolvedInitialVariant, selectedValues, selectedVariantId, variants],
+  );
+
+  const handleDirectVariantPick = useCallback((variant: ProductVariant) => {
+    setSelectedVariantId(variant.id);
+    setSelectedValues(buildVariantSelectionMap(variant));
+  }, []);
+
+  const handleAttributePick = useCallback((attributeId: string, valueId: string) => {
+    const nextSelection = {
+      ...selectedValues,
+      [attributeId]: valueId,
+    };
+    const matchedVariant = variants.find((variant) => variantMatchesSelection(variant, nextSelection));
+    if (matchedVariant == null) {
+      return;
+    }
+
+    setSelectedVariantId(matchedVariant.id);
+    setSelectedValues(buildVariantSelectionMap(matchedVariant));
+  }, [selectedValues, variants]);
+
+  return (
+    <ModalShell onClose={props.onClose} title={`Choose variant - ${props.product.name}`} width="wide">
+      <div className="modal-stack variant-modal">
+        {variants.length === 0 ? (
+          <div className="empty-state compact">
+            <div className="empty-title">No variants are configured for this product.</div>
+          </div>
+        ) : (
+          <>
+            <div className="variant-modal-copy">
+              {isSingleAxis
+                ? 'Choose the variant before sending the item into the active sale.'
+                : 'Choose each attribute below. The selector keeps the combination on a real stocked variant.'}
+            </div>
+
+            {isSingleAxis ? (
+              <div className="variant-tile-grid">
+                {variants.map((variant) => {
+                  const label = getProductVariantLabel(variant);
+                  return (
+                    <button
+                      key={variant.id}
+                      className={`variant-choice-tile ${selectedVariant?.id === variant.id ? 'active' : ''}`}
+                      onClick={() => handleDirectVariantPick(variant)}
+                    >
+                      <div className="variant-choice-head">
+                        <span>{label}</span>
+                        <span className="variant-choice-stock">Stock {formatInteger(variant.stockOnHand)}</span>
+                      </div>
+                      <div className="variant-choice-subtitle">{variant.variantCode}</div>
+                    </button>
+                  );
+                })}
+              </div>
+            ) : (
+              <div className="variant-attribute-stack">
+                {attributeGroups.map((group) => (
+                  <section key={group.id} className="variant-attribute-group">
+                    <div className="variant-attribute-title">{group.name}</div>
+                    <div className="variant-attribute-options">
+                      {group.values.map((value) => {
+                        const isAvailable = variants.some((variant) => (
+                          variantMatchesSelection(variant, selectedValues, group.id)
+                          && variant.attributes.some((attribute) => (
+                            attribute.attributeId === group.id
+                            && attribute.valueId === value.id
+                          ))
+                        ));
+                        const swatchColor = value.representedValue || (group.type === 'color' ? value.label : undefined);
+
+                        return (
+                          <button
+                            key={value.id}
+                            className={[
+                              'variant-attribute-option',
+                              selectedValues[group.id] === value.id ? 'active' : '',
+                              !isAvailable ? 'unavailable' : '',
+                            ].filter(Boolean).join(' ')}
+                            disabled={!isAvailable}
+                            onClick={() => handleAttributePick(group.id, value.id)}
+                          >
+                            {swatchColor && <span className="variant-color-dot" style={{ backgroundColor: swatchColor }} />}
+                            <span>{value.label}</span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </section>
+                ))}
+              </div>
+            )}
+
+            <div className="variant-selection-card">
+              <div>
+                <div className="meta-label">Selected variant</div>
+                <div className="variant-selection-title">
+                  {selectedVariant != null ? getProductVariantLabel(selectedVariant) : 'Choose a variant'}
+                </div>
+                {selectedVariant != null && selectedVariant.attributes.length > 0 && (
+                  <div className="variant-selection-attributes">
+                    {selectedVariant.attributes.map((attribute) => `${attribute.attributeName}: ${attribute.value}`).join(' | ')}
+                  </div>
+                )}
+              </div>
+              {selectedVariant != null && (
+                <div className="variant-selection-meta">
+                  <span>{selectedVariant.variantCode}</span>
+                  <span>Stock {formatInteger(selectedVariant.stockOnHand)}</span>
+                </div>
+              )}
+            </div>
+
+            <div className="modal-actions">
+              <button className="ghost-button" onClick={props.onClose}>
+                Cancel
+              </button>
+              <button
+                className="btn-primary"
+                disabled={selectedVariant == null}
+                onClick={() => {
+                  if (selectedVariant != null) {
+                    props.onConfirm(selectedVariant);
+                  }
+                }}
+              >
+                Use this variant
+              </button>
+            </div>
+          </>
+        )}
       </div>
     </ModalShell>
   );
@@ -2380,6 +3249,9 @@ function ReceiptModal(
           <div key={line.id} className="receipt-line-item">
             <div>
               <div>{line.name}</div>
+              {getLineVariantSummary(line) != null && (
+                <div className="receipt-line-copy">{getLineVariantSummary(line)}</div>
+              )}
               <div>{line.quantity} x {formatCurrency(line.unitPrice)}</div>
             </div>
             <span>{formatCurrency(line.lineTotal)}</span>
@@ -2520,6 +3392,9 @@ function ReturnModal(
                   <div key={line.id} className="return-line">
                     <div>
                       <div>{line.name}</div>
+                      {getLineVariantSummary(line) != null && (
+                        <div className="cart-line-variant">{getLineVariantSummary(line)}</div>
+                      )}
                       <div className="cart-line-meta">Sold {line.quantity} x {formatCurrency(line.unitPrice)}</div>
                     </div>
                     <input

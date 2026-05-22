@@ -9,6 +9,7 @@ import {
   getDesktopRuntimeRoot,
   getDesktopSqliteDatabaseUrl,
 } from './runtimePaths';
+import { readDesktopSettings } from '../desktopSettings';
 
 export type LocalApiServer = {
   url: string;
@@ -169,6 +170,7 @@ export async function startLocalApiServer(): Promise<LocalApiServer> {
   }
 
   const runtimeRoot = getDesktopRuntimeRoot();
+  const desktopSettings = readDesktopSettings();
   const fileEnv = readDesktopEnvOverrides(runtimeRoot);
   const baseEnv = { ...fileEnv, ...process.env };
   const child = spawn(process.execPath, [localBackendEntryPath], {
@@ -184,10 +186,7 @@ export async function startLocalApiServer(): Promise<LocalApiServer> {
       JINGLES_POS_LOCAL_MODE: 'true',
       JINGLES_POS_DEVICE_ID: baseEnv.JINGLES_POS_DEVICE_ID?.trim() || DEFAULT_DEVICE_ID,
       JINGLES_POS_TERMINAL_ID: baseEnv.JINGLES_POS_TERMINAL_ID?.trim() || DEFAULT_TERMINAL_ID,
-      JINGLES_POS_UPSTREAM_URL:
-        baseEnv.JINGLES_POS_UPSTREAM_URL?.trim() ||
-        baseEnv.BACKEND_URL?.trim() ||
-        'https://inv.theredsun.org',
+      JINGLES_POS_UPSTREAM_URL: desktopSettings.syncUrl,
     },
     stdio: ['ignore', 'pipe', 'pipe'],
     windowsHide: true,

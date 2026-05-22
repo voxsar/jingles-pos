@@ -1,6 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import { app } from 'electron';
+import { readDesktopSettings } from '../desktopSettings';
 
 function ensureDirectory(dirPath: string) {
   if (!fs.existsSync(dirPath)) {
@@ -15,7 +16,9 @@ export function getDesktopRuntimeRoot() {
 }
 
 export function getDesktopDatabasePath() {
-  return path.join(getDesktopRuntimeRoot(), 'jingles-pos.sqlite');
+  const configuredPath = readDesktopSettings().databasePath;
+  ensureDirectory(path.dirname(configuredPath));
+  return configuredPath;
 }
 
 export function getDesktopSqliteDatabaseUrl() {
