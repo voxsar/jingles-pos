@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "main": "dist/server.js",
   "scripts": {
-    "build": "tsc",
+    "build": "npm run prisma:generate && tsc",
     "dev": "ts-node src/server.ts",
     "start": "node dist/server.js",
     "test": "jest --forceExit",
