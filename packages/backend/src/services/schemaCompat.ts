@@ -51,6 +51,16 @@ async function hasColumn(tableName: string, columnName: string) {
   return rows.some((row) => row.name === columnName);
 }
 
+async function ensureColumn(tableName: string, columnName: string, definition: string) {
+  if (await hasColumn(tableName, columnName)) {
+    return;
+  }
+
+  await prisma.$executeRawUnsafe(
+    `ALTER TABLE "${tableName}" ADD COLUMN "${columnName}" ${definition}`,
+  );
+}
+
 export async function ensureLocalSchemaCompat() {
   if (!isLocalPosBackendMode()) {
     return;
@@ -62,23 +72,19 @@ export async function ensureLocalSchemaCompat() {
     }
   }
 
-  if (!(await hasColumn('SyncDeviceState', 'online'))) {
-    await prisma.$executeRawUnsafe(
-      `ALTER TABLE "SyncDeviceState" ADD COLUMN "online" BOOLEAN NOT NULL DEFAULT false`,
-    );
-  }
-
-  if (!(await hasColumn('SyncDeviceState', 'lastError'))) {
-    await prisma.$executeRawUnsafe(
-      `ALTER TABLE "SyncDeviceState" ADD COLUMN "lastError" TEXT`,
-    );
-  }
-
-  if (!(await hasColumn('POSUser', 'password_hash'))) {
-    await prisma.$executeRawUnsafe(
-      `ALTER TABLE "POSUser" ADD COLUMN "password_hash" TEXT`,
-    );
-  }
+  await ensureColumn('SyncDeviceState', 'online', 'BOOLEAN NOT NULL DEFAULT false');
+  await ensureColumn('SyncDeviceState', 'lastError', 'TEXT');
+  await ensureColumn('POSUser', 'password_hash', 'TEXT');
+  await ensureColumn('Product', 'variants_json', 'TEXT');
+  await ensureColumn('HeldSaleLine', 'variantId', 'TEXT');
+  await ensureColumn('HeldSaleLine', 'variantCode', 'TEXT');
+  await ensureColumn('HeldSaleLine', 'variantName', 'TEXT');
+  await ensureColumn('HeldSaleLine', 'variant_attributes_json', 'TEXT');
+  await ensureColumn('SaleLine', 'variantId', 'TEXT');
+  await ensureColumn('SaleLine', 'variantCode', 'TEXT');
+  await ensureColumn('SaleLine', 'variantName', 'TEXT');
+  await ensureColumn('SaleLine', 'variant_attributes_json', 'TEXT');
+  await ensureColumn('ReturnLine', 'variantId', 'TEXT');
 
   if (!(await hasTable('ConfigEntry'))) {
     await prisma.$executeRawUnsafe(`
