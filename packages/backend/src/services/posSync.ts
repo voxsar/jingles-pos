@@ -284,12 +284,15 @@ async function saveCashCount(
     return;
   }
 
+  const mode = declaration.mode
+    ?? (idPrefix.endsWith('-closing') ? CashCountMode.CLOSING : CashCountMode.OPENING);
+
   await tx.shiftCashCount.upsert({
-    where: { id: `${idPrefix}-${declaration.mode}` },
+    where: { id: `${idPrefix}-${mode}` },
     create: {
-      id: `${idPrefix}-${declaration.mode}`,
+      id: `${idPrefix}-${mode}`,
       shiftId,
-      mode: declaration.mode,
+      mode,
       total: declaration.total,
       denominations: json(declaration.denominations),
       variance: declaration.variance ?? null,

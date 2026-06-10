@@ -1,16 +1,30 @@
 import { useEffect, useState, type FormEvent, type ReactNode } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../auth/AuthContext';
+import HelpGuide from '../help/HelpGuide';
 
 export default function LoginPage() {
   const navigate = useNavigate();
   const { clearError, error, isLoading, login, user } = useAuth();
   const [identifier, setIdentifier] = useState('');
   const [password, setPassword] = useState('');
+  const [isHelpOpen, setIsHelpOpen] = useState(false);
 
   useEffect(() => {
     clearError();
   }, [clearError]);
+
+  useEffect(() => {
+    const handler = (event: KeyboardEvent) => {
+      if (event.key === 'F1') {
+        event.preventDefault();
+        setIsHelpOpen(true);
+      }
+    };
+
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, []);
 
   useEffect(() => {
     if (user) {
@@ -95,9 +109,13 @@ export default function LoginPage() {
 
         <div className="login-footer">
           <span>Sessions stay local on the desktop.</span>
-          <span>Sync remains a separate outbox process.</span>
+          <button className="ghost-button" onClick={() => setIsHelpOpen(true)} title="Help & user guide (F1)" type="button">
+            Help
+          </button>
         </div>
       </div>
+
+      {isHelpOpen && <HelpGuide onClose={() => setIsHelpOpen(false)} />}
     </div>
   );
 }
