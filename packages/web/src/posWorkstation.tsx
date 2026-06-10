@@ -39,6 +39,7 @@ import {
   syncNow,
 } from './api';
 import { useAuth } from './auth/AuthContext';
+import HelpGuide from './help/HelpGuide';
 import {
   buildFallbackDesktopSettings,
   createDesktopBackup,
@@ -168,6 +169,7 @@ export default function PosWorkstation() {
   const [notice, setNotice] = useState<Notice>(null);
 
   const [isSearchOpen, setIsSearchOpen] = useState(false);
+  const [isHelpOpen, setIsHelpOpen] = useState(false);
   const [variantSelection, setVariantSelection] = useState<VariantSelectionRequest | null>(null);
   const [isPaymentOpen, setIsPaymentOpen] = useState(false);
   const [isHoldOpen, setIsHoldOpen] = useState(false);
@@ -703,6 +705,12 @@ export default function PosWorkstation() {
 
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
+      if (event.key === 'F1') {
+        event.preventDefault();
+        setIsHelpOpen(true);
+        return;
+      }
+
       if (session == null) {
         return;
       }
@@ -772,7 +780,9 @@ export default function PosWorkstation() {
     setIsReturnOpen(false);
     setIsVoidOpen(false);
     setReceiptSale(null);
-  }, []);
+    setIsSettingsOpen(false);
+    setSettingsDraft(desktopSettings);
+  }, [desktopSettings]);
 
   const handleStartSession = useCallback(() => {
     if (bootstrapData == null || authUser == null) {
@@ -1278,19 +1288,23 @@ export default function PosWorkstation() {
 
   if (bootstrapData == null || session == null) {
     return (
-      <WorkstationAccessScreen
-        activeShift={activeShift}
-        authenticatedUser={authUser}
-        branches={branches}
-        notice={notice}
-        onBranchChange={setSelectedBranchId}
-        onEnterWorkstation={handleStartSession}
-        onSignOut={() => void handleSignOut()}
-        selectedBranchId={selectedBranchId}
-        selectedTerminalId={selectedTerminalId}
-        terminals={branchTerminals.length > 0 ? branchTerminals : terminals}
-        onTerminalChange={setSelectedTerminalId}
-      />
+      <>
+        <WorkstationAccessScreen
+          activeShift={activeShift}
+          authenticatedUser={authUser}
+          branches={branches}
+          notice={notice}
+          onBranchChange={setSelectedBranchId}
+          onEnterWorkstation={handleStartSession}
+          onOpenHelp={() => setIsHelpOpen(true)}
+          onSignOut={() => void handleSignOut()}
+          selectedBranchId={selectedBranchId}
+          selectedTerminalId={selectedTerminalId}
+          terminals={branchTerminals.length > 0 ? branchTerminals : terminals}
+          onTerminalChange={setSelectedTerminalId}
+        />
+        {isHelpOpen && <HelpGuide onClose={() => setIsHelpOpen(false)} />}
+      </>
     );
   }
 
@@ -1306,6 +1320,7 @@ export default function PosWorkstation() {
         elementRef={headerBarRef}
         isSyncing={isSyncing}
         onCashAction={() => setMoneyMode(activeShift == null ? 'open' : 'close')}
+        onOpenHelp={() => setIsHelpOpen(true)}
         onOpenSettings={() => void handleOpenSettings()}
         onSignOut={handleSignOut}
         onOpenSync={() => navigate('/sync')}
@@ -1563,6 +1578,8 @@ export default function PosWorkstation() {
           }}
         />
       )}
+
+      {isHelpOpen && <HelpGuide onClose={() => setIsHelpOpen(false)} />}
     </div>
   );
 }
@@ -1585,6 +1602,7 @@ type WorkstationAccessScreenProps = {
   notice: Notice;
   onBranchChange: (value: string) => void;
   onEnterWorkstation: () => void;
+  onOpenHelp: () => void;
   onSignOut: () => void;
   onTerminalChange: (value: string) => void;
   selectedBranchId: string;
@@ -1669,6 +1687,9 @@ function WorkstationAccessScreen(props: WorkstationAccessScreenProps) {
           <button className="ghost-button" onClick={props.onSignOut}>
             Sign out
           </button>
+          <button className="ghost-button" onClick={props.onOpenHelp} title="Help & user guide (F1)">
+            Help
+          </button>
           <button className="btn-primary login-submit" onClick={props.onEnterWorkstation}>
             Enter workstation
           </button>
@@ -1690,6 +1711,7 @@ type HeaderBarProps = {
   elementRef?: React.Ref<HTMLElement>;
   isSyncing: boolean;
   onCashAction: () => void;
+  onOpenHelp: () => void;
   onOpenSettings: () => void;
   needsSyncAuth: boolean;
   onOpenSync: () => void;
@@ -1768,6 +1790,9 @@ function HeaderBar(props: HeaderBarProps) {
       <div className="header-right">
         <MetricCard label="Today" value={formatCurrency(props.todayRevenue)} />
         <MetricCard label="Bills" value={String(props.todayBills)} />
+        <button className="ghost-button" onClick={props.onOpenHelp} title="Help & user guide (F1)">
+          Help
+        </button>
         <button className="ghost-button" onClick={props.onCashAction}>
           Cash
         </button>

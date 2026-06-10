@@ -51,14 +51,42 @@ async function hasColumn(tableName: string, columnName: string) {
   return rows.some((row) => row.name === columnName);
 }
 
-async function ensureColumn(tableName: string, columnName: string, definition: string) {
-  if (await hasColumn(tableName, columnName)) {
-    return;
+async function hasIndex(indexName: string) {
+  const rows = await prisma.$queryRawUnsafe<TableInfoRow[]>(
+    `SELECT name FROM sqlite_master WHERE type = 'index' AND name = ?`,
+    indexName,
+  );
+
+  return rows.length > 0;
+}
+
+async function shouldSkipStatement(statement: string) {
+  const createTable = statement.match(/^CREATE TABLE (?:IF NOT EXISTS )?"?([A-Za-z0-9_]+)"?/i);
+  if (createTable) {
+    return hasTable(createTable[1]);
   }
 
-  await prisma.$executeRawUnsafe(
-    `ALTER TABLE "${tableName}" ADD COLUMN "${columnName}" ${definition}`,
-  );
+  const createIndex = statement.match(/^CREATE (?:UNIQUE )?INDEX (?:IF NOT EXISTS )?"?([A-Za-z0-9_]+)"?/i);
+  if (createIndex) {
+    return hasIndex(createIndex[1]);
+  }
+
+  const addColumn = statement.match(/^ALTER TABLE "?([A-Za-z0-9_]+)"? ADD COLUMN "?([A-Za-z0-9_]+)"?/i);
+  if (addColumn) {
+    return hasColumn(addColumn[1], addColumn[2]);
+  }
+
+  return false;
+}
+
+async function applyMigrationStatements() {
+  for (const statement of readMigrationStatements()) {
+    if (await shouldSkipStatement(statement)) {
+      continue;
+    }
+
+    await prisma.$executeRawUnsafe(statement);
+  }
 }
 
 export async function ensureLocalSchemaCompat() {
@@ -66,11 +94,9 @@ export async function ensureLocalSchemaCompat() {
     return;
   }
 
-  if (!(await hasTable('SyncDeviceState'))) {
-    for (const statement of readMigrationStatements()) {
-      await prisma.$executeRawUnsafe(statement);
-    }
-  }
+  // Replay every migration statement idempotently so existing databases pick
+  // up schema changes (new tables, indexes, columns) without a manual reset.
+  await applyMigrationStatements();
 
   await ensureColumn('SyncDeviceState', 'online', 'BOOLEAN NOT NULL DEFAULT false');
   await ensureColumn('SyncDeviceState', 'lastError', 'TEXT');

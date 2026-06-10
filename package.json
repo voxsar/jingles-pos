@@ -1,29 +1,29 @@
 {
-  "name": "jingles-pos",
-  "private": true,
-  "version": "1.0.0",
-  "workspaces": [
-    "packages/*"
-  ],
-  "scripts": {
-    "build:shared": "npm run build --workspace=packages/shared",
-    "build:backend": "npm run build --workspace=packages/backend",
-    "build:web": "npm run build --workspace=packages/web",
-    "build:electron": "npm run build --workspace=packages/electron && npm run native:rebuild --workspace=packages/electron",
-    "build:desktop": "npm run build:shared && npm run build:backend && npm run build:web && npm run build:electron",
-    "electron:deps": "npm run native:rebuild --workspace=packages/electron",
-    "electron:run": "npm run build:desktop && npm run start --workspace=packages/electron",
-    "electron:exe": "npm run build:desktop && npm run electron:pack --workspace=packages/electron",
-    "build": "npm run build --workspaces --if-present",
-    "test": "npm run test --workspaces --if-present",
-    "test:backend": "npm run test --workspace=packages/backend",
-    "test:web": "npm run test --workspace=packages/web",
-    "test:electron": "npm run test --workspace=packages/electron"
-  },
-  "devDependencies": {
-    "@electron/rebuild": "^4.0.1",
-    "electron": "41.4.0",
-    "electron-builder": "^24.9.1",
-    "typescript": "^5.3.3"
-  }
+	"name": "jingles-pos",
+	"private": true,
+	"version": "1.0.0",
+	"workspaces": [
+		"packages/*"
+	],
+	"scripts": {
+		"build:shared": "npm run build --workspace=packages/shared",
+		"build:backend": "npm run build --workspace=packages/backend",
+		"build:web": "npm run build --workspace=packages/web",
+		"build:electron": "npm run build --workspace=packages/electron && npm run native:rebuild --workspace=packages/electron",
+		"build:desktop": "npm run build:shared && npm run build:backend && npm run build:web && npm run build:electron",
+		"electron:deps": "npm run native:rebuild --workspace=packages/electron",
+		"electron:run": "npm run build:desktop && npm run start --workspace=packages/electron",
+		"electron:exe": "npm run build:desktop && npm run electron:pack --workspace=packages/electron",
+		"build": "npm run build:shared && npm run prisma:generate --workspace=packages/backend && npm run build:backend && npm run build:web && npm run build --workspace=packages/electron",
+		"test": "npm run test --workspaces --if-present",
+		"test:backend": "npm run test --workspace=packages/backend",
+		"test:web": "npm run test --workspace=packages/web",
+		"test:electron": "npm run test --workspace=packages/electron"
+	},
+	"devDependencies": {
+		"@electron/rebuild": "^4.0.1",
+		"electron": "41.4.0",
+		"electron-builder": "^24.9.1",
+		"typescript": "^5.3.3"
+	}
 }
