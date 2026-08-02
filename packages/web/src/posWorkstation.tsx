@@ -3010,6 +3010,24 @@ function PaymentModal(
               </button>
             ))}
           </div>
+          {method === PaymentMethod.CASH && (
+            <div className="cash-denomination-shortcuts">
+              <div className="meta-label">Cash denomination shortcuts</div>
+              <div className="cash-denomination-list">
+                {DENOMINATIONS.map((denomination) => (
+                  <button
+                    key={denomination.value}
+                    className="cash-denomination-button"
+                    onClick={() => setTendered((current) => roundToMoney(current + denomination.value))}
+                    title={`Add ${denomination.label}`}
+                  >
+                    <img src={`/currency/${denomination.value}.png`} alt="" />
+                    <span>{denomination.label}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
 
           {method !== PaymentMethod.CASH && (
             <LabelBlock label="Reference">
@@ -3169,13 +3187,20 @@ function MoneyDeclareModal(
 function DenominationRow(
   props: {
     count: number;
-    denomination: { label: string; value: number };
+    denomination: { label: string; value: number; kind: 'note' | 'coin' };
     onChange: (nextCount: number) => void;
   },
 ) {
   return (
     <div className="denomination-row">
-      <span>{props.denomination.label}</span>
+      <div className="denomination-visual">
+        <img
+          className={`currency-image ${props.denomination.kind === 'coin' ? 'coin-image' : ''}`}
+          src={`/currency/${props.denomination.value}.png`}
+          alt={props.denomination.label}
+        />
+        <span>{props.denomination.label}</span>
+      </div>
       <div className="qty-stepper compact">
         <button onClick={() => props.onChange(props.count - 1)}>-</button>
         <input

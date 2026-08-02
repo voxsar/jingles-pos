@@ -2057,6 +2057,44 @@ button {
   color: var(--accent);
 }
 
+.cash-denomination-shortcuts {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.cash-denomination-list {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.cash-denomination-button {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  padding: 5px 6px;
+  border-radius: 10px;
+  text-align: left;
+  font-size: 11px;
+}
+
+.cash-denomination-button img {
+  width: 34px;
+  height: 18px;
+  flex: 0 0 34px;
+  object-fit: contain;
+  border-radius: 2px;
+  background: #f5f0e7;
+}
+
+.cash-denomination-button span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .held-row {
   display: flex;
   justify-content: space-between;
@@ -2084,11 +2122,33 @@ button {
 
 .denomination-row {
   display: grid;
-  grid-template-columns: 1fr auto 100px;
+  grid-template-columns: minmax(0, 1fr) auto 100px;
   gap: 12px;
   align-items: center;
   padding: 10px 0;
   border-bottom: 1px solid rgba(77, 59, 38, 0.06);
+}
+
+.denomination-visual {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.currency-image {
+  display: block;
+  width: 92px;
+  height: 42px;
+  flex: 0 0 92px;
+  object-fit: contain;
+  border-radius: 5px;
+  background: #f5f0e7;
+  box-shadow: 0 2px 6px rgba(77, 59, 38, 0.14);
+}
+
+.coin-image {
+  box-shadow: none;
 }
 
 .variance-card {
