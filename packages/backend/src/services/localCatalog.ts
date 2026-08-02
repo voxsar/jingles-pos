@@ -335,6 +335,12 @@ function replaceLocalCatalogSnapshotDirect(snapshot: SharedCatalogSnapshot) {
       INSERT INTO "Branch" (id, code, name, createdAt, updatedAt) VALUES (?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
       ON CONFLICT(id) DO UPDATE SET code=excluded.code, name=excluded.name, updatedAt=CURRENT_TIMESTAMP
     `);
+    const upsertUser = db.prepare(`
+      INSERT INTO "POSUser" (id, code, email, name, initials, role, createdAt, updatedAt)
+      VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+      ON CONFLICT(id) DO UPDATE SET code=excluded.code, email=excluded.email, name=excluded.name,
+        initials=excluded.initials, role=excluded.role, updatedAt=CURRENT_TIMESTAMP
+    `);
     const insertBatchPrice = db.prepare(`
       INSERT INTO "BatchPrice" (id, productId, label, minQty, price, priority, isDefault, createdAt)
       VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
@@ -349,6 +355,7 @@ function replaceLocalCatalogSnapshotDirect(snapshot: SharedCatalogSnapshot) {
       db.prepare('DELETE FROM "Category"').run();
 
       for (const branch of snapshot.branches ?? []) upsertBranch.run(branch.id, branch.code, branch.name);
+      for (const user of snapshot.users ?? []) upsertUser.run(user.id, user.code, user.email ?? null, user.name, user.initials, user.role);
       if (snapshot.branches?.length) {
         const ids = snapshot.branches.map((branch) => `'${branch.id.replace(/'/g, "''")}'`).join(',');
         db.exec(`UPDATE "Terminal" SET branchId='${snapshot.branches[0]!.id.replace(/'/g, "''")}' WHERE branchId NOT IN (${ids});`);
@@ -475,6 +482,13 @@ export async function replaceLocalCatalogSnapshot(snapshot: SharedCatalogSnapsho
   await prisma.$transaction(async (tx) => {
     for (const branch of snapshot.branches ?? []) {
       await tx.branch.upsert({ where: { id: branch.id }, create: branch, update: { code: branch.code, name: branch.name } });
+    }
+    for (const user of snapshot.users ?? []) {
+      await tx.pOSUser.upsert({
+        where: { id: user.id },
+        create: user,
+        update: { code: user.code, email: user.email, name: user.name, initials: user.initials, role: user.role },
+      });
     }
     if (snapshot.branches?.length) {
       await tx.terminal.updateMany({ where: { branchId: { notIn: snapshot.branches.map((branch) => branch.id) } }, data: { branchId: snapshot.branches[0]!.id } });

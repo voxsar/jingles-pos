@@ -31,8 +31,9 @@ import {
   getServerVectorClock,
   playbackEvents,
   syncWithUpstream,
+  validateUpstreamVoucher,
 } from '../services/posSync';
-import { syncSharedCatalogProjection } from '../sharedInventory';
+import { syncSharedCatalogProjection, validateSharedVoucher } from '../sharedInventory';
 import {
   getLocalCatalogSnapshot,
   searchLocalCatalog,
@@ -140,12 +141,16 @@ function applyRule(price: number, rule: any) {
 
 function scopeProductForBranch(product: any, branchId?: string) {
   const branchRules = (product.pricingRules ?? []).filter((rule: any) => !rule.branchIds?.length || (branchId && rule.branchIds.includes(branchId)));
-  const priceTiers = product.priceTiers.flatMap((base: any) => {
-    const breakpoints = new Set<number>([base.minQty ?? 0, ...branchRules.map((rule: any) => Number(rule.minQty ?? 0))]);
+  const resolvePriceTiers = (tiers: any[], variantId?: string) => {
+    const rules = branchRules.filter((rule: any) => (
+      variantId ? (!rule.variantIds?.length || rule.variantIds.includes(variantId)) : !rule.variantIds?.length
+    ));
+    return tiers.flatMap((base: any) => {
+    const breakpoints = new Set<number>([base.minQty ?? 0, ...rules.map((rule: any) => Number(rule.minQty ?? 0))]);
     return Array.from(breakpoints).sort((a, b) => a - b).map((minQty) => {
       let price = base.price;
       const applied: string[] = [];
-      for (const rule of branchRules) {
+      for (const rule of rules) {
         if (minQty < Number(rule.minQty ?? 0) || (rule.maxQty != null && minQty > Number(rule.maxQty))) continue;
         price = applyRule(price, rule);
         applied.push(rule.name);
@@ -154,12 +159,15 @@ function scopeProductForBranch(product: any, branchId?: string) {
       return { ...base, id: `${base.id}-${minQty}-${applied.join('-')}`, minQty, price: Math.round(price * 100) / 100 };
     });
   });
+  };
+  const priceTiers = resolvePriceTiers(product.priceTiers);
   return {
     ...product,
     stockOnHand: branchId ? Number(product.stockByBranch?.[branchId] ?? 0) : product.stockOnHand,
     variants: (product.variants ?? []).map((variant: any) => ({
       ...variant,
       stockOnHand: branchId ? Number(variant.stockByBranch?.[branchId] ?? 0) : variant.stockOnHand,
+      priceTiers: resolvePriceTiers(variant.priceTiers?.length ? variant.priceTiers : product.priceTiers, variant.id),
     })),
     priceTiers,
   };
@@ -467,6 +475,17 @@ router.get('/catalog/snapshot', async (_req: Request, res: Response) => {
   return res.json(catalog);
 });
 
+router.post('/vouchers/validate', async (req: Request, res: Response) => {
+  try {
+    const result = isLocalPosBackendMode()
+      ? await validateUpstreamVoucher(req.body)
+      : await validateSharedVoucher(req.body);
+    return res.status(result.isValid ? 200 : 422).json(result);
+  } catch (error) {
+    return res.status(503).json({ error: error instanceof Error ? error.message : 'Voucher validation unavailable' });
+  }
+});
+
 router.get('/products/search', async (req: Request, res: Response) => {
   try {
     const q = typeof req.query.q === 'string' ? req.query.q.trim() : '';
@@ -708,6 +727,25 @@ router.post('/sales', async (req: Request, res: Response) => {
       total: req.body.total ?? 0,
       marginTotal: req.body.marginTotal ?? 0,
     };
+
+    const giftPayments = payload.payments.filter((payment) => payment.method === 'GIFT');
+    for (const payment of giftPayments) {
+      if (!payment.reference?.trim()) return res.status(400).json({ error: 'A voucher code is required for every gift-voucher payment' });
+      const validationContext = {
+        voucherCode: payment.reference.trim(),
+        totalAmount: payload.total,
+        hasDiscounts: payload.discountTotal > 0 || payload.lines.some((line) => line.discountAmount > 0),
+        hasOtherVouchers: giftPayments.length > 1,
+        items: payload.lines.map((line) => ({ skuId: line.productId, variantId: line.variantId, quantity: line.quantity, price: line.unitPrice })),
+      };
+      const validation = isLocalPosBackendMode()
+        ? await validateUpstreamVoucher(validationContext)
+        : await validateSharedVoucher(validationContext);
+      if (!validation.isValid) return res.status(422).json({ error: validation.errors?.join('; ') || 'Voucher is invalid' });
+      if (payment.amount > Number(validation.maxRedeemableAmount ?? 0)) {
+        return res.status(422).json({ error: `Voucher ${payment.reference} can cover at most ${validation.maxRedeemableAmount}` });
+      }
+    }
 
     await applyWorkstationEvent(req, {
       aggregateType: 'sale',

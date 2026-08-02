@@ -866,7 +866,8 @@ export default function PosWorkstation() {
         showNotice('error', `${variant?.variantCode ?? product.sku} is out of stock.`);
         return previous;
       }
-      const tier = pickPriceTier(product.priceTiers, preferredTierLabels);
+      const effectivePriceTiers = variant?.priceTiers?.length ? variant.priceTiers : product.priceTiers;
+      const tier = pickPriceTier(effectivePriceTiers, preferredTierLabels);
       const existing = previous.find((line) => (
         line.productId === product.id
         && (line.variantId ?? null) === (variant?.id ?? null)
@@ -909,7 +910,8 @@ export default function PosWorkstation() {
     variant: ProductVariant,
   ) => {
     updateCartLineById(lineId, (line) => {
-      const tier = pickPriceTier(product.priceTiers, [line.tierLabel, ...preferredTierLabels]);
+      const effectivePriceTiers = variant.priceTiers?.length ? variant.priceTiers : product.priceTiers;
+      const tier = pickPriceTier(effectivePriceTiers, [line.tierLabel, ...preferredTierLabels]);
       return recalculateCartLine({
         ...line,
         sku: variant.variantCode,
@@ -924,7 +926,7 @@ export default function PosWorkstation() {
         packSize: product.packSize,
         unitPrice: tier.price,
         tierLabel: tier.label,
-        priceTiers: product.priceTiers,
+        priceTiers: effectivePriceTiers,
         stockOnHand: variant.stockOnHand,
       });
     });
@@ -3099,6 +3101,9 @@ function PaymentModal(
     if (splitRemaining <= 0) {
       return;
     }
+    if (method === PaymentMethod.GIFT && !reference.trim()) {
+      return;
+    }
 
     const entered = Math.max(0, roundToMoney(tendered));
     if (method === PaymentMethod.INSTALLMENT) {
@@ -3306,7 +3311,7 @@ function PaymentModal(
                 className="glass-input"
                 value={reference}
                 onChange={(event) => setReference(event.target.value)}
-                placeholder="Auth code / last 4 digits"
+                placeholder={method === PaymentMethod.GIFT ? 'Voucher code (required)' : 'Auth code / last 4 digits'}
               />
             </LabelBlock>
           )}
@@ -3318,7 +3323,7 @@ function PaymentModal(
 
           {isSplit ? (
             <div className="payment-split-actions">
-              <button className="ghost-button" disabled={splitRemaining <= 0 || (method !== PaymentMethod.INSTALLMENT && tendered <= 0)} onClick={addSplitPayment}>
+              <button className="ghost-button" disabled={splitRemaining <= 0 || (method !== PaymentMethod.INSTALLMENT && tendered <= 0) || (method === PaymentMethod.GIFT && !reference.trim())} onClick={addSplitPayment}>
                 {method === PaymentMethod.INSTALLMENT ? 'Add installment plan' : 'Add payment source'}
               </button>
               <button className="btn-primary full-width" disabled={splitPaid <= 0 || (!props.allowShortPayments && splitRemaining > 0)} onClick={completeSplitPayment}>
@@ -3328,7 +3333,7 @@ function PaymentModal(
           ) : (
             <button
               className="btn-primary full-width"
-              disabled={method === PaymentMethod.CASH && tendered < props.total}
+              disabled={(method === PaymentMethod.CASH && tendered < props.total) || (method === PaymentMethod.GIFT && !reference.trim())}
               onClick={() => props.onComplete(buildPayments(props.total, method, tendered, change, reference))}
             >
               Complete sale

@@ -596,6 +596,9 @@ async function applySaleCompletedEvent(tx: Tx, event: SyncEvent<CompleteSaleInpu
       aggregateId: event.aggregateId,
       receiptNumber: payload.receiptNumber,
       terminalId: payload.terminalId,
+      branchId: payload.branchId,
+      cashierId: payload.cashierId,
+      payments: payload.payments,
       lines: payload.lines.map((line) => ({
         productId: line.productId,
         sku: line.sku,
@@ -1475,6 +1478,10 @@ async function fetchUpstreamJson<T>(path: string, options?: { method?: 'GET' | '
   }
 
   return response.json() as Promise<T>;
+}
+
+export async function validateUpstreamVoucher(context: unknown) {
+  return fetchUpstreamJson<any>('/api/pos/vouchers/validate', { method: 'POST', body: context });
 }
 
 export async function refreshLocalCatalogFromUpstream(): Promise<SharedCatalogSnapshot> {

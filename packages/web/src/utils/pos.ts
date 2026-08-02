@@ -97,7 +97,8 @@ export function createCartLine(
   preferredTierLabels: string[] = [],
   variant?: ProductVariant,
 ): CartLine {
-  const tier = pickPriceTier(product.priceTiers, preferredTierLabels, 1);
+  const effectivePriceTiers = variant?.priceTiers?.length ? variant.priceTiers : product.priceTiers;
+  const tier = pickPriceTier(effectivePriceTiers, preferredTierLabels, 1);
   const estimatedCostBasis = roundCurrency(tier.costBasis ?? tier.price * 0.65);
 
   return recalculateCartLine({
@@ -116,7 +117,7 @@ export function createCartLine(
     quantity: 1,
     unitPrice: tier.price,
     tierLabel: tier.label,
-    priceTiers: sortPriceTiers(product.priceTiers),
+    priceTiers: sortPriceTiers(effectivePriceTiers),
     salespersonId: salesperson.id,
     salespersonName: salesperson.name,
     salespersonInitials: salesperson.initials,

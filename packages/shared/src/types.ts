@@ -98,6 +98,7 @@ export interface ProductVariant {
   name?: string;
   stockOnHand: number;
   stockByBranch?: Record<string, number>;
+  priceTiers?: ProductPriceTier[];
   attributes: ProductVariantAttributeValue[];
 }
 

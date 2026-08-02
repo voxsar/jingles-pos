@@ -7,6 +7,7 @@ import type {
   ProductVariantAttributeValue,
   SharedCatalogSnapshot,
 } from '@jingles/shared';
+import { UserRole } from '@jingles/shared';
 import prisma from './prisma';
 
 type SharedCategoryRow = {
@@ -39,6 +40,9 @@ type SharedVariantRow = {
   variant_name: string | null;
   variant_stock_on_hand: number | string | null;
   stock_by_branch: Record<string, number> | null;
+  selling_price: number | null;
+  wholesale_price: number | null;
+  bulk_price: number | null;
   attribute_id: string | null;
   attribute_name: string | null;
   attribute_type: string | null;
@@ -240,13 +244,20 @@ function buildProductVariants(rows: SharedVariantRow[]): Map<string, ProductVari
 
   for (const row of rows) {
     const productVariants = variantsByProduct.get(row.sku_id) ?? new Map<string, ProductVariant>();
-    const variant = productVariants.get(row.variant_id) ?? {
+    const variant: ProductVariant = productVariants.get(row.variant_id) ?? {
       id: row.variant_id,
       productId: row.sku_id,
       variantCode: row.variant_code,
       name: row.variant_name ?? undefined,
       stockOnHand: normalizeNumber(row.variant_stock_on_hand),
       stockByBranch: row.stock_by_branch ?? {},
+      priceTiers: buildPriceTiers({
+        id: row.variant_id,
+        selling_price: row.selling_price,
+        wholesale_price: row.wholesale_price,
+        bulk_price: row.bulk_price,
+        batch_pricing: [],
+      } as SharedSkuRow),
       attributes: [],
     };
 
@@ -295,7 +306,7 @@ function buildProductVariants(rows: SharedVariantRow[]): Map<string, ProductVari
 
 async function fetchSharedCatalogSnapshotFromSource(): Promise<SharedCatalogSnapshot> {
   const inventory = getSharedInventoryPool();
-  const [categoriesResult, skuResult, variantResult, branchesResult, overlaysResult] = await Promise.all([
+  const [categoriesResult, skuResult, variantResult, branchesResult, usersResult, overlaysResult] = await Promise.all([
     inventory.query<SharedCategoryRow>(
       `
         SELECT id, name, parent_id, sort_order
@@ -365,6 +376,9 @@ async function fetchSharedCatalogSnapshotFromSource(): Promise<SharedCatalogSnap
           v.name AS variant_name,
           COALESCE(vs.stock_on_hand, 0) AS variant_stock_on_hand,
           COALESCE(vs.stock_by_branch, '{}'::jsonb) AS stock_by_branch,
+          COALESCE(bp.selling_price, s.selling_price) AS selling_price,
+          COALESCE(bp.wholesale_price, s.wholesale_price) AS wholesale_price,
+          COALESCE(bp.bulk_price, s.bulk_price) AS bulk_price,
           a.id AS attribute_id,
           a.name AS attribute_name,
           a.type AS attribute_type,
@@ -376,6 +390,11 @@ async function fetchSharedCatalogSnapshotFromSource(): Promise<SharedCatalogSnap
         FROM sku_variants v
         INNER JOIN skus s ON s.id = v.sku_id
         LEFT JOIN variant_stock vs ON vs.variant_id = v.id
+        LEFT JOIN LATERAL (
+          SELECT selling_price, wholesale_price, bulk_price FROM batches
+          WHERE sku_id = v.sku_id AND variant_id = v.id AND is_active = TRUE
+          ORDER BY created_at DESC LIMIT 1
+        ) bp ON TRUE
         LEFT JOIN sku_variant_values svv ON svv.variant_id = v.id
         LEFT JOIN attributes a ON a.id = svv.attribute_id
         LEFT JOIN attribute_values av ON av.id = svv.attribute_value_id
@@ -392,6 +411,7 @@ async function fetchSharedCatalogSnapshotFromSource(): Promise<SharedCatalogSnap
       [SHELF_READY_STATE],
     ),
     inventory.query<{ id: string; code: string; name: string }>(`SELECT id, code, name FROM branches WHERE is_active = TRUE ORDER BY code`),
+    inventory.query<{ id: string; email: string; role: string }>(`SELECT id, email, role FROM users WHERE is_active = TRUE AND role IN ('Admin','Manager','Staff') ORDER BY email`),
     inventory.query<any>(`SELECT id, name, type, value, applies_to, conditions, priority, stackable, valid_from, valid_to FROM pricing_overlays WHERE status = 'active' AND (valid_from IS NULL OR valid_from <= NOW()) AND (valid_to IS NULL OR valid_to >= NOW()) ORDER BY priority DESC`),
   ]);
 
@@ -469,6 +489,14 @@ async function fetchSharedCatalogSnapshotFromSource(): Promise<SharedCatalogSnap
   return {
     generatedAt: new Date().toISOString(),
     branches: branchesResult.rows,
+    users: usersResult.rows.map((user) => {
+      const name = user.email.split('@')[0]!.replace(/[._-]+/g, ' ');
+      return {
+        id: user.id, code: `INV-${user.id.slice(0, 8).toUpperCase()}`, email: user.email, name,
+        initials: name.split(/\s+/).map((part) => part[0]).join('').slice(0, 3).toUpperCase(),
+        role: user.role === 'Staff' ? UserRole.CASHIER : UserRole.MANAGER,
+      };
+    }),
     categories: categories
       .sort((left, right) => {
         if (left.sortOrder !== right.sortOrder) {
@@ -480,10 +508,58 @@ async function fetchSharedCatalogSnapshotFromSource(): Promise<SharedCatalogSnap
   };
 }
 
+export async function validateSharedVoucher(context: any) {
+  const inventory = getSharedInventoryPool();
+  const voucher = (await inventory.query<any>(`
+    SELECT vc.*, COALESCE(jsonb_agg(vr) FILTER (WHERE vr.id IS NOT NULL), '[]'::jsonb) AS restrictions
+    FROM voucher_codes vc LEFT JOIN voucher_restrictions vr ON vr.sku_id = vc.sku_id
+    WHERE vc.code = $1 GROUP BY vc.id
+  `, [String(context?.voucherCode ?? '').trim()])).rows[0];
+  if (!voucher) return { isValid: false, errors: ['Voucher code not found'] };
+  if (String(voucher.status).toLowerCase() !== 'active') return { isValid: false, errors: [`Voucher is ${voucher.status}`] };
+  if (voucher.expires_at && new Date(voucher.expires_at) < new Date()) return { isValid: false, errors: ['Voucher has expired'] };
+  const errors: string[] = [];
+  const restrictions = Array.isArray(voucher.restrictions) ? voucher.restrictions : [];
+  if (context?.hasOtherVouchers && restrictions.some((r: any) => r.cannot_combine_with_other_vouchers)) errors.push('This voucher cannot be combined with other vouchers');
+  if (context?.hasDiscounts && restrictions.some((r: any) => r.cannot_combine_with_discounts)) errors.push('This voucher cannot be combined with discounts');
+  const minimum = Math.max(0, ...restrictions.map((r: any) => Number(r.min_purchase_amount ?? 0)));
+  if (Number(context?.totalAmount ?? 0) < minimum) errors.push(`Minimum purchase amount of ${minimum} ${voucher.currency} required`);
+  const items = Array.isArray(context?.items) ? context.items : [];
+  const eligible = items.filter((item: any) => restrictions.every((r: any) => {
+    const categories = Array.isArray(r.target_category_ids) ? r.target_category_ids : [];
+    const skus = Array.isArray(r.target_sku_ids) ? r.target_sku_ids : [];
+    const variants = Array.isArray(r.target_variant_ids) ? r.target_variant_ids : [];
+    if (r.restriction_type === 'category_exclude') return !categories.includes(item.categoryId);
+    if (r.restriction_type === 'category_include') return categories.includes(item.categoryId);
+    if (r.restriction_type === 'sku_exclude') return !skus.includes(item.skuId);
+    if (r.restriction_type === 'sku_include') return skus.includes(item.skuId);
+    if (r.restriction_type === 'variant_exclude') return !variants.includes(item.variantId);
+    if (r.restriction_type === 'variant_include') return variants.includes(item.variantId);
+    return true;
+  }));
+  if (!eligible.length) errors.push('No items in cart are eligible for this voucher');
+  const eligibleTotal = eligible.reduce((sum: number, item: any) => sum + Number(item.price ?? 0) * Number(item.quantity ?? 0), 0);
+  const limits = restrictions.map((r: any) => Number(r.max_discount_amount)).filter(Number.isFinite);
+  const maxRedeemableAmount = Math.min(Number(voucher.current_balance), eligibleTotal, ...(limits.length ? limits : [Number.POSITIVE_INFINITY]));
+  if (Number(voucher.current_balance) <= 0) errors.push('Voucher balance is empty');
+  return errors.length ? { isValid: false, errors } : {
+    isValid: true,
+    voucher: { id: voucher.id, code: voucher.code, currentBalance: Number(voucher.current_balance), currency: voucher.currency, status: voucher.status, expiresAt: voucher.expires_at },
+    maxRedeemableAmount,
+    applicableItems: eligible.map((item: any) => ({ skuId: item.skuId, variantId: item.variantId, quantity: item.quantity })),
+  };
+}
+
 async function syncProjection(snapshot: SharedCatalogSnapshot): Promise<void> {
   await prisma.$transaction(async (tx) => {
     for (const branch of snapshot.branches ?? []) {
       await tx.branch.upsert({ where: { id: branch.id }, create: branch, update: { code: branch.code, name: branch.name } });
+    }
+    for (const user of snapshot.users ?? []) {
+      await tx.pOSUser.upsert({
+        where: { id: user.id }, create: user,
+        update: { code: user.code, email: user.email, name: user.name, initials: user.initials, role: user.role },
+      });
     }
     if (snapshot.branches?.length) {
       await tx.terminal.updateMany({
@@ -668,10 +744,30 @@ export async function applySharedInventorySale(
     receiptNumber: string;
     terminalId?: string | null;
     branchId?: string | null;
+    cashierId?: string | null;
+    payments?: Array<{ method: string; amount: number; reference?: string }>;
     lines: SharedSaleLine[];
   },
 ): Promise<void> {
   await withSharedInventoryTransaction(async (client) => {
+    const groupedVouchers = new Map<string, number>();
+    for (const payment of input.payments ?? []) {
+      if (payment.method !== 'GIFT') continue;
+      const code = payment.reference?.trim();
+      if (!code || payment.amount <= 0) throw new Error('Gift-voucher payments require a code and positive amount');
+      groupedVouchers.set(code, (groupedVouchers.get(code) ?? 0) + payment.amount);
+    }
+    for (const [code, amount] of groupedVouchers) {
+      const voucher = (await client.query<any>(`SELECT id, current_balance, status, expires_at FROM voucher_codes WHERE code=$1 FOR UPDATE`, [code])).rows[0];
+      if (!voucher || String(voucher.status).toLowerCase() !== 'active') throw new Error(`Voucher ${code} is unavailable`);
+      if (voucher.expires_at && new Date(voucher.expires_at) < new Date()) throw new Error(`Voucher ${code} has expired`);
+      const before = normalizeNumber(voucher.current_balance);
+      if (amount > before) throw new Error(`Voucher ${code} has insufficient balance`);
+      const after = Math.round((before - amount) * 100) / 100;
+      await client.query(`UPDATE voucher_codes SET current_balance=$1,status=$2,activated_at=COALESCE(activated_at,NOW()),fully_redeemed_at=CASE WHEN $1<=0 THEN NOW() ELSE NULL END,updated_at=NOW() WHERE id=$3`, [after, after <= 0 ? 'redeemed' : 'active', voucher.id]);
+      await client.query(`INSERT INTO voucher_redemptions (id,voucher_code_id,code,redeemed_amount,balance_before,balance_after,order_id,invoice_number,branch_id,applied_to_items,redeemed_by,redeemed_at,notes) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,NOW(),$12)`,
+        [randomUUID(), voucher.id, code, amount, before, after, input.aggregateId, input.receiptNumber, input.branchId ?? null, JSON.stringify(input.lines), input.cashierId ?? null, `POS ${input.terminalId ?? ''}`]);
+    }
     for (const line of input.lines) {
       const requestedQuantity = normalizeNumber(line.quantity);
       if (requestedQuantity <= 0) {
