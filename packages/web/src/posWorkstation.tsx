@@ -2962,14 +2962,63 @@ function PaymentModal(
   const [method, setMethod] = useState<PaymentMethod>(PaymentMethod.CASH);
   const [tendered, setTendered] = useState(props.total);
   const [reference, setReference] = useState('');
+  const [splitPayments, setSplitPayments] = useState<PaymentInput[]>([]);
+  const [splitMode, setSplitMode] = useState(false);
+  const isSplit = splitMode;
+  const splitPaid = roundToMoney(splitPayments.reduce((sum, payment) => sum + payment.amount, 0));
+  const splitRemaining = Math.max(0, roundToMoney(props.total - splitPaid));
+  const splitChange = roundToMoney(splitPayments.reduce((sum, payment) => sum + (payment.changeDue ?? 0), 0));
   const change = Math.max(0, roundToMoney(tendered - props.total));
 
   const quickAmounts = useMemo(() => {
     const rounded100 = Math.ceil(props.total / 100) * 100;
     const rounded500 = Math.ceil(props.total / 500) * 500;
     const rounded1000 = Math.ceil(props.total / 1000) * 1000;
-    return [props.total, rounded100, rounded500, rounded1000];
+    return [...new Set([props.total, rounded100, rounded500, rounded1000])];
   }, [props.total]);
+
+  const selectMethod = (nextMethod: PaymentMethod) => {
+    if (nextMethod === PaymentMethod.SPLIT) {
+      if (isSplit) {
+        setSplitPayments([]);
+      }
+      setSplitMode(!isSplit);
+      setMethod(PaymentMethod.CASH);
+      setTendered(isSplit ? props.total : splitRemaining);
+      return;
+    }
+
+    setMethod(nextMethod);
+    setTendered(nextMethod === PaymentMethod.CASH ? (isSplit ? splitRemaining : props.total) : props.total);
+  };
+
+  const addSplitPayment = () => {
+    if (splitRemaining <= 0) {
+      return;
+    }
+
+    const entered = Math.max(0, roundToMoney(tendered));
+    if (entered <= 0) {
+      return;
+    }
+
+    const amount = Math.min(entered, splitRemaining);
+    setSplitPayments((current) => [...current, {
+      method,
+      amount,
+      tenderedAmount: method === PaymentMethod.CASH ? entered : amount,
+      changeDue: method === PaymentMethod.CASH ? roundToMoney(entered - amount) : 0,
+      reference: method === PaymentMethod.CASH ? undefined : reference.trim() || undefined,
+    }]);
+    setReference('');
+    setTendered(splitRemaining);
+  };
+
+  const completeSplitPayment = () => {
+    if (splitRemaining <= 0) {
+      props.onComplete(splitPayments);
+    }
+  };
 
   return (
     <ModalShell onClose={props.onClose} title="Payment" width="medium">
@@ -2978,8 +3027,8 @@ function PaymentModal(
           {PAYMENT_OPTIONS.map((option) => (
             <button
               key={option.method}
-              className={`payment-method ${method === option.method ? 'active' : ''}`}
-              onClick={() => setMethod(option.method)}
+              className={`payment-method ${method === option.method || (isSplit && option.method === PaymentMethod.SPLIT) ? 'active' : ''}`}
+              onClick={() => selectMethod(option.method)}
             >
               <span>{option.short}</span>
               <div>{option.label}</div>
@@ -2987,14 +3036,47 @@ function PaymentModal(
           ))}
         </div>
 
-        <div className="payment-main">
+        <div className={`payment-main ${isSplit ? 'split-payment-main' : ''}`}>
           <div className="meta-label">Total due</div>
           <div className="payment-total">{formatCurrency(props.total)}</div>
 
-          <LabelBlock label="Tendered">
+          {isSplit && (
+            <aside className="payment-stack-sidebar">
+              <div className="payment-stack-head">
+                <span className="meta-label">Payment stack</span>
+                <span>{splitPayments.length} source{splitPayments.length === 1 ? '' : 's'}</span>
+              </div>
+              {splitPayments.length === 0 ? (
+                <div className="payment-stack-empty">Add cash, card or another source to settle this bill.</div>
+              ) : (
+                <div className="payment-stack-list">
+                  {splitPayments.map((payment, index) => {
+                    const label = PAYMENT_OPTIONS.find((option) => option.method === payment.method)?.label ?? payment.method;
+                    return (
+                      <div className="payment-stack-item" key={`${payment.method}-${index}`}>
+                        <span>{label}</span>
+                        <b>{formatCurrency(payment.amount)}</b>
+                        <button
+                          className="payment-stack-remove"
+                          aria-label={`Remove ${label} payment`}
+                          onClick={() => setSplitPayments((current) => current.filter((_, itemIndex) => itemIndex !== index))}
+                        >
+                          ×
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+              <div className="payment-stack-total"><span>Remaining</span><b>{formatCurrency(splitRemaining)}</b></div>
+              {splitChange > 0 && <div className="payment-stack-change"><span>Change</span><b>{formatCurrency(splitChange)}</b></div>}
+            </aside>
+          )}
+
+          <LabelBlock label={method === PaymentMethod.CASH ? 'Tendered' : 'Amount'}>
             <input
               className="glass-input large"
-              disabled={method !== PaymentMethod.CASH}
+              disabled={method !== PaymentMethod.CASH && !isSplit}
               type="number"
               min={0}
               step={0.01}
@@ -3004,7 +3086,7 @@ function PaymentModal(
           </LabelBlock>
 
           <div className="quick-cash-row">
-            {quickAmounts.map((amount) => (
+            {(isSplit ? [...new Set([splitRemaining, ...quickAmounts.filter((amount) => amount >= splitRemaining)])] : quickAmounts).map((amount) => (
               <button key={amount} className="quick-cash" onClick={() => setTendered(amount)}>
                 {formatCurrency(amount)}
               </button>
@@ -3042,16 +3124,27 @@ function PaymentModal(
 
           <div className="payment-change-row">
             <span>Change</span>
-            <b>{formatCurrency(change)}</b>
+            <b>{formatCurrency(isSplit ? splitChange : change)}</b>
           </div>
 
-          <button
-            className="btn-primary full-width"
-            disabled={method === PaymentMethod.CASH && tendered < props.total}
-            onClick={() => props.onComplete(buildPayments(props.total, method, tendered, change, reference))}
-          >
-            Complete sale
-          </button>
+          {isSplit ? (
+            <div className="payment-split-actions">
+              <button className="ghost-button" disabled={splitRemaining <= 0 || tendered <= 0} onClick={addSplitPayment}>
+                Add payment source
+              </button>
+              <button className="btn-primary full-width" disabled={splitRemaining > 0} onClick={completeSplitPayment}>
+                Complete sale
+              </button>
+            </div>
+          ) : (
+            <button
+              className="btn-primary full-width"
+              disabled={method === PaymentMethod.CASH && tendered < props.total}
+              onClick={() => props.onComplete(buildPayments(props.total, method, tendered, change, reference))}
+            >
+              Complete sale
+            </button>
+          )}
         </div>
       </div>
     </ModalShell>
