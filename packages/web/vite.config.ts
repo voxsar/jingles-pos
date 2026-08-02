@@ -7,7 +7,10 @@ function trimTrailingSlash(value: string) {
 
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, __dirname, '');
-  const apiProxyTarget = trimTrailingSlash(env.VITE_API_BASE_URL?.trim() || 'https://inv.theredsun.org');
+  const apiProxyTarget = trimTrailingSlash(
+    env.VITE_API_BASE_URL?.trim() ||
+      (mode === 'development' ? 'http://127.0.0.1:3002' : 'https://inv.theredsun.org'),
+  );
 
   return {
     base: './',
