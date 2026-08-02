@@ -21,9 +21,15 @@ import {
 import { resolveBackendUrl } from './runtime';
 
 const BASE = resolveBackendUrl('/api/pos');
+const TOKEN_STORAGE_KEY = 'jingles-pos-auth-token';
+
+function readStoredToken(): string | null {
+	if (typeof window === 'undefined') return null;
+	return window.localStorage.getItem(TOKEN_STORAGE_KEY);
+}
 
 function buildAuthHeaders(token?: string | null): Record<string, string> {
-	const normalized = token?.trim();
+	const normalized = (token === undefined ? readStoredToken() : token)?.trim();
 	if (!normalized) {
 		return {};
 	}
@@ -59,7 +65,7 @@ async function postJson<T>(path: string, payload: unknown, options?: { token?: s
 }
 
 export async function login(input: POSAuthLoginInput): Promise<POSAuthResult> {
-	return postJson<POSAuthResult>('/auth/login', input);
+	return postJson<POSAuthResult>('/auth/login', input, { token: null });
 }
 
 export async function getCurrentUser(token: string): Promise<POSUser | null> {
@@ -177,5 +183,19 @@ export async function syncNow(options?: { deviceId?: string; terminalId?: string
 }
 
 export function subscribeSyncStatus(_callback: (status: SyncStatusSummary) => void): () => void {
-	return () => undefined;
+	let stopped = false;
+	const refresh = async () => {
+		try {
+			const status = await getSyncStatus();
+			if (!stopped) _callback(status);
+		} catch {
+			// Bootstrap and the sync page surface request errors; a background refresh
+			// should not replace their user-facing state.
+		}
+	};
+	const interval = window.setInterval(() => void refresh(), 15_000);
+	return () => {
+		stopped = true;
+		window.clearInterval(interval);
+	};
 }

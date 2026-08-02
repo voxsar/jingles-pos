@@ -171,14 +171,26 @@ async function updateProductStock(
     vectorClock: VectorClock;
   },
 ): Promise<void> {
-  const variantsJson = input.variantId
-    ? (
-        await tx.product.findUnique({
-          where: { id: input.productId },
-          select: { variantsJson: true },
-        })
-      )?.variantsJson
-    : null;
+  const product = await tx.product.findUnique({
+    where: { id: input.productId },
+    select: { sku: true, stockOnHand: true, variantsJson: true },
+  });
+  if (!product) {
+    throw new Error(`Product ${input.productId} was not found`);
+  }
+
+  const variants = parseProductVariants(product.variantsJson);
+  const variant = input.variantId ? variants.find((entry) => entry.id === input.variantId) : undefined;
+  if (input.variantId && !variant) {
+    throw new Error(`Variant ${input.variantId} was not found for ${product.sku}`);
+  }
+  if (input.delta < 0) {
+    const requested = Math.abs(input.delta);
+    const available = variant?.stockOnHand ?? product.stockOnHand;
+    if (requested > available || requested > product.stockOnHand) {
+      throw new Error(`Insufficient stock for ${variant?.variantCode ?? product.sku}: ${available} available`);
+    }
+  }
 
   await tx.product.update({
     where: { id: input.productId },
@@ -189,7 +201,7 @@ async function updateProductStock(
       variantsJson: input.variantId
         ? JSON.stringify(
             applyVariantStockDelta(
-              parseProductVariants(variantsJson),
+              variants,
               input.variantId,
               input.delta,
             ),
@@ -307,6 +319,12 @@ async function saveCashCount(
 
 async function applyShiftOpenedEvent(tx: Tx, event: SyncEvent<ShiftOpenInput>): Promise<void> {
   const payload = event.payload;
+  const existingOpenShift = await tx.pOSShift.findFirst({
+    where: { terminalId: payload.terminalId, status: ShiftStatus.OPEN },
+  });
+  if (existingOpenShift && existingOpenShift.id !== event.aggregateId) {
+    throw new Error(`Terminal ${payload.terminalId} already has an open shift`);
+  }
   await tx.pOSShift.upsert({
     where: { id: event.aggregateId },
     create: {
@@ -456,6 +474,16 @@ async function applySaleCompletedEvent(tx: Tx, event: SyncEvent<CompleteSaleInpu
   if (existingSale) {
     return;
   }
+  if (!payload.lines.length || payload.lines.some((line) => !Number.isInteger(line.quantity) || line.quantity <= 0)) {
+    throw new Error('A sale requires at least one line with a positive whole-number quantity');
+  }
+  if (!payload.payments.length || payload.payments.some((payment) => !Number.isFinite(payment.amount) || payment.amount < 0)) {
+    throw new Error('A sale requires valid payment amounts');
+  }
+  const paymentTotal = payload.payments.reduce((sum, payment) => sum + payment.amount, 0);
+  if (Math.abs(paymentTotal - payload.total) > 0.01) {
+    throw new Error('Payment total does not match the sale total');
+  }
 
   for (const line of payload.lines) {
     await updateProductStock(tx, {
@@ -568,11 +596,14 @@ async function applySaleVoidedEvent(
 ): Promise<void> {
   const sale = await tx.sale.findUnique({
     where: { id: event.payload.saleId },
-    include: { lines: true },
+    include: { lines: true, returns: true },
   });
 
   if (!sale || sale.status === SaleStatus.VOIDED) {
     return;
+  }
+  if (sale.status !== SaleStatus.COMPLETED || sale.returns.length > 0) {
+    throw new Error('Only a completed sale with no returns can be voided');
   }
 
   for (const line of sale.lines) {
@@ -634,9 +665,44 @@ async function applyReturnCreatedEvent(tx: Tx, event: SyncEvent<ReturnInput>): P
     include: { lines: true },
   });
 
-  const totalRefund = payload.lines.reduce((sum, line) => sum + line.refundAmount, 0);
+  if (!sale) {
+    throw new Error('Sale not found');
+  }
+  if (sale.status !== SaleStatus.COMPLETED) {
+    throw new Error('Only a completed sale can be returned');
+  }
+  if (!payload.lines.length) {
+    throw new Error('A return requires at least one line');
+  }
 
+  const normalizedLines = [] as ReturnInput['lines'];
   for (const line of payload.lines) {
+    if (!Number.isInteger(line.quantity) || line.quantity <= 0) {
+      throw new Error('Return quantities must be positive whole numbers');
+    }
+    const saleLine = sale.lines.find((entry) => entry.id === line.saleLineId);
+    if (!saleLine || saleLine.productId !== line.productId) {
+      throw new Error('Return line does not belong to the selected sale');
+    }
+    const alreadyReturned = await tx.returnLine.aggregate({
+      where: { saleLineId: saleLine.id },
+      _sum: { quantity: true },
+    });
+    const remaining = saleLine.quantity - (alreadyReturned._sum.quantity ?? 0);
+    if (line.quantity > remaining) {
+      throw new Error(`Only ${remaining} unit(s) remain returnable for ${saleLine.sku}`);
+    }
+    normalizedLines.push({
+      ...line,
+      productId: saleLine.productId,
+      variantId: saleLine.variantId ?? undefined,
+      refundAmount: Math.round((saleLine.lineTotal / saleLine.quantity) * line.quantity * 100) / 100,
+    });
+  }
+
+  const totalRefund = normalizedLines.reduce((sum, line) => sum + line.refundAmount, 0);
+
+  for (const line of normalizedLines) {
     await updateProductStock(tx, {
       productId: line.productId,
       variantId: line.variantId,
@@ -668,7 +734,7 @@ async function applyReturnCreatedEvent(tx: Tx, event: SyncEvent<ReturnInput>): P
       sourceSequenceNum: event.sequenceNum,
       lastVectorClock: json(event.vectorClock),
       lines: {
-        create: payload.lines.map((line) => ({
+        create: normalizedLines.map((line) => ({
           id: uuidv4(),
           saleLineId: line.saleLineId,
           productId: line.productId,
@@ -680,15 +746,23 @@ async function applyReturnCreatedEvent(tx: Tx, event: SyncEvent<ReturnInput>): P
     },
   });
 
-  if (sale) {
-    await tx.sale.update({
-      where: { id: sale.id },
-      data: {
-        status: SaleStatus.REFUNDED,
-        lastVectorClock: json(event.vectorClock),
-      },
-    });
-  }
+  const returnedRows = await tx.returnLine.findMany({
+    where: { saleLine: { saleId: sale.id } },
+    select: { saleLineId: true, quantity: true },
+  });
+  const returnedByLine = new Map<string, number>();
+  returnedRows.forEach((line) => returnedByLine.set(
+    line.saleLineId,
+    (returnedByLine.get(line.saleLineId) ?? 0) + line.quantity,
+  ));
+  const fullyRefunded = sale.lines.every((line) => (returnedByLine.get(line.id) ?? 0) >= line.quantity);
+  await tx.sale.update({
+    where: { id: sale.id },
+    data: {
+      status: fullyRefunded ? SaleStatus.REFUNDED : SaleStatus.COMPLETED,
+      lastVectorClock: json(event.vectorClock),
+    },
+  });
 
   if (!isLocalPosBackendMode()) {
     await applySharedInventoryReturn({
@@ -696,7 +770,7 @@ async function applyReturnCreatedEvent(tx: Tx, event: SyncEvent<ReturnInput>): P
       saleId: payload.saleId,
       terminalId: payload.terminalId,
       reason: payload.reason ?? null,
-      lines: payload.lines.map((line) => {
+      lines: normalizedLines.map((line) => {
         const saleLine = sale?.lines.find((entry) => entry.id === line.saleLineId);
         return {
           productId: line.productId,

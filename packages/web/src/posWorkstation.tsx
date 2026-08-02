@@ -120,7 +120,7 @@ const PAYMENT_OPTIONS: Array<{ method: PaymentMethod; label: string; short: stri
   { method: PaymentMethod.AMEX, label: 'Amex', short: 'AX' },
   { method: PaymentMethod.CREDIT, label: 'Credit', short: 'CR' },
   { method: PaymentMethod.GIFT, label: 'Gift voucher', short: 'GV' },
-  { method: PaymentMethod.SPLIT, label: 'Split payment', short: 'SP' },
+  { method: PaymentMethod.INSTALLMENT, label: 'Installment plan', short: 'IN' },
 ];
 
 function clampCatalogPaneWidth(nextWidth: number, containerWidth: number | undefined): number {
@@ -861,6 +861,11 @@ export default function PosWorkstation() {
     }
 
     setCart((previous) => {
+      const availableStock = variant?.stockOnHand ?? product.stockOnHand;
+      if (availableStock <= 0) {
+        showNotice('error', `${variant?.variantCode ?? product.sku} is out of stock.`);
+        return previous;
+      }
       const tier = pickPriceTier(product.priceTiers, preferredTierLabels);
       const existing = previous.find((line) => (
         line.productId === product.id
@@ -868,6 +873,10 @@ export default function PosWorkstation() {
         && line.tierLabel === tier.label
       ));
       if (existing) {
+        if (existing.quantity >= availableStock) {
+          showNotice('error', `Only ${formatInteger(availableStock)} unit(s) are available.`);
+          return previous;
+        }
         return previous.map((line) => (
           line.uid === existing.uid
             ? recalculateCartLine({
@@ -1401,11 +1410,13 @@ export default function PosWorkstation() {
             updateCartLineById(lineId, (line) => recalculateCartLine({ ...line, discountPercent }));
           }}
           onLineQtyChange={(lineId, quantity) => {
-            updateCartLineById(lineId, (line) => (
-              quantity <= 0
-                ? null
-                : recalculateCartLine({ ...line, quantity })
-            ));
+            updateCartLineById(lineId, (line) => {
+              if (quantity <= 0) return null;
+              if (quantity > line.stockOnHand) {
+                showNotice('error', `Only ${formatInteger(line.stockOnHand)} unit(s) are available.`);
+              }
+              return recalculateCartLine({ ...line, quantity: Math.min(quantity, line.stockOnHand) });
+            });
           }}
           onLineRemove={(lineId) => {
             setVoidLineId(lineId);
@@ -1449,7 +1460,7 @@ export default function PosWorkstation() {
         onDiscount={() => discountInputRef.current?.focus()}
         onHold={() => handleOpenHoldModal('hold')}
         onPay={() => setIsPaymentOpen(true)}
-        onQuote={() => showNotice('error', 'Quote mode is not wired yet; use Hold to park the bill.')}
+        onQuote={() => handleOpenHoldModal('hold')}
         onRecall={() => handleOpenHoldModal('recall')}
         onRefund={() => setIsReturnOpen(true)}
         onSearch={() => setIsSearchOpen(true)}
@@ -2963,8 +2974,8 @@ function PaymentModal(
   const [tendered, setTendered] = useState(props.total);
   const [reference, setReference] = useState('');
   const [splitPayments, setSplitPayments] = useState<PaymentInput[]>([]);
-  const [splitMode, setSplitMode] = useState(false);
-  const isSplit = splitMode;
+  const isSplit = true;
+  const [installmentCount, setInstallmentCount] = useState(3);
   const splitPaid = roundToMoney(splitPayments.reduce((sum, payment) => sum + payment.amount, 0));
   const splitRemaining = Math.max(0, roundToMoney(props.total - splitPaid));
   const splitChange = roundToMoney(splitPayments.reduce((sum, payment) => sum + (payment.changeDue ?? 0), 0));
@@ -2978,18 +2989,8 @@ function PaymentModal(
   }, [props.total]);
 
   const selectMethod = (nextMethod: PaymentMethod) => {
-    if (nextMethod === PaymentMethod.SPLIT) {
-      if (isSplit) {
-        setSplitPayments([]);
-      }
-      setSplitMode(!isSplit);
-      setMethod(PaymentMethod.CASH);
-      setTendered(isSplit ? props.total : splitRemaining);
-      return;
-    }
-
     setMethod(nextMethod);
-    setTendered(nextMethod === PaymentMethod.CASH ? (isSplit ? splitRemaining : props.total) : props.total);
+    setTendered(nextMethod === PaymentMethod.CASH ? splitRemaining : splitRemaining);
   };
 
   const addSplitPayment = () => {
@@ -2998,6 +2999,21 @@ function PaymentModal(
     }
 
     const entered = Math.max(0, roundToMoney(tendered));
+    if (method === PaymentMethod.INSTALLMENT) {
+      setSplitPayments((current) => [...current, {
+        method,
+        amount: splitRemaining,
+        tenderedAmount: splitRemaining,
+        changeDue: 0,
+        metadata: {
+          type: 'INSTALLMENT_PLAN',
+          numberOfInstallments: installmentCount,
+          installmentAmount: roundToMoney(props.total / installmentCount),
+        },
+      }]);
+      setTendered(0);
+      return;
+    }
     if (entered <= 0) {
       return;
     }
@@ -3027,7 +3043,7 @@ function PaymentModal(
           {PAYMENT_OPTIONS.map((option) => (
             <button
               key={option.method}
-              className={`payment-method ${method === option.method || (isSplit && option.method === PaymentMethod.SPLIT) ? 'active' : ''}`}
+              className={`payment-method ${method === option.method ? 'active' : ''}`}
               onClick={() => selectMethod(option.method)}
             >
               <span>{option.short}</span>
@@ -3073,25 +3089,41 @@ function PaymentModal(
             </aside>
           )}
 
-          <LabelBlock label={method === PaymentMethod.CASH ? 'Tendered' : 'Amount'}>
+          {method === PaymentMethod.INSTALLMENT ? (
+            <LabelBlock label="Number of installments">
+              <select
+                className="glass-input large"
+                value={installmentCount}
+                disabled={splitPayments.length > 0}
+                onChange={(event) => setInstallmentCount(Number(event.target.value))}
+              >
+                {[2, 3, 4, 6, 12].map((count) => <option key={count} value={count}>{count} installments</option>)}
+              </select>
+              <div className="installment-preview">
+                {formatCurrency(roundToMoney(props.total / installmentCount))} per installment
+              </div>
+            </LabelBlock>
+          ) : (
+            <LabelBlock label={method === PaymentMethod.CASH ? 'Tendered' : 'Amount'}>
             <input
               className="glass-input large"
-              disabled={method !== PaymentMethod.CASH && !isSplit}
+              disabled={false}
               type="number"
               min={0}
               step={0.01}
               value={tendered}
               onChange={(event) => setTendered(Number(event.target.value) || 0)}
             />
-          </LabelBlock>
+            </LabelBlock>
+          )}
 
-          <div className="quick-cash-row">
+          {method !== PaymentMethod.INSTALLMENT && <div className="quick-cash-row">
             {(isSplit ? [...new Set([splitRemaining, ...quickAmounts.filter((amount) => amount >= splitRemaining)])] : quickAmounts).map((amount) => (
               <button key={amount} className="quick-cash" onClick={() => setTendered(amount)}>
                 {formatCurrency(amount)}
               </button>
             ))}
-          </div>
+          </div>}
           {method === PaymentMethod.CASH && (
             <div className="cash-denomination-shortcuts">
               <div className="meta-label">Cash denomination shortcuts</div>
@@ -3111,7 +3143,7 @@ function PaymentModal(
             </div>
           )}
 
-          {method !== PaymentMethod.CASH && (
+          {method !== PaymentMethod.CASH && method !== PaymentMethod.INSTALLMENT && (
             <LabelBlock label="Reference">
               <input
                 className="glass-input"
@@ -3130,7 +3162,7 @@ function PaymentModal(
           {isSplit ? (
             <div className="payment-split-actions">
               <button className="ghost-button" disabled={splitRemaining <= 0 || tendered <= 0} onClick={addSplitPayment}>
-                Add payment source
+                {method === PaymentMethod.INSTALLMENT ? 'Add installment plan' : 'Add payment source'}
               </button>
               <button className="btn-primary full-width" disabled={splitRemaining > 0} onClick={completeSplitPayment}>
                 Complete sale

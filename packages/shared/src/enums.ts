@@ -24,6 +24,8 @@ export enum PaymentMethod {
   AMEX = 'AMEX',
   CREDIT = 'CREDIT',
   GIFT = 'GIFT',
+  INSTALLMENT = 'INSTALLMENT',
+  /** @deprecated Multi-source payments are now the default payment flow. */
   SPLIT = 'SPLIT',
 }
 

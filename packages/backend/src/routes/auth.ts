@@ -102,7 +102,7 @@ function signToken(user: Pick<LocalAuthUser, 'id' | 'code' | 'email' | 'role'>) 
   );
 }
 
-async function authenticate(req: AuthenticatedRequest, res: Response, next: NextFunction) {
+export async function authenticate(req: AuthenticatedRequest, res: Response, next: NextFunction) {
   const header = req.headers.authorization;
   if (!header?.startsWith('Bearer ')) {
     res.status(401).json({ error: 'Missing authorization token' });

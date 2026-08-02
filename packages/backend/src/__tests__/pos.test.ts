@@ -33,6 +33,7 @@ jest.mock('../prisma', () => ({
 }));
 
 const { buildZReport, confirmPlayback, getLocalSyncStatus, getServerVectorClock } = require('../services/posSync') as typeof import('../services/posSync');
+const { authenticate } = require('../routes/auth') as typeof import('../routes/auth');
 const originalPosSyncAppToken = process.env.JINGLES_POS_SYNC_APP_TOKEN;
 const originalLegacyPosSyncAppToken = process.env.POS_SYNC_APP_TOKEN;
 
@@ -48,6 +49,18 @@ afterAll(() => {
 });
 
 describe('event sourced POS backend services', () => {
+  it('rejects POS business requests without a login token', async () => {
+    const status = jest.fn().mockReturnThis();
+    const json = jest.fn();
+    const next = jest.fn();
+
+    await authenticate({ headers: {} } as never, { status, json } as never, next);
+
+    expect(status).toHaveBeenCalledWith(401);
+    expect(json).toHaveBeenCalledWith({ error: 'Missing authorization token' });
+    expect(next).not.toHaveBeenCalled();
+  });
+
   it('builds the server vector clock from device state rows', async () => {
     mockTx.syncDeviceState.findMany.mockResolvedValue([
       { deviceId: 'device-a', lastSequenceNum: 4 },

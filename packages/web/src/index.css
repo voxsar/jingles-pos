@@ -2117,6 +2117,12 @@ button {
   color: var(--accent);
 }
 
+.installment-preview {
+  margin-top: 8px;
+  color: var(--ink-2);
+  font-size: 13px;
+}
+
 .payment-split-actions {
   display: flex;
   gap: 10px;

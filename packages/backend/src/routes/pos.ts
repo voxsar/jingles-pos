@@ -1,4 +1,5 @@
 import { Router, Request, Response, NextFunction } from 'express';
+import { timingSafeEqual } from 'crypto';
 import { v4 as uuidv4 } from 'uuid';
 import {
   DEFAULT_DEVICE_ID,
@@ -36,8 +37,30 @@ import {
   getLocalCatalogSnapshot,
   searchLocalCatalog,
 } from '../services/localCatalog';
+import { authenticate } from './auth';
 
 const router = Router();
+
+// Login is only useful if the business endpoints enforce the resulting session.
+// Keep this ahead of catalog preparation so unauthenticated requests cannot trigger
+// database work or mutate workstation state.
+router.use((req: Request, res: Response, next: NextFunction) => {
+  const isMachineSyncEndpoint = ['/sync/handshake', '/sync/playback', '/sync/confirm'].includes(req.path);
+  const configuredAppToken = (
+    process.env.JINGLES_POS_SYNC_APP_TOKEN?.trim()
+    || process.env.POS_SYNC_APP_TOKEN?.trim()
+  );
+  const requestAppToken = req.header('x-jingles-pos-app-token')?.trim();
+  if (isMachineSyncEndpoint && configuredAppToken && requestAppToken) {
+    const configured = Buffer.from(configuredAppToken);
+    const supplied = Buffer.from(requestAppToken);
+    if (configured.length === supplied.length && timingSafeEqual(configured, supplied)) {
+      next();
+      return;
+    }
+  }
+  void authenticate(req, res, next);
+});
 
 router.use(async (_req: Request, res: Response, next: NextFunction) => {
   try {
