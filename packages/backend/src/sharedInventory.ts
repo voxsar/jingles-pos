@@ -29,6 +29,7 @@ type SharedSkuRow = {
   batch_pricing: unknown;
   barcode: string | null;
   stock_on_hand: number | string | null;
+  stock_by_branch: Record<string, number> | null;
 };
 
 type SharedVariantRow = {
@@ -37,6 +38,7 @@ type SharedVariantRow = {
   variant_code: string;
   variant_name: string | null;
   variant_stock_on_hand: number | string | null;
+  stock_by_branch: Record<string, number> | null;
   attribute_id: string | null;
   attribute_name: string | null;
   attribute_type: string | null;
@@ -244,6 +246,7 @@ function buildProductVariants(rows: SharedVariantRow[]): Map<string, ProductVari
       variantCode: row.variant_code,
       name: row.variant_name ?? undefined,
       stockOnHand: normalizeNumber(row.variant_stock_on_hand),
+      stockByBranch: row.stock_by_branch ?? {},
       attributes: [],
     };
 
@@ -292,7 +295,7 @@ function buildProductVariants(rows: SharedVariantRow[]): Map<string, ProductVari
 
 async function fetchSharedCatalogSnapshotFromSource(): Promise<SharedCatalogSnapshot> {
   const inventory = getSharedInventoryPool();
-  const [categoriesResult, skuResult, variantResult] = await Promise.all([
+  const [categoriesResult, skuResult, variantResult, branchesResult, overlaysResult] = await Promise.all([
     inventory.query<SharedCategoryRow>(
       `
         SELECT id, name, parent_id, sort_order
@@ -304,10 +307,13 @@ async function fetchSharedCatalogSnapshotFromSource(): Promise<SharedCatalogSnap
     inventory.query<SharedSkuRow>(
       `
         WITH shelf_ready_stock AS (
-          SELECT sku_id, COALESCE(SUM(quantity), 0) AS stock_on_hand
-          FROM inventory_records
-          WHERE state = $1
-          GROUP BY sku_id
+          SELECT x.sku_id, SUM(x.branch_qty) AS stock_on_hand,
+            COALESCE(jsonb_object_agg(x.branch_id, x.branch_qty) FILTER (WHERE x.branch_id IS NOT NULL), '{}'::jsonb) AS stock_by_branch
+          FROM (
+            SELECT ir.sku_id, f.branch_id, SUM(ir.quantity) AS branch_qty
+            FROM inventory_records ir LEFT JOIN floors f ON f.id = ir.floor_id
+            WHERE ir.state = $1 GROUP BY ir.sku_id, f.branch_id
+          ) x GROUP BY x.sku_id
         ),
         preferred_barcodes AS (
           SELECT DISTINCT ON (sku_id) sku_id, barcode
@@ -321,15 +327,21 @@ async function fetchSharedCatalogSnapshotFromSource(): Promise<SharedCatalogSnap
           s.description,
           s.category_id,
           s.unit_of_measure,
-          s.selling_price,
-          s.wholesale_price,
-          s.bulk_price,
+          COALESCE(latest.selling_price, s.selling_price) AS selling_price,
+          COALESCE(latest.wholesale_price, s.wholesale_price) AS wholesale_price,
+          COALESCE(latest.bulk_price, s.bulk_price) AS bulk_price,
           s.batch_pricing,
           pb.barcode,
-          COALESCE(sr.stock_on_hand, 0) AS stock_on_hand
+          COALESCE(sr.stock_on_hand, 0) AS stock_on_hand,
+          COALESCE(sr.stock_by_branch, '{}'::jsonb) AS stock_by_branch
         FROM skus s
         LEFT JOIN preferred_barcodes pb ON pb.sku_id = s.id
         LEFT JOIN shelf_ready_stock sr ON sr.sku_id = s.id
+        LEFT JOIN LATERAL (
+          SELECT selling_price, wholesale_price, bulk_price FROM batches
+          WHERE sku_id = s.id AND variant_id IS NULL AND is_active = TRUE
+          ORDER BY created_at DESC LIMIT 1
+        ) latest ON TRUE
         WHERE s.is_active = TRUE
         ORDER BY s.sku_code ASC
       `,
@@ -338,11 +350,13 @@ async function fetchSharedCatalogSnapshotFromSource(): Promise<SharedCatalogSnap
     inventory.query<SharedVariantRow>(
       `
         WITH variant_stock AS (
-          SELECT variant_id, COALESCE(SUM(quantity), 0) AS stock_on_hand
-          FROM inventory_records
-          WHERE state = $1
-            AND variant_id IS NOT NULL
-          GROUP BY variant_id
+          SELECT x.variant_id, SUM(x.branch_qty) AS stock_on_hand,
+            COALESCE(jsonb_object_agg(x.branch_id, x.branch_qty) FILTER (WHERE x.branch_id IS NOT NULL), '{}'::jsonb) AS stock_by_branch
+          FROM (
+            SELECT ir.variant_id, f.branch_id, SUM(ir.quantity) AS branch_qty
+            FROM inventory_records ir LEFT JOIN floors f ON f.id = ir.floor_id
+            WHERE ir.state = $1 AND ir.variant_id IS NOT NULL GROUP BY ir.variant_id, f.branch_id
+          ) x GROUP BY x.variant_id
         )
         SELECT
           v.sku_id,
@@ -350,6 +364,7 @@ async function fetchSharedCatalogSnapshotFromSource(): Promise<SharedCatalogSnap
           v.variant_code,
           v.name AS variant_name,
           COALESCE(vs.stock_on_hand, 0) AS variant_stock_on_hand,
+          COALESCE(vs.stock_by_branch, '{}'::jsonb) AS stock_by_branch,
           a.id AS attribute_id,
           a.name AS attribute_name,
           a.type AS attribute_type,
@@ -376,6 +391,8 @@ async function fetchSharedCatalogSnapshotFromSource(): Promise<SharedCatalogSnap
       `,
       [SHELF_READY_STATE],
     ),
+    inventory.query<{ id: string; code: string; name: string }>(`SELECT id, code, name FROM branches WHERE is_active = TRUE ORDER BY code`),
+    inventory.query<any>(`SELECT id, name, type, value, applies_to, conditions, priority, stackable, valid_from, valid_to FROM pricing_overlays WHERE status = 'active' AND (valid_from IS NULL OR valid_from <= NOW()) AND (valid_to IS NULL OR valid_to >= NOW()) ORDER BY priority DESC`),
   ]);
 
   const categoriesById = new Map(categoriesResult.rows.map((category) => [category.id, category]));
@@ -404,9 +421,14 @@ async function fetchSharedCatalogSnapshotFromSource(): Promise<SharedCatalogSnap
       packSize: 1,
       unitLabel: row.unit_of_measure?.trim() || 'pcs',
       stockOnHand: normalizeNumber(row.stock_on_hand),
+      stockByBranch: row.stock_by_branch ?? {},
       description: row.description ?? undefined,
       priceTiers: buildPriceTiers(row),
       variants: variantsByProduct.get(row.id) ?? [],
+      pricingRules: overlaysResult.rows.filter((overlay: any) => {
+        const target = overlay.applies_to ?? {};
+        return (!target.skuIds?.length && !target.categoryIds?.length) || target.skuIds?.includes(row.id) || (row.category_id && target.categoryIds?.includes(row.category_id));
+      }).map((overlay: any) => ({ id: overlay.id, name: overlay.name, type: overlay.type, value: overlay.value, priority: overlay.priority, stackable: overlay.stackable, ...(overlay.applies_to ?? {}), ...(overlay.conditions ?? {}), validFrom: overlay.valid_from?.toISOString(), validTo: overlay.valid_to?.toISOString() })),
     };
   });
 
@@ -446,6 +468,7 @@ async function fetchSharedCatalogSnapshotFromSource(): Promise<SharedCatalogSnap
 
   return {
     generatedAt: new Date().toISOString(),
+    branches: branchesResult.rows,
     categories: categories
       .sort((left, right) => {
         if (left.sortOrder !== right.sortOrder) {
@@ -459,6 +482,15 @@ async function fetchSharedCatalogSnapshotFromSource(): Promise<SharedCatalogSnap
 
 async function syncProjection(snapshot: SharedCatalogSnapshot): Promise<void> {
   await prisma.$transaction(async (tx) => {
+    for (const branch of snapshot.branches ?? []) {
+      await tx.branch.upsert({ where: { id: branch.id }, create: branch, update: { code: branch.code, name: branch.name } });
+    }
+    if (snapshot.branches?.length) {
+      await tx.terminal.updateMany({
+        where: { branchId: { notIn: snapshot.branches.map((branch) => branch.id) } },
+        data: { branchId: snapshot.branches[0]!.id },
+      });
+    }
     for (const category of snapshot.categories) {
       await tx.category.upsert({
         where: { id: category.id },
@@ -489,6 +521,8 @@ async function syncProjection(snapshot: SharedCatalogSnapshot): Promise<void> {
           packSize: Math.max(1, Math.round(product.packSize || 1)),
           unitLabel: product.unitLabel,
           stockOnHand: Math.max(0, Math.round(product.stockOnHand)),
+          stockByBranchJson: stringifyJson(product.stockByBranch ?? {}),
+          pricingRulesJson: stringifyJson(product.pricingRules ?? []),
           description: product.description ?? null,
           variantsJson: stringifyJson(product.variants ?? []),
         },
@@ -503,6 +537,8 @@ async function syncProjection(snapshot: SharedCatalogSnapshot): Promise<void> {
           packSize: Math.max(1, Math.round(product.packSize || 1)),
           unitLabel: product.unitLabel,
           stockOnHand: Math.max(0, Math.round(product.stockOnHand)),
+          stockByBranchJson: stringifyJson(product.stockByBranch ?? {}),
+          pricingRulesJson: stringifyJson(product.pricingRules ?? []),
           description: product.description ?? null,
           variantsJson: stringifyJson(product.variants ?? []),
         },
@@ -631,6 +667,7 @@ export async function applySharedInventorySale(
     aggregateId: string;
     receiptNumber: string;
     terminalId?: string | null;
+    branchId?: string | null;
     lines: SharedSaleLine[];
   },
 ): Promise<void> {
@@ -644,18 +681,19 @@ export async function applySharedInventorySale(
       const recordResult = await client.query<{ id: string; quantity: number | string }>(
         `
           SELECT id, quantity
-          FROM inventory_records
-          WHERE sku_id = $1
-            AND state = $2
+          FROM inventory_records ir LEFT JOIN floors f ON f.id = ir.floor_id
+          WHERE ir.sku_id = $1
+            AND ir.state = $2
             AND (
-              ($3::text IS NULL AND variant_id IS NULL)
-              OR variant_id = $3
+              ($3::text IS NULL AND ir.variant_id IS NULL)
+              OR ir.variant_id = $3
             )
+            AND ($4::text IS NULL OR f.branch_id = $4)
             AND quantity > 0
           ORDER BY updated_at ASC, created_at ASC
           FOR UPDATE
         `,
-        [line.productId, SHELF_READY_STATE, line.variantId ?? null],
+        [line.productId, SHELF_READY_STATE, line.variantId ?? null, input.branchId ?? null],
       );
 
       const totalBefore = recordResult.rows.reduce(
@@ -754,6 +792,7 @@ async function applySharedInventoryIncrease(
   input: {
     aggregateId: string;
     terminalId?: string | null;
+    branchId?: string | null;
     eventType: 'RETURN_RECEIVED' | 'MANUAL_ADJUSTMENT';
     reasonCode?: string | null;
     metadata: Record<string, unknown>;
@@ -768,24 +807,27 @@ async function applySharedInventoryIncrease(
       }
 
       const recordId = randomUUID();
+      const floor = input.branchId ? (await client.query<{ id: string }>(`SELECT id FROM floors WHERE branch_id = $1 AND is_active = TRUE ORDER BY sort_order, created_at LIMIT 1`, [input.branchId])).rows[0] : undefined;
       await client.query(
         `
           INSERT INTO inventory_records (
             id,
             sku_id,
             variant_id,
+            floor_id,
             quantity,
             state,
             source_event_id,
             terminal_id,
             version
           )
-          VALUES ($1, $2, $3, $4, $5, $6, $7, 1)
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 1)
         `,
         [
           recordId,
           line.productId,
           line.variantId ?? null,
+          floor?.id ?? null,
           quantity,
           SHELF_READY_STATE,
           input.aggregateId,
@@ -855,6 +897,7 @@ export async function applySharedInventoryVoid(
     aggregateId: string;
     receiptNumber: string;
     terminalId?: string | null;
+    branchId?: string | null;
     reason?: string | null;
     lines: SharedSaleLine[];
   },
@@ -862,6 +905,7 @@ export async function applySharedInventoryVoid(
   await applySharedInventoryIncrease({
     aggregateId: input.aggregateId,
     terminalId: input.terminalId,
+    branchId: input.branchId,
     eventType: 'MANUAL_ADJUSTMENT',
     reasonCode: 'POS_SALE_VOID',
     metadata: {
@@ -878,6 +922,7 @@ export async function applySharedInventoryReturn(
     aggregateId: string;
     saleId: string;
     terminalId?: string | null;
+    branchId?: string | null;
     reason?: string | null;
     lines: SharedSaleLine[];
   },
@@ -885,6 +930,7 @@ export async function applySharedInventoryReturn(
   await applySharedInventoryIncrease({
     aggregateId: input.aggregateId,
     terminalId: input.terminalId,
+    branchId: input.branchId,
     eventType: 'RETURN_RECEIVED',
     reasonCode: input.reason ?? null,
     metadata: {

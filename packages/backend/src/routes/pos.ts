@@ -115,8 +115,10 @@ function mapProduct(product: any) {
     packSize: product.packSize ?? 1,
     unitLabel: product.unitLabel ?? 'pcs',
     stockOnHand: product.stockOnHand ?? 0,
+    stockByBranch: parseJson(product.stockByBranchJson, {}),
     description: product.description ?? undefined,
     variants: parseJson(product.variantsJson, []),
+    pricingRules: parseJson(product.pricingRulesJson, []),
     priceTiers: sortTiers(product.batchPrices ?? []).map((tier: any) => ({
       id: tier.id,
       label: tier.label ?? (tier.minQty > 0 ? `Bulk ${tier.minQty}+` : 'Retail'),
@@ -128,7 +130,42 @@ function mapProduct(product: any) {
   };
 }
 
-async function getProjectedProducts(catalog: SharedCatalogSnapshot) {
+function applyRule(price: number, rule: any) {
+  if (rule.type === 'percentage_discount') return Math.max(0, price * (1 - rule.value / 100));
+  if (rule.type === 'fixed_discount') return Math.max(0, price - rule.value);
+  if (rule.type === 'percentage_markup') return price * (1 + rule.value / 100);
+  if (rule.type === 'fixed_markup') return price + rule.value;
+  return price;
+}
+
+function scopeProductForBranch(product: any, branchId?: string) {
+  const branchRules = (product.pricingRules ?? []).filter((rule: any) => !rule.branchIds?.length || (branchId && rule.branchIds.includes(branchId)));
+  const priceTiers = product.priceTiers.flatMap((base: any) => {
+    const breakpoints = new Set<number>([base.minQty ?? 0, ...branchRules.map((rule: any) => Number(rule.minQty ?? 0))]);
+    return Array.from(breakpoints).sort((a, b) => a - b).map((minQty) => {
+      let price = base.price;
+      const applied: string[] = [];
+      for (const rule of branchRules) {
+        if (minQty < Number(rule.minQty ?? 0) || (rule.maxQty != null && minQty > Number(rule.maxQty))) continue;
+        price = applyRule(price, rule);
+        applied.push(rule.name);
+        if (!rule.stackable) break;
+      }
+      return { ...base, id: `${base.id}-${minQty}-${applied.join('-')}`, minQty, price: Math.round(price * 100) / 100 };
+    });
+  });
+  return {
+    ...product,
+    stockOnHand: branchId ? Number(product.stockByBranch?.[branchId] ?? 0) : product.stockOnHand,
+    variants: (product.variants ?? []).map((variant: any) => ({
+      ...variant,
+      stockOnHand: branchId ? Number(variant.stockByBranch?.[branchId] ?? 0) : variant.stockOnHand,
+    })),
+    priceTiers,
+  };
+}
+
+async function getProjectedProducts(catalog: SharedCatalogSnapshot, branchId?: string) {
   const rows = await prisma.product.findMany({
     include: { batchPrices: true },
     orderBy: { sku: 'asc' },
@@ -138,14 +175,14 @@ async function getProjectedProducts(catalog: SharedCatalogSnapshot) {
   return catalog.products.map((product) => {
     const projected = projectedById.get(product.id);
     if (!projected) {
-      return product;
+      return scopeProductForBranch(product, branchId);
     }
 
-    return {
+    return scopeProductForBranch({
       ...product,
       ...projected,
       variants: projected.variants ?? product.variants ?? [],
-    };
+    }, branchId);
   });
 }
 
@@ -157,13 +194,12 @@ async function getCatalogSnapshot(res: Response) {
   return res.locals.sharedCatalog as SharedCatalogSnapshot;
 }
 
-async function getWorkstationProducts(res: Response) {
+async function getWorkstationProducts(res: Response, terminalId?: string) {
   const catalog = await getCatalogSnapshot(res);
-  if (isLocalPosBackendMode()) {
-    return catalog.products;
-  }
-
-  return getProjectedProducts(catalog);
+  const terminal = terminalId ? await prisma.terminal.findUnique({ where: { id: terminalId } }) : null;
+  const branchId = terminal?.branchId;
+  if (isLocalPosBackendMode()) return catalog.products.map((product) => scopeProductForBranch(product, branchId));
+  return getProjectedProducts(catalog, branchId);
 }
 
 function resolveDeviceId(req: Request) {
@@ -402,7 +438,7 @@ router.get('/bootstrap', async (req: Request, res: Response) => {
               lastSyncAt: new Date().toISOString(),
             };
           })(),
-      getWorkstationProducts(res),
+      getWorkstationProducts(res, terminalId),
     ]);
 
     const userMap = new Map(users.map((user) => [user.id, user]));
@@ -438,13 +474,16 @@ router.get('/products/search', async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'Query parameter q is required' });
     }
 
+    const terminalId = typeof req.query.terminalId === 'string' ? req.query.terminalId : undefined;
+    const terminal = terminalId ? await prisma.terminal.findUnique({ where: { id: terminalId } }) : null;
+
     if (isLocalPosBackendMode()) {
-      return res.json(await searchLocalCatalog(q));
+      return res.json((await searchLocalCatalog(q)).map((product) => scopeProductForBranch(product, terminal?.branchId)));
     }
 
     const catalog = await getCatalogSnapshot(res);
     const term = q.toLowerCase();
-    const rows = (await getProjectedProducts(catalog))
+    const rows = (await getProjectedProducts(catalog, terminal?.branchId))
       .filter((product) => (
         product.sku.toLowerCase().includes(term) ||
         product.name.toLowerCase().includes(term) ||
@@ -462,7 +501,8 @@ router.get('/products/search', async (req: Request, res: Response) => {
 
 router.get('/products/barcode/:barcode', async (req: Request, res: Response) => {
   try {
-    const row = (await getWorkstationProducts(res))
+    const terminalId = typeof req.query.terminalId === 'string' ? req.query.terminalId : undefined;
+    const row = (await getWorkstationProducts(res, terminalId))
       .find((product) => product.barcode === req.params.barcode);
 
     if (!row) {

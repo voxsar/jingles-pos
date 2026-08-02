@@ -53,12 +53,15 @@ export function sortPriceTiers(tiers: ProductPriceTier[]): ProductPriceTier[] {
 export function pickPriceTier(
   tiers: ProductPriceTier[],
   preferredLabels: string[] = [],
+  quantity = 1,
 ): ProductPriceTier {
-  const orderedTiers = sortPriceTiers(tiers);
+  const eligible = tiers.filter((tier) => (tier.minQty ?? 0) <= quantity);
+  const orderedTiers = sortPriceTiers(eligible.length ? eligible : tiers);
   const normalised = preferredLabels.map((label) => label.trim().toLowerCase()).filter(Boolean);
 
   for (const label of normalised) {
-    const match = orderedTiers.find((tier) => tier.label.trim().toLowerCase() === label);
+    const matches = orderedTiers.filter((tier) => tier.label.trim().toLowerCase() === label);
+    const match = matches.sort((a, b) => (b.minQty ?? 0) - (a.minQty ?? 0))[0];
     if (match) {
       return match;
     }
@@ -70,7 +73,8 @@ export function pickPriceTier(
 
 export function recalculateCartLine(line: CartLine): CartLine {
   const safeQuantity = Math.max(1, Number.isFinite(line.quantity) ? line.quantity : 1);
-  const safeUnitPrice = Number.isFinite(line.unitPrice) ? line.unitPrice : 0;
+  const resolvedTier = pickPriceTier(line.priceTiers, [line.tierLabel], safeQuantity);
+  const safeUnitPrice = Number.isFinite(resolvedTier.price) ? resolvedTier.price : 0;
   const gross = safeQuantity * safeUnitPrice;
   const discountPercent = clampPercent(line.discountPercent);
   const discountAmount = roundCurrency(gross * (discountPercent / 100));
@@ -80,6 +84,7 @@ export function recalculateCartLine(line: CartLine): CartLine {
     ...line,
     quantity: safeQuantity,
     unitPrice: safeUnitPrice,
+    tierLabel: resolvedTier.label,
     discountPercent,
     discountAmount,
     lineTotal,
@@ -92,8 +97,8 @@ export function createCartLine(
   preferredTierLabels: string[] = [],
   variant?: ProductVariant,
 ): CartLine {
-  const tier = pickPriceTier(product.priceTiers, preferredTierLabels);
-  const estimatedCostBasis = roundCurrency(tier.price * 0.65);
+  const tier = pickPriceTier(product.priceTiers, preferredTierLabels, 1);
+  const estimatedCostBasis = roundCurrency(tier.costBasis ?? tier.price * 0.65);
 
   return recalculateCartLine({
     uid: `line-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,

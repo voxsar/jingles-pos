@@ -42,6 +42,9 @@ export function buildFallbackDesktopSettings(themeMode: POSThemeMode): POSDeskto
     databasePath: '',
     backupDirectory: '',
     themeMode,
+    addDenominationsToPaymentList: true,
+    showDenominationCombinations: true,
+    allowShortPayments: false,
   };
 }
 

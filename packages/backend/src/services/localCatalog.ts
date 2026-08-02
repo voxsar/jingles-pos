@@ -13,6 +13,8 @@ type LocalProductRow = {
   packSize: number;
   unitLabel: string;
   stockOnHand: number;
+  stockByBranchJson: string | null;
+  pricingRulesJson: string | null;
   description: string | null;
   variantsJson: string | null;
 };
@@ -142,10 +144,20 @@ function mapProductRow(
     packSize: product.packSize ?? 1,
     unitLabel: product.unitLabel ?? 'pcs',
     stockOnHand: product.stockOnHand ?? 0,
+    stockByBranch: parseJsonRecord(product.stockByBranchJson),
     description: product.description ?? undefined,
     priceTiers: mapPriceTiers(tiers),
     variants: parseVariantsJson(product.variantsJson),
+    pricingRules: parseJsonArray(product.pricingRulesJson),
   };
+}
+
+function parseJsonRecord(value: string | null | undefined): Record<string, number> {
+  try { const parsed = JSON.parse(value ?? '{}'); return parsed && typeof parsed === 'object' ? parsed : {}; } catch { return {}; }
+}
+
+function parseJsonArray<T>(value: string | null | undefined): T[] {
+  try { const parsed = JSON.parse(value ?? '[]'); return Array.isArray(parsed) ? parsed : []; } catch { return []; }
 }
 
 export async function ensureLocalCatalogSearchIndex() {
@@ -316,8 +328,12 @@ function replaceLocalCatalogSnapshotDirect(snapshot: SharedCatalogSnapshot) {
     const insertProduct = db.prepare(`
       INSERT INTO "Product" (
         id, sku, barcode, name, price, categoryId, subcategory, packSize,
-        unitLabel, stockOnHand, description, variants_json, lastVectorClock, createdAt, updatedAt
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+        unitLabel, stockOnHand, stock_by_branch_json, pricing_rules_json, description, variants_json, lastVectorClock, createdAt, updatedAt
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+    `);
+    const upsertBranch = db.prepare(`
+      INSERT INTO "Branch" (id, code, name, createdAt, updatedAt) VALUES (?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+      ON CONFLICT(id) DO UPDATE SET code=excluded.code, name=excluded.name, updatedAt=CURRENT_TIMESTAMP
     `);
     const insertBatchPrice = db.prepare(`
       INSERT INTO "BatchPrice" (id, productId, label, minQty, price, priority, isDefault, createdAt)
@@ -331,6 +347,12 @@ function replaceLocalCatalogSnapshotDirect(snapshot: SharedCatalogSnapshot) {
       db.prepare('DELETE FROM "BatchPrice"').run();
       db.prepare('DELETE FROM "Product"').run();
       db.prepare('DELETE FROM "Category"').run();
+
+      for (const branch of snapshot.branches ?? []) upsertBranch.run(branch.id, branch.code, branch.name);
+      if (snapshot.branches?.length) {
+        const ids = snapshot.branches.map((branch) => `'${branch.id.replace(/'/g, "''")}'`).join(',');
+        db.exec(`UPDATE "Terminal" SET branchId='${snapshot.branches[0]!.id.replace(/'/g, "''")}' WHERE branchId NOT IN (${ids});`);
+      }
 
       for (const category of snapshot.categories) {
         insertCategory.run(category.id, category.name, category.icon, category.sortOrder);
@@ -348,6 +370,8 @@ function replaceLocalCatalogSnapshotDirect(snapshot: SharedCatalogSnapshot) {
           Math.max(1, Math.round(product.packSize || 1)),
           product.unitLabel,
           Math.max(0, Math.round(product.stockOnHand)),
+          JSON.stringify(product.stockByBranch ?? {}),
+          JSON.stringify(product.pricingRules ?? []),
           product.description ?? null,
           JSON.stringify(product.variants ?? []),
           '{}',
@@ -430,6 +454,8 @@ export async function replaceLocalCatalogSnapshot(snapshot: SharedCatalogSnapsho
     packSize: Math.max(1, Math.round(product.packSize || 1)),
     unitLabel: product.unitLabel,
     stockOnHand: Math.max(0, Math.round(product.stockOnHand)),
+    stockByBranchJson: JSON.stringify(product.stockByBranch ?? {}),
+    pricingRulesJson: JSON.stringify(product.pricingRules ?? []),
     description: product.description ?? null,
     variantsJson: JSON.stringify(product.variants ?? []),
     lastVectorClock: '{}',
@@ -447,6 +473,12 @@ export async function replaceLocalCatalogSnapshot(snapshot: SharedCatalogSnapsho
   );
 
   await prisma.$transaction(async (tx) => {
+    for (const branch of snapshot.branches ?? []) {
+      await tx.branch.upsert({ where: { id: branch.id }, create: branch, update: { code: branch.code, name: branch.name } });
+    }
+    if (snapshot.branches?.length) {
+      await tx.terminal.updateMany({ where: { branchId: { notIn: snapshot.branches.map((branch) => branch.id) } }, data: { branchId: snapshot.branches[0]!.id } });
+    }
     await tx.batchPrice.deleteMany();
     await tx.product.deleteMany();
     await tx.category.deleteMany();

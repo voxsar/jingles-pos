@@ -73,6 +73,9 @@ function toSnapshot(value: StoredDesktopSettings | null | undefined): POSDesktop
     databasePath: normalizeAbsolutePath(value?.databasePath, getDefaultDatabasePath()),
     backupDirectory: normalizeAbsolutePath(value?.backupDirectory, getDefaultBackupDirectory()),
     themeMode: normalizeThemeMode(value?.themeMode),
+    addDenominationsToPaymentList: value?.addDenominationsToPaymentList !== false,
+    showDenominationCombinations: value?.showDenominationCombinations !== false,
+    allowShortPayments: value?.allowShortPayments === true,
   };
 }
 

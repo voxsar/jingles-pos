@@ -59,6 +59,24 @@ export interface ProductPriceTier {
   priority: number;
   minQty?: number;
   isDefault?: boolean;
+  costBasis?: number;
+}
+
+export interface POSPricingRule {
+  id: string;
+  name: string;
+  type: 'percentage_discount' | 'fixed_discount' | 'percentage_markup' | 'fixed_markup';
+  value: number;
+  priority: number;
+  stackable: boolean;
+  skuIds?: string[];
+  variantIds?: string[];
+  categoryIds?: string[];
+  branchIds?: string[];
+  minQty?: number;
+  maxQty?: number;
+  validFrom?: string;
+  validTo?: string;
 }
 
 export type ProductVariantAttributeType = 'dropdown' | 'text' | 'numeric' | 'boolean' | 'color';
@@ -79,6 +97,7 @@ export interface ProductVariant {
   variantCode: string;
   name?: string;
   stockOnHand: number;
+  stockByBranch?: Record<string, number>;
   attributes: ProductVariantAttributeValue[];
 }
 
@@ -92,13 +111,17 @@ export interface Product {
   packSize: number;
   unitLabel: string;
   stockOnHand: number;
+  stockByBranch?: Record<string, number>;
   description?: string;
   priceTiers: ProductPriceTier[];
   variants?: ProductVariant[];
+  pricingRules?: POSPricingRule[];
 }
 
 export interface SharedCatalogSnapshot {
   generatedAt: string;
+  branches?: Branch[];
+  users?: POSUser[];
   categories: Category[];
   products: Product[];
 }
@@ -388,6 +411,9 @@ export interface POSDesktopSettings {
   databasePath: string;
   backupDirectory: string;
   themeMode: POSThemeMode;
+  addDenominationsToPaymentList: boolean;
+  showDenominationCombinations: boolean;
+  allowShortPayments: boolean;
 }
 
 export interface POSDesktopSettingsSaveResult {

@@ -147,6 +147,7 @@ function applyVariantStockDelta(
   variants: ProductVariant[],
   variantId: string | null | undefined,
   delta: number,
+  branchId?: string | null,
 ): ProductVariant[] {
   if (!variantId) {
     return variants;
@@ -157,6 +158,12 @@ function applyVariantStockDelta(
       ? {
           ...variant,
           stockOnHand: variant.stockOnHand + delta,
+          stockByBranch: branchId
+            ? {
+                ...(variant.stockByBranch ?? {}),
+                [branchId]: Math.max(0, Number(variant.stockByBranch?.[branchId] ?? 0) + delta),
+              }
+            : variant.stockByBranch,
         }
       : variant
   ));
@@ -168,12 +175,13 @@ async function updateProductStock(
     productId: string;
     variantId?: string | null;
     delta: number;
+    branchId?: string | null;
     vectorClock: VectorClock;
   },
 ): Promise<void> {
   const product = await tx.product.findUnique({
     where: { id: input.productId },
-    select: { sku: true, stockOnHand: true, variantsJson: true },
+    select: { sku: true, stockOnHand: true, stockByBranchJson: true, variantsJson: true },
   });
   if (!product) {
     throw new Error(`Product ${input.productId} was not found`);
@@ -186,10 +194,18 @@ async function updateProductStock(
   }
   if (input.delta < 0) {
     const requested = Math.abs(input.delta);
-    const available = variant?.stockOnHand ?? product.stockOnHand;
+    const branchStock = parseJson<Record<string, number>>(product.stockByBranchJson, {});
+    const available = input.branchId
+      ? Number(variant?.stockByBranch?.[input.branchId] ?? branchStock[input.branchId] ?? 0)
+      : (variant?.stockOnHand ?? product.stockOnHand);
     if (requested > available || requested > product.stockOnHand) {
       throw new Error(`Insufficient stock for ${variant?.variantCode ?? product.sku}: ${available} available`);
     }
+  }
+
+  const stockByBranch = parseJson<Record<string, number>>(product.stockByBranchJson, {});
+  if (input.branchId) {
+    stockByBranch[input.branchId] = Math.max(0, Number(stockByBranch[input.branchId] ?? 0) + input.delta);
   }
 
   await tx.product.update({
@@ -198,12 +214,14 @@ async function updateProductStock(
       stockOnHand: input.delta >= 0
         ? { increment: input.delta }
         : { decrement: Math.abs(input.delta) },
+      stockByBranchJson: json(stockByBranch),
       variantsJson: input.variantId
         ? JSON.stringify(
             applyVariantStockDelta(
               variants,
               input.variantId,
               input.delta,
+              input.branchId,
             ),
           )
         : undefined,
@@ -490,6 +508,7 @@ async function applySaleCompletedEvent(tx: Tx, event: SyncEvent<CompleteSaleInpu
       productId: line.productId,
       variantId: line.variantId,
       delta: -line.quantity,
+      branchId: payload.branchId,
       vectorClock: event.vectorClock,
     });
 
@@ -611,6 +630,7 @@ async function applySaleVoidedEvent(
       productId: line.productId,
       variantId: line.variantId,
       delta: line.quantity,
+      branchId: sale.branchId,
       vectorClock: event.vectorClock,
     });
 
@@ -639,6 +659,7 @@ async function applySaleVoidedEvent(
       aggregateId: sale.id,
       receiptNumber: sale.receiptNumber,
       terminalId: sale.terminalId,
+      branchId: sale.branchId,
       reason: event.payload.reason ?? null,
       lines: sale.lines.map((line) => ({
         productId: line.productId,
@@ -707,6 +728,7 @@ async function applyReturnCreatedEvent(tx: Tx, event: SyncEvent<ReturnInput>): P
       productId: line.productId,
       variantId: line.variantId,
       delta: line.quantity,
+      branchId: sale.branchId,
       vectorClock: event.vectorClock,
     });
 

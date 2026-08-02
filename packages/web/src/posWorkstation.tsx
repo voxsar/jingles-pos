@@ -1515,6 +1515,9 @@ export default function PosWorkstation() {
           total={totals.total}
           onClose={() => setIsPaymentOpen(false)}
           onComplete={(payments) => void handleCompleteSale(payments)}
+          addDenominationsToPaymentList={desktopSettings?.addDenominationsToPaymentList ?? true}
+          showDenominationCombinations={desktopSettings?.showDenominationCombinations ?? true}
+          allowShortPayments={desktopSettings?.allowShortPayments ?? false}
         />
       )}
 
@@ -2369,7 +2372,7 @@ function ModalShell(
     children: React.ReactNode;
     onClose: () => void;
     title: string;
-    width?: 'narrow' | 'medium' | 'wide';
+    width?: 'narrow' | 'medium' | 'wide' | 'payment';
   },
 ) {
   return (
@@ -2547,6 +2550,52 @@ function SettingsModal(
                     <span className="theme-option-copy">Low-glare workstation view for long billing sessions.</span>
                   </button>
                 </div>
+              </section>
+
+              <section className="settings-card">
+                <div className="settings-card-head">
+                  <div>
+                    <div className="section-kicker">Payments</div>
+                    <div className="section-title">Cash denomination behavior</div>
+                  </div>
+                  <div className="report-chip mono">Payment window</div>
+                </div>
+
+                <label className="settings-checkbox-row">
+                  <input
+                    type="checkbox"
+                    checked={settings.addDenominationsToPaymentList}
+                    onChange={(event) => updateDraft('addDenominationsToPaymentList', event.target.checked)}
+                  />
+                  <span>
+                    <b>Add denomination clicks to the payment list</b>
+                    <small>Keep each cash note or coin selection visible as a pending cash entry.</small>
+                  </span>
+                </label>
+
+                <label className="settings-checkbox-row admin-setting-row">
+                  <input
+                    type="checkbox"
+                    checked={settings.allowShortPayments}
+                    onChange={(event) => updateDraft('allowShortPayments', event.target.checked)}
+                  />
+                  <span>
+                    <b>Allow short payments</b>
+                    <small>Allow a bill to close with a remaining balance due. Disabled by default.</small>
+                  </span>
+                </label>
+
+                <label className="settings-checkbox-row">
+                  <input
+                    type="checkbox"
+                    checked={settings.showDenominationCombinations}
+                    onChange={(event) => updateDraft('showDenominationCombinations', event.target.checked)}
+                  />
+                  <span>
+                    <b>Suggest denominations for manually typed amounts</b>
+                    <small>Show exact note and coin combinations when the typed amount can be represented.</small>
+                  </span>
+                </label>
               </section>
             </div>
 
@@ -2968,14 +3017,19 @@ function PaymentModal(
     total: number;
     onClose: () => void;
     onComplete: (payments: PaymentInput[]) => void;
+    addDenominationsToPaymentList: boolean;
+    showDenominationCombinations: boolean;
+    allowShortPayments: boolean;
   },
 ) {
   const [method, setMethod] = useState<PaymentMethod>(PaymentMethod.CASH);
-  const [tendered, setTendered] = useState(props.total);
+  const [tendered, setTendered] = useState(0);
   const [reference, setReference] = useState('');
   const [splitPayments, setSplitPayments] = useState<PaymentInput[]>([]);
   const isSplit = true;
   const [installmentCount, setInstallmentCount] = useState(3);
+  const [denominationCounts, setDenominationCounts] = useState<Record<string, number>>({});
+  const [isTenderedManuallyEdited, setIsTenderedManuallyEdited] = useState(false);
   const splitPaid = roundToMoney(splitPayments.reduce((sum, payment) => sum + payment.amount, 0));
   const splitRemaining = Math.max(0, roundToMoney(props.total - splitPaid));
   const splitChange = roundToMoney(splitPayments.reduce((sum, payment) => sum + (payment.changeDue ?? 0), 0));
@@ -2988,9 +3042,57 @@ function PaymentModal(
     return [...new Set([props.total, rounded100, rounded500, rounded1000])];
   }, [props.total]);
 
+  const possibleDenominationCombinations = useMemo(() => {
+    if (method !== PaymentMethod.CASH || !props.showDenominationCombinations || !isTenderedManuallyEdited || Object.keys(denominationCounts).length > 0) {
+      return [] as number[][];
+    }
+
+    const target = Math.round(tendered);
+    if (target <= 0 || Math.abs(tendered - target) > 0.001) {
+      return [] as number[][];
+    }
+
+    const results: number[][] = [];
+    const values = DENOMINATIONS.map((entry) => entry.value).sort((left, right) => right - left);
+    const search = (remaining: number, startIndex: number, combination: number[]) => {
+      if (results.length >= 4 || combination.length > 20) {
+        return;
+      }
+      if (remaining === 0) {
+        results.push(combination);
+        return;
+      }
+
+      for (let index = startIndex; index < values.length; index += 1) {
+        const value = values[index];
+        if (value > remaining) {
+          continue;
+        }
+        search(remaining - value, index, [...combination, value]);
+      }
+    };
+    search(target, 0, []);
+    return results;
+  }, [denominationCounts, isTenderedManuallyEdited, method, props.showDenominationCombinations, tendered]);
+
+  const hasUnsavedChanges = method !== PaymentMethod.CASH
+    || tendered !== 0
+    || reference.trim().length > 0
+    || splitPayments.length > 0
+    || Object.keys(denominationCounts).length > 0
+    || installmentCount !== 3;
+
+  const handleClose = () => {
+    if (hasUnsavedChanges && !window.confirm('You have payment changes that have not been completed. Close this window?')) {
+      return;
+    }
+    props.onClose();
+  };
+
   const selectMethod = (nextMethod: PaymentMethod) => {
     setMethod(nextMethod);
-    setTendered(nextMethod === PaymentMethod.CASH ? splitRemaining : splitRemaining);
+    setIsTenderedManuallyEdited(false);
+    setTendered(0);
   };
 
   const addSplitPayment = () => {
@@ -3025,19 +3127,38 @@ function PaymentModal(
       tenderedAmount: method === PaymentMethod.CASH ? entered : amount,
       changeDue: method === PaymentMethod.CASH ? roundToMoney(entered - amount) : 0,
       reference: method === PaymentMethod.CASH ? undefined : reference.trim() || undefined,
+      metadata: method === PaymentMethod.CASH && Object.keys(denominationCounts).length > 0
+        ? { denominations: denominationCounts }
+        : undefined,
     }]);
     setReference('');
-    setTendered(splitRemaining);
+    setDenominationCounts({});
+    setIsTenderedManuallyEdited(false);
+    setTendered(0);
   };
 
   const completeSplitPayment = () => {
-    if (splitRemaining <= 0) {
-      props.onComplete(splitPayments);
+    if (splitPaid <= 0 || (!props.allowShortPayments && splitRemaining > 0)) {
+      return;
     }
+
+    const completedPayments = props.allowShortPayments && splitRemaining > 0
+      ? splitPayments.map((payment, index) => index === splitPayments.length - 1
+        ? {
+          ...payment,
+          metadata: {
+            ...(payment.metadata ?? {}),
+            underpayment: true,
+            balanceDue: splitRemaining,
+          },
+        }
+        : payment)
+      : splitPayments;
+    props.onComplete(completedPayments);
   };
 
   return (
-    <ModalShell onClose={props.onClose} title="Payment" width="medium">
+    <ModalShell onClose={handleClose} title="Payment" width="payment">
       <div className="payment-layout">
         <div className="payment-methods">
           {PAYMENT_OPTIONS.map((option) => (
@@ -3062,15 +3183,20 @@ function PaymentModal(
                 <span className="meta-label">Payment stack</span>
                 <span>{splitPayments.length} source{splitPayments.length === 1 ? '' : 's'}</span>
               </div>
-              {splitPayments.length === 0 ? (
+              {splitPayments.length === 0 && (!props.addDenominationsToPaymentList || Object.keys(denominationCounts).length === 0) ? (
                 <div className="payment-stack-empty">Add cash, card or another source to settle this bill.</div>
               ) : (
                 <div className="payment-stack-list">
                   {splitPayments.map((payment, index) => {
                     const label = PAYMENT_OPTIONS.find((option) => option.method === payment.method)?.label ?? payment.method;
+                    const denominationSummary = payment.metadata?.denominations
+                      ? Object.entries(payment.metadata.denominations as Record<string, number>)
+                        .map(([value, count]) => `${value}×${count}`)
+                        .join(' · ')
+                      : '';
                     return (
                       <div className="payment-stack-item" key={`${payment.method}-${index}`}>
-                        <span>{label}</span>
+                        <span>{label}{denominationSummary && <small>{denominationSummary}</small>}</span>
                         <b>{formatCurrency(payment.amount)}</b>
                         <button
                           className="payment-stack-remove"
@@ -3082,9 +3208,16 @@ function PaymentModal(
                       </div>
                     );
                   })}
+                  {props.addDenominationsToPaymentList && Object.keys(denominationCounts).length > 0 && (
+                    <div className="payment-stack-item payment-stack-draft">
+                      <span>Cash selected<small>{Object.entries(denominationCounts).map(([value, count]) => `${value}×${count}`).join(' · ')}</small></span>
+                      <b>{formatCurrency(tendered)}</b>
+                    </div>
+                  )}
                 </div>
               )}
-              <div className="payment-stack-total"><span>Remaining</span><b>{formatCurrency(splitRemaining)}</b></div>
+              <div className="payment-stack-total"><span>{props.allowShortPayments ? 'Balance due' : 'Remaining'}</span><b>{formatCurrency(splitRemaining)}</b></div>
+              {props.allowShortPayments && splitRemaining > 0 && <div className="payment-stack-underpayment">Short payment is allowed by admin settings.</div>}
               {splitChange > 0 && <div className="payment-stack-change"><span>Change</span><b>{formatCurrency(splitChange)}</b></div>}
             </aside>
           )}
@@ -3112,14 +3245,18 @@ function PaymentModal(
               min={0}
               step={0.01}
               value={tendered}
-              onChange={(event) => setTendered(Number(event.target.value) || 0)}
+              onChange={(event) => {
+                setIsTenderedManuallyEdited(true);
+                setDenominationCounts({});
+                setTendered(Number(event.target.value) || 0);
+              }}
             />
             </LabelBlock>
           )}
 
           {method !== PaymentMethod.INSTALLMENT && <div className="quick-cash-row">
             {(isSplit ? [...new Set([splitRemaining, ...quickAmounts.filter((amount) => amount >= splitRemaining)])] : quickAmounts).map((amount) => (
-              <button key={amount} className="quick-cash" onClick={() => setTendered(amount)}>
+              <button key={amount} className="quick-cash" onClick={() => { setIsTenderedManuallyEdited(false); setDenominationCounts({}); setTendered(amount); }}>
                 {formatCurrency(amount)}
               </button>
             ))}
@@ -3132,14 +3269,34 @@ function PaymentModal(
                   <button
                     key={denomination.value}
                     className="cash-denomination-button"
-                    onClick={() => setTendered((current) => roundToMoney(current + denomination.value))}
+                    onClick={() => {
+                      setIsTenderedManuallyEdited(false);
+                      setTendered((current) => roundToMoney(current + denomination.value));
+                      if (props.addDenominationsToPaymentList) {
+                        setDenominationCounts((current) => ({
+                          ...current,
+                          [String(denomination.value)]: (current[String(denomination.value)] ?? 0) + 1,
+                        }));
+                      }
+                    }}
                     title={`Add ${denomination.label}`}
                   >
-                    <img src={`/currency/${denomination.value}.png`} alt="" />
+                    <img src={`./currency/${denomination.value}.png`} alt="" />
                     <span>{denomination.label}</span>
                   </button>
                 ))}
               </div>
+            </div>
+          )}
+
+          {method === PaymentMethod.CASH && props.showDenominationCombinations && possibleDenominationCombinations.length > 0 && (
+            <div className="denomination-suggestions">
+              <div className="meta-label">Possible combinations</div>
+              {possibleDenominationCombinations.map((combination, index) => (
+                <div className="denomination-suggestion" key={`${combination.join('-')}-${index}`}>
+                  {combination.map((value) => formatCurrency(value)).join(' + ')}
+                </div>
+              ))}
             </div>
           )}
 
@@ -3161,10 +3318,10 @@ function PaymentModal(
 
           {isSplit ? (
             <div className="payment-split-actions">
-              <button className="ghost-button" disabled={splitRemaining <= 0 || tendered <= 0} onClick={addSplitPayment}>
+              <button className="ghost-button" disabled={splitRemaining <= 0 || (method !== PaymentMethod.INSTALLMENT && tendered <= 0)} onClick={addSplitPayment}>
                 {method === PaymentMethod.INSTALLMENT ? 'Add installment plan' : 'Add payment source'}
               </button>
-              <button className="btn-primary full-width" disabled={splitRemaining > 0} onClick={completeSplitPayment}>
+              <button className="btn-primary full-width" disabled={splitPaid <= 0 || (!props.allowShortPayments && splitRemaining > 0)} onClick={completeSplitPayment}>
                 Complete sale
               </button>
             </div>
@@ -3321,7 +3478,7 @@ function DenominationRow(
       <div className="denomination-visual">
         <img
           className={`currency-image ${props.denomination.kind === 'coin' ? 'coin-image' : ''}`}
-          src={`/currency/${props.denomination.value}.png`}
+              src={`./currency/${props.denomination.value}.png`}
           alt={props.denomination.label}
         />
         <span>{props.denomination.label}</span>
@@ -3406,6 +3563,9 @@ function ReceiptModal(
     terminalCode: string;
   },
 ) {
+  const paidAmount = roundToMoney(props.sale.payments.reduce((sum, payment) => sum + payment.amount, 0));
+  const balanceDue = Math.max(0, roundToMoney(props.sale.total - paidAmount));
+
   return (
     <ModalShell onClose={props.onClose} title="Receipt" width="narrow">
       <div className="receipt-paper">
@@ -3437,12 +3597,23 @@ function ReceiptModal(
           <span>Total</span>
           <span>{formatCurrency(props.sale.total)}</span>
         </div>
+        <div className="receipt-subheading">Payment(s)</div>
+        <div className="receipt-line-item strong">
+          <span>Paid</span>
+          <span>{formatCurrency(paidAmount)}</span>
+        </div>
         {props.sale.payments.map((payment, index) => (
           <div key={`${payment.method}-${index}`} className="receipt-line-item">
             <span>{payment.method}</span>
             <span>{formatCurrency(payment.amount)}</span>
           </div>
         ))}
+        {balanceDue > 0 && (
+          <div className="receipt-line-item receipt-balance">
+            <span>Balance due</span>
+            <span>{formatCurrency(balanceDue)}</span>
+          </div>
+        )}
       </div>
 
       <div className="modal-actions">

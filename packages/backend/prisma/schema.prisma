@@ -67,6 +67,8 @@ model Product {
   packSize        Int         @default(1)
   unitLabel       String      @default("pcs")
   stockOnHand     Int         @default(0)
+  stockByBranchJson String?   @map("stock_by_branch_json")
+  pricingRulesJson String?    @map("pricing_rules_json")
   description     String?
   variantsJson    String?     @map("variants_json")
   lastVectorClock String?
@@ -74,7 +76,6 @@ model Product {
   updatedAt       DateTime    @updatedAt
   category        Category?   @relation(fields: [categoryId], references: [id])
   batchPrices     BatchPrice[]
-  inventory       Inventory[]
   saleLines       SaleLine[]
   returnLines     ReturnLine[]
 }
@@ -88,15 +89,6 @@ model BatchPrice {
   priority  Int      @default(0)
   isDefault Boolean  @default(false)
   createdAt DateTime @default(now())
-  product   Product  @relation(fields: [productId], references: [id])
-}
-
-model Inventory {
-  id        String   @id @default(uuid())
-  productId String
-  state     String   @default("ShelfReady")
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
   product   Product  @relation(fields: [productId], references: [id])
 }
 

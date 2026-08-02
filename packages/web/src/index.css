@@ -1760,6 +1760,10 @@ button {
   width: min(960px, calc(100vw - 36px));
 }
 
+.modal-shell.payment {
+  width: min(1180px, calc(100vw - 36px));
+}
+
 .modal-head {
   display: flex;
   align-items: center;
@@ -2094,6 +2098,59 @@ button {
   font-family: var(--mono);
 }
 
+.payment-stack-item small {
+  display: block;
+  margin-top: 3px;
+  color: var(--ink-2);
+  font-family: var(--mono);
+  font-size: 10px;
+}
+
+.payment-stack-draft {
+  padding-top: 8px;
+  color: var(--accent);
+  border-top: 1px dashed rgba(77, 59, 38, 0.18);
+}
+
+.denomination-suggestions {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: rgba(13, 122, 91, 0.07);
+}
+
+.denomination-suggestion {
+  color: var(--ink-2);
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+.settings-checkbox-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin-top: 14px;
+  cursor: pointer;
+}
+
+.settings-checkbox-row input {
+  margin-top: 3px;
+  accent-color: var(--accent);
+}
+
+.settings-checkbox-row span {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.settings-checkbox-row small {
+  color: var(--ink-2);
+  line-height: 1.4;
+}
+
 .payment-stack-remove {
   padding: 0 4px;
   color: var(--ink-2);
@@ -2115,6 +2172,13 @@ button {
 .payment-stack-change {
   margin-top: 8px;
   color: var(--accent);
+}
+
+.payment-stack-underpayment {
+  margin-top: 8px;
+  color: var(--warning, #a55b00);
+  font-size: 12px;
+  line-height: 1.4;
 }
 
 .installment-preview {
@@ -2323,6 +2387,20 @@ button {
 
 .receipt-line-item {
   padding: 6px 0;
+}
+
+.receipt-subheading {
+  margin: 12px 0 4px;
+  color: var(--ink-2);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.receipt-balance {
+  color: var(--warning, #a55b00);
+  font-weight: 700;
 }
 
 .receipt-line-copy {
