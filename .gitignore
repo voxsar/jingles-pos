@@ -6,3 +6,7 @@ dist/
 *.db-shm
 *.db-wal
 coverage/
+release/
+*.sqlite
+*.sqlite3
+*.log

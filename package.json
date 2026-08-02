@@ -25,5 +25,8 @@
 		"electron": "41.4.0",
 		"electron-builder": "^24.9.1",
 		"typescript": "^5.3.3"
+	},
+	"allowScripts": {
+		"electron@41.4.0": true
 	}
 }

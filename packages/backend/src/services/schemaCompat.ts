@@ -60,6 +60,16 @@ async function hasIndex(indexName: string) {
   return rows.length > 0;
 }
 
+async function ensureColumn(tableName: string, columnName: string, definition: string) {
+  if (await hasColumn(tableName, columnName)) {
+    return;
+  }
+
+  await prisma.$executeRawUnsafe(
+    `ALTER TABLE "${tableName}" ADD COLUMN "${columnName}" ${definition}`,
+  );
+}
+
 async function shouldSkipStatement(statement: string) {
   const createTable = statement.match(/^CREATE TABLE (?:IF NOT EXISTS )?"?([A-Za-z0-9_]+)"?/i);
   if (createTable) {
