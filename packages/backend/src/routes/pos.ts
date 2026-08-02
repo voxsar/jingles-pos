@@ -727,6 +727,9 @@ router.post('/sales', async (req: Request, res: Response) => {
       total: req.body.total ?? 0,
       marginTotal: req.body.marginTotal ?? 0,
     };
+    const mappedTerminal = await prisma.terminal.findUnique({ where: { id: payload.terminalId } });
+    if (!mappedTerminal) return res.status(400).json({ error: 'The terminal is not mapped to an inventory branch' });
+    payload.branchId = mappedTerminal.branchId;
 
     const giftPayments = payload.payments.filter((payment) => payment.method === 'GIFT');
     for (const payment of giftPayments) {

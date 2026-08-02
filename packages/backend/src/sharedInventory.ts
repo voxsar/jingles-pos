@@ -776,7 +776,7 @@ export async function applySharedInventorySale(
 
       const recordResult = await client.query<{ id: string; quantity: number | string }>(
         `
-          SELECT id, quantity
+          SELECT ir.id, ir.quantity
           FROM inventory_records ir LEFT JOIN floors f ON f.id = ir.floor_id
           WHERE ir.sku_id = $1
             AND ir.state = $2
@@ -785,9 +785,9 @@ export async function applySharedInventorySale(
               OR ir.variant_id = $3
             )
             AND ($4::text IS NULL OR f.branch_id = $4)
-            AND quantity > 0
-          ORDER BY updated_at ASC, created_at ASC
-          FOR UPDATE
+            AND ir.quantity > 0
+          ORDER BY ir.updated_at ASC, ir.created_at ASC
+          FOR UPDATE OF ir
         `,
         [line.productId, SHELF_READY_STATE, line.variantId ?? null, input.branchId ?? null],
       );
