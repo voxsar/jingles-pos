@@ -23,6 +23,15 @@ describe('pickPriceTier', () => {
   it('falls back to the default tier', () => {
     expect(pickPriceTier(priceTiers, ['Missing']).label).toBe('Promo');
   });
+
+  it('selects the highest eligible quantity breakpoint', () => {
+    const tiers = [
+      { id: 'retail-1', label: 'Retail', price: 100, priority: 1, minQty: 0, isDefault: true },
+      { id: 'retail-10', label: 'Retail', price: 85, priority: 1, minQty: 10 },
+    ];
+    expect(pickPriceTier(tiers, ['Retail'], 9).price).toBe(100);
+    expect(pickPriceTier(tiers, ['Retail'], 10).price).toBe(85);
+  });
 });
 
 describe('createCartLine', () => {
@@ -52,6 +61,18 @@ describe('createCartLine', () => {
     expect(line.productId).toBe('prod-1');
     expect(line.lineTotal).toBe(100);
     expect(line.salespersonInitials).toBe('CA');
+  });
+
+  it('uses current variant pricing when a variant is selected', () => {
+    const product: Product = {
+      id: 'prod-1', sku: 'SKU-1', name: 'Widget', categoryId: 'cat-1', subcategory: 'Tools',
+      packSize: 1, unitLabel: 'pcs', stockOnHand: 10,
+      priceTiers: [{ id: 'base', label: 'Retail', price: 100, priority: 1, isDefault: true }],
+      variants: [{ id: 'variant-1', productId: 'prod-1', variantCode: 'SKU-1-BLUE', stockOnHand: 2, attributes: [],
+        priceTiers: [{ id: 'variant-price', label: 'Retail', price: 125, priority: 1, isDefault: true }] }],
+    };
+    const line = createCartLine(product, { id: 'u1', code: 'U1', name: 'Cashier', initials: 'CA', role: UserRole.CASHIER }, [], product.variants![0]);
+    expect(line.unitPrice).toBe(125);
   });
 });
 

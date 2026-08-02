@@ -73,8 +73,8 @@ export function pickPriceTier(
 
 export function recalculateCartLine(line: CartLine): CartLine {
   const safeQuantity = Math.max(1, Number.isFinite(line.quantity) ? line.quantity : 1);
-  const resolvedTier = pickPriceTier(line.priceTiers, [line.tierLabel], safeQuantity);
-  const safeUnitPrice = Number.isFinite(resolvedTier.price) ? resolvedTier.price : 0;
+  const resolvedTier = line.priceTiers.length ? pickPriceTier(line.priceTiers, [line.tierLabel], safeQuantity) : undefined;
+  const safeUnitPrice = Number.isFinite(resolvedTier?.price) ? resolvedTier!.price : (Number.isFinite(line.unitPrice) ? line.unitPrice : 0);
   const gross = safeQuantity * safeUnitPrice;
   const discountPercent = clampPercent(line.discountPercent);
   const discountAmount = roundCurrency(gross * (discountPercent / 100));
@@ -84,7 +84,7 @@ export function recalculateCartLine(line: CartLine): CartLine {
     ...line,
     quantity: safeQuantity,
     unitPrice: safeUnitPrice,
-    tierLabel: resolvedTier.label,
+    tierLabel: resolvedTier?.label ?? line.tierLabel,
     discountPercent,
     discountAmount,
     lineTotal,

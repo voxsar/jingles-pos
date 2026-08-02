@@ -794,7 +794,9 @@ async function applyReturnCreatedEvent(tx: Tx, event: SyncEvent<ReturnInput>): P
       aggregateId: event.aggregateId,
       saleId: payload.saleId,
       terminalId: payload.terminalId,
+      branchId: sale.branchId,
       reason: payload.reason ?? null,
+      refundAmount: totalRefund,
       lines: normalizedLines.map((line) => {
         const saleLine = sale?.lines.find((entry) => entry.id === line.saleLineId);
         return {

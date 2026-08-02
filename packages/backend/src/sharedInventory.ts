@@ -893,9 +893,27 @@ async function applySharedInventoryIncrease(
     reasonCode?: string | null;
     metadata: Record<string, unknown>;
     lines: SharedSaleLine[];
+    voucherRefund?: { saleId: string; refundId: string; amount?: number };
   },
 ): Promise<void> {
   await withSharedInventoryTransaction(async (client) => {
+    if (input.voucherRefund) {
+      const rows = await client.query<any>(`SELECT voucher_code_id,code,SUM(redeemed_amount) AS net FROM voucher_redemptions WHERE order_id=$1 GROUP BY voucher_code_id,code HAVING SUM(redeemed_amount)>0 ORDER BY code`, [input.voucherRefund.saleId]);
+      let remaining = input.voucherRefund.amount == null ? Number.POSITIVE_INFINITY : input.voucherRefund.amount;
+      for (const row of rows.rows) {
+        if (remaining <= 0) break;
+        const voucher = (await client.query<any>(`SELECT id,current_balance,initial_value FROM voucher_codes WHERE id=$1 FOR UPDATE`, [row.voucher_code_id])).rows[0];
+        if (!voucher) continue;
+        const amount = Math.min(normalizeNumber(row.net), remaining);
+        const before = normalizeNumber(voucher.current_balance);
+        const after = Math.min(normalizeNumber(voucher.initial_value), Math.round((before + amount) * 100) / 100);
+        const restored = after - before;
+        if (restored <= 0) continue;
+        await client.query(`UPDATE voucher_codes SET current_balance=$1,status='active',fully_redeemed_at=NULL,updated_at=NOW() WHERE id=$2`, [after, voucher.id]);
+        await client.query(`INSERT INTO voucher_redemptions (id,voucher_code_id,code,redeemed_amount,balance_before,balance_after,order_id,applied_to_items,redeemed_at,notes) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NOW(),$9)`, [randomUUID(), voucher.id, row.code, -restored, before, after, input.voucherRefund.saleId, JSON.stringify([]), `Voucher refund ${input.voucherRefund.refundId}`]);
+        remaining -= restored;
+      }
+    }
     for (const line of input.lines) {
       const quantity = normalizeNumber(line.quantity);
       if (quantity <= 0) {
@@ -1010,6 +1028,7 @@ export async function applySharedInventoryVoid(
       source: 'pos-sale-void',
     },
     lines: input.lines,
+    voucherRefund: { saleId: input.aggregateId, refundId: input.aggregateId },
   });
 }
 
@@ -1020,6 +1039,7 @@ export async function applySharedInventoryReturn(
     terminalId?: string | null;
     branchId?: string | null;
     reason?: string | null;
+    refundAmount?: number;
     lines: SharedSaleLine[];
   },
 ): Promise<void> {
@@ -1035,5 +1055,6 @@ export async function applySharedInventoryReturn(
       source: 'pos-return',
     },
     lines: input.lines,
+    voucherRefund: { saleId: input.saleId, refundId: input.aggregateId, amount: input.refundAmount },
   });
 }
