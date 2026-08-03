@@ -202,8 +202,12 @@ async function getCatalogSnapshot(res: Response) {
   return res.locals.sharedCatalog as SharedCatalogSnapshot;
 }
 
-async function getWorkstationProducts(res: Response, terminalId?: string) {
-  const catalog = await getCatalogSnapshot(res);
+async function getWorkstationProducts(
+  res: Response,
+  terminalId?: string,
+  catalogSnapshot?: SharedCatalogSnapshot,
+) {
+  const catalog = catalogSnapshot ?? await getCatalogSnapshot(res);
   const terminal = terminalId ? await prisma.terminal.findUnique({ where: { id: terminalId } }) : null;
   const branchId = terminal?.branchId;
   if (isLocalPosBackendMode()) return catalog.products.map((product) => scopeProductForBranch(product, branchId));
@@ -413,8 +417,8 @@ router.get('/bootstrap', async (req: Request, res: Response) => {
   try {
     const terminalId = typeof req.query.terminalId === 'string' ? req.query.terminalId : undefined;
     const deviceId = typeof req.query.deviceId === 'string' ? req.query.deviceId : undefined;
-    const [catalog, branches, terminals, users, customers, activeShift, heldSales, syncStatus, products] = await Promise.all([
-      getCatalogSnapshot(res),
+    const catalog = await getCatalogSnapshot(res);
+    const [branches, terminals, users, customers, activeShift, heldSales, syncStatus, products] = await Promise.all([
       prisma.branch.findMany({ orderBy: { code: 'asc' } }),
       prisma.terminal.findMany({ orderBy: { code: 'asc' } }),
       prisma.pOSUser.findMany({ orderBy: { code: 'asc' } }),
@@ -446,7 +450,7 @@ router.get('/bootstrap', async (req: Request, res: Response) => {
               lastSyncAt: new Date().toISOString(),
             };
           })(),
-      getWorkstationProducts(res, terminalId),
+      getWorkstationProducts(res, terminalId, catalog),
     ]);
 
     const userMap = new Map(users.map((user) => [user.id, user]));
@@ -771,13 +775,23 @@ router.post('/sales', async (req: Request, res: Response) => {
   }
 });
 
-router.get('/sales', async (_req: Request, res: Response) => {
+router.get('/sales', async (req: Request, res: Response) => {
   try {
     await ensureSeedData();
+    const terminalId = typeof req.query.terminalId === 'string' ? req.query.terminalId.trim() : '';
+    const cashierId = typeof req.query.cashierId === 'string' ? req.query.cashierId.trim() : '';
+    const requestedLimit = Number(req.query.limit);
+    const limit = Number.isFinite(requestedLimit)
+      ? Math.min(1000, Math.max(1, Math.trunc(requestedLimit)))
+      : 1000;
     const sales = await prisma.sale.findMany({
+      where: {
+        terminalId: terminalId || undefined,
+        userId: cashierId || undefined,
+      },
       include: { customer: true, lines: true, payments: true },
       orderBy: { createdAt: 'desc' },
-      take: 200,
+      take: limit,
     });
 
     const userMap = await getUserMap();

@@ -3,7 +3,7 @@
 # Run as root or with sudo privileges.
 set -euo pipefail
 
-APP_DIR="/var/www/jingles-pos"
+APP_DIR="/var/www/federation-inventory/jingles-pos"
 DOMAIN="pos.theredsun.org"
 NGINX_CONF="/etc/nginx/sites-available/${DOMAIN}.conf"
 DATA_DIR="${APP_DIR}/data"
@@ -43,7 +43,7 @@ fi
 
 # Sync DATABASE_URL in ecosystem.config.js to match .env
 DB_URL=$(grep DATABASE_URL "${APP_DIR}/packages/backend/.env" | cut -d'"' -f2)
-sed -i "s|file:/var/www/jingles-pos/data/jingles.db|${DB_URL#file:}|g" \
+sed -i "s|file:/var/www/federation-inventory/jingles-pos/data/jingles.db|${DB_URL#file:}|g" \
   "${APP_DIR}/ecosystem.config.js" 2>/dev/null || true
 
 # Run Prisma migrations against the existing database (safe, additive only)
@@ -62,7 +62,7 @@ cat > "/etc/nginx/sites-available/${DOMAIN}-temp.conf" <<'NGINX'
 server {
     listen 80;
     server_name pos.theredsun.org;
-    root /var/www/jingles-pos/packages/web/dist;
+    root /var/www/federation-inventory/jingles-pos/packages/web/dist;
     index index.html;
     location / { try_files $uri $uri/ /index.html; }
 }

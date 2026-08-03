@@ -68,6 +68,7 @@ import {
   getNameInitials,
   pickPriceTier,
   recalculateCartLine,
+  saleIncludesCash,
 } from './utils/pos';
 import { useNavigate } from 'react-router-dom';
 
@@ -156,6 +157,7 @@ export default function PosWorkstation() {
   const [activeShift, setActiveShift] = useState<ShiftSummary | null>(null);
   const [sales, setSales] = useState<SaleSummary[]>([]);
   const [salesLoading, setSalesLoading] = useState(false);
+  const [hideCashSales, setHideCashSales] = useState(false);
   const [syncStatus, setSyncStatus] = useState<SyncStatusSummary | null>(null);
 
   const [cart, setCart] = useState<CartLine[]>([]);
@@ -164,6 +166,7 @@ export default function PosWorkstation() {
   const [billDiscount, setBillDiscount] = useState(0);
   const [activeCategoryId, setActiveCategoryId] = useState('all');
   const [activeSubcategory, setActiveSubcategory] = useState<string | null>(null);
+  const [hideOutOfStock, setHideOutOfStock] = useState(false);
   const [catalogPaneWidth, setCatalogPaneWidth] = useState(DEFAULT_CATALOG_PANE_WIDTH);
   const [isResizingCatalogPane, setIsResizingCatalogPane] = useState(false);
   const [notice, setNotice] = useState<Notice>(null);
@@ -178,6 +181,7 @@ export default function PosWorkstation() {
   const [isZOpen, setIsZOpen] = useState(false);
   const [zReport, setZReport] = useState<ZReportSummary | null>(null);
   const [isReturnOpen, setIsReturnOpen] = useState(false);
+  const [isOrdersOpen, setIsOrdersOpen] = useState(false);
   const [isVoidOpen, setIsVoidOpen] = useState(false);
   const [voidLineId, setVoidLineId] = useState<string | null>(null);
   const [activeHeldSaleId, setActiveHeldSaleId] = useState<string | null>(null);
@@ -201,6 +205,8 @@ export default function PosWorkstation() {
   const headerBarRef = useRef<HTMLElement>(null);
   const actionBarRef = useRef<HTMLDivElement>(null);
   const workstationGridRef = useRef<HTMLDivElement>(null);
+  const controlPressCountRef = useRef(0);
+  const controlPressTimerRef = useRef<number | null>(null);
 
   const showNotice = useCallback((type: 'success' | 'error', text: string) => {
     setNotice({ type, text });
@@ -383,6 +389,10 @@ export default function PosWorkstation() {
   }, [users]);
 
   const productMap = useMemo(() => new Map(products.map((product) => [product.id, product])), [products]);
+  const catalogProducts = useMemo(
+    () => hideOutOfStock ? products.filter((product) => product.stockOnHand > 0) : products,
+    [hideOutOfStock, products],
+  );
   const productsWithVariants = useMemo(
     () => new Set(products.filter((product) => (product.variants?.length ?? 0) > 0).map((product) => product.id)),
     [products],
@@ -394,7 +404,7 @@ export default function PosWorkstation() {
     const counts = new Map<string, number>();
     const subcategoriesByCategory = new Map<string, Set<string>>();
 
-    for (const product of products) {
+    for (const product of catalogProducts) {
       counts.set(product.categoryId, (counts.get(product.categoryId) ?? 0) + 1);
       if (product.subcategory) {
         const bucket = subcategoriesByCategory.get(product.categoryId) ?? new Set<string>();
@@ -419,12 +429,12 @@ export default function PosWorkstation() {
         icon: 'AL',
         sortOrder: 0,
         chip: 'AL',
-        count: products.length,
+        count: catalogProducts.length,
         subcategoryCount: sorted.length,
       },
       ...sorted,
     ];
-  }, [bootstrapData?.categories, products]);
+  }, [bootstrapData?.categories, catalogProducts]);
 
   const subcategoryTiles = useMemo<CatalogSubcategoryTile[]>(() => {
     if (activeCategoryId === 'all') {
@@ -432,7 +442,7 @@ export default function PosWorkstation() {
     }
 
     const counts = new Map<string, number>();
-    for (const product of products) {
+    for (const product of catalogProducts) {
       if (product.categoryId !== activeCategoryId || !product.subcategory) {
         continue;
       }
@@ -446,10 +456,10 @@ export default function PosWorkstation() {
         chip: getCategoryToken(name),
         count,
       }));
-  }, [activeCategoryId, products]);
+  }, [activeCategoryId, catalogProducts]);
 
   const visibleProducts = useMemo(() => {
-    let rows = [...products];
+    let rows = [...catalogProducts];
     if (activeCategoryId !== 'all') {
       rows = rows.filter((product) => product.categoryId === activeCategoryId);
     }
@@ -458,7 +468,7 @@ export default function PosWorkstation() {
     }
 
     return rows.sort((left, right) => left.sku.localeCompare(right.sku));
-  }, [activeCategoryId, activeSubcategory, products]);
+  }, [activeCategoryId, activeSubcategory, catalogProducts]);
 
   const activeCategory = useMemo(
     () => categoryTiles.find((category) => category.id === activeCategoryId) ?? categoryTiles[0] ?? null,
@@ -479,7 +489,14 @@ export default function PosWorkstation() {
 
   const totals = useMemo(() => calcCartTotals(cart, billDiscount), [billDiscount, cart]);
 
-  const todaySales = useMemo(() => sales.filter((sale) => isToday(sale.createdAt)), [sales]);
+  const visibleSales = useMemo(
+    () => hideCashSales ? sales.filter((sale) => !saleIncludesCash(sale)) : sales,
+    [hideCashSales, sales],
+  );
+  const todaySales = useMemo(
+    () => visibleSales.filter((sale) => sale.terminalId === currentTerminalId && isToday(sale.createdAt)),
+    [currentTerminalId, visibleSales],
+  );
   const todayRevenue = useMemo(
     () => todaySales.reduce((sum, sale) => sum + sale.total, 0),
     [todaySales],
@@ -522,7 +539,10 @@ export default function PosWorkstation() {
   const reloadSales = useCallback(async () => {
     setSalesLoading(true);
     try {
-      const rows = await listSales();
+      const rows = await listSales({
+        terminalId: authUser?.role === UserRole.MANAGER ? undefined : currentTerminalId,
+        limit: 1000,
+      });
       setSales(rows);
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to load sales history';
@@ -530,7 +550,7 @@ export default function PosWorkstation() {
     } finally {
       setSalesLoading(false);
     }
-  }, [showNotice]);
+  }, [authUser?.role, currentTerminalId, showNotice]);
 
   const refreshWorkspace = useCallback(
     async (options: { includeSales?: boolean } = {}) => {
@@ -705,6 +725,36 @@ export default function PosWorkstation() {
 
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
+      if (session != null && event.key === 'Control' && !event.repeat) {
+        controlPressCountRef.current += 1;
+        if (controlPressTimerRef.current != null) {
+          window.clearTimeout(controlPressTimerRef.current);
+        }
+
+        if (controlPressCountRef.current >= 3) {
+          controlPressCountRef.current = 0;
+          setHideCashSales((previous) => {
+            const next = !previous;
+            showNotice('success', next ? 'Cash sales are hidden.' : 'Cash sales are visible.');
+            return next;
+          });
+        } else {
+          controlPressTimerRef.current = window.setTimeout(() => {
+            controlPressCountRef.current = 0;
+            controlPressTimerRef.current = null;
+          }, 1000);
+        }
+        return;
+      }
+
+      if (event.key !== 'Control') {
+        controlPressCountRef.current = 0;
+        if (controlPressTimerRef.current != null) {
+          window.clearTimeout(controlPressTimerRef.current);
+          controlPressTimerRef.current = null;
+        }
+      }
+
       if (event.key === 'F1') {
         event.preventDefault();
         setIsHelpOpen(true);
@@ -767,8 +817,14 @@ export default function PosWorkstation() {
     };
 
     window.addEventListener('keydown', handler);
-    return () => window.removeEventListener('keydown', handler);
-  }, [cart.length, session]);
+    return () => {
+      window.removeEventListener('keydown', handler);
+      if (controlPressTimerRef.current != null) {
+        window.clearTimeout(controlPressTimerRef.current);
+        controlPressTimerRef.current = null;
+      }
+    };
+  }, [cart.length, session, showNotice]);
 
   const closeOverlayStack = useCallback(() => {
     setIsSearchOpen(false);
@@ -778,6 +834,7 @@ export default function PosWorkstation() {
     setMoneyMode(null);
     setIsZOpen(false);
     setIsReturnOpen(false);
+    setIsOrdersOpen(false);
     setIsVoidOpen(false);
     setReceiptSale(null);
     setIsSettingsOpen(false);
@@ -1332,6 +1389,7 @@ export default function PosWorkstation() {
         isSyncing={isSyncing}
         onCashAction={() => setMoneyMode(activeShift == null ? 'open' : 'close')}
         onOpenHelp={() => setIsHelpOpen(true)}
+        onOpenOrders={() => setIsOrdersOpen(true)}
         onOpenSettings={() => void handleOpenSettings()}
         onSignOut={handleSignOut}
         onOpenSync={() => navigate('/sync')}
@@ -1362,12 +1420,14 @@ export default function PosWorkstation() {
           activeCategoryId={activeCategoryId}
           activeSubcategory={activeSubcategory}
           categories={categoryTiles}
+          hideOutOfStock={hideOutOfStock}
           onAddProduct={handleProductPick}
           onCategoryChange={(nextCategory) => {
             setActiveCategoryId(nextCategory);
             setActiveSubcategory(null);
           }}
           onOpenSearch={() => setIsSearchOpen(true)}
+          onHideOutOfStockChange={setHideOutOfStock}
           onSubcategoryChange={setActiveSubcategory}
           products={visibleProducts}
           subcategories={subcategoryTiles}
@@ -1475,6 +1535,7 @@ export default function PosWorkstation() {
 
       {isSearchOpen && (
         <SearchOverlay
+          hideOutOfStock={hideOutOfStock}
           products={products}
           onClose={() => setIsSearchOpen(false)}
           onPick={(product) => {
@@ -1567,12 +1628,29 @@ export default function PosWorkstation() {
         />
       )}
 
+      {isOrdersOpen && (
+        <OrderHistoryModal
+          cashSalesHidden={hideCashSales}
+          currentTerminalId={currentTerminalId}
+          isLoading={salesLoading}
+          isManager={session.user.role === UserRole.MANAGER}
+          onClose={() => setIsOrdersOpen(false)}
+          onOpenReceipt={(sale) => {
+            setIsOrdersOpen(false);
+            setReceiptSale(sale);
+          }}
+          sales={visibleSales}
+          terminals={terminals}
+          users={users}
+        />
+      )}
+
       {isReturnOpen && (
         <ReturnModal
           isLoading={salesLoading}
           onClose={() => setIsReturnOpen(false)}
           onSubmit={(draft) => void handleSubmitReturn(draft)}
-          sales={sales}
+          sales={visibleSales}
         />
       )}
 
@@ -1728,6 +1806,7 @@ type HeaderBarProps = {
   isSyncing: boolean;
   onCashAction: () => void;
   onOpenHelp: () => void;
+  onOpenOrders: () => void;
   onOpenSettings: () => void;
   needsSyncAuth: boolean;
   onOpenSync: () => void;
@@ -1806,6 +1885,9 @@ function HeaderBar(props: HeaderBarProps) {
       <div className="header-right">
         <MetricCard label="Today" value={formatCurrency(props.todayRevenue)} />
         <MetricCard label="Bills" value={String(props.todayBills)} />
+        <button className="ghost-button" onClick={props.onOpenOrders}>
+          Orders
+        </button>
         <button className="ghost-button" onClick={props.onOpenHelp} title="Help & user guide (F1)">
           Help
         </button>
@@ -1882,8 +1964,10 @@ type ProductPanelProps = {
   activeCategoryId: string;
   activeSubcategory: string | null;
   categories: CatalogCategoryTile[];
+  hideOutOfStock: boolean;
   onAddProduct: (product: Product) => void;
   onCategoryChange: (nextCategory: string) => void;
+  onHideOutOfStockChange: (hideOutOfStock: boolean) => void;
   onOpenSearch: () => void;
   onSubcategoryChange: (nextSubcategory: string | null) => void;
   products: Product[];
@@ -1917,9 +2001,16 @@ function ProductPanel(props: ProductPanelProps) {
           <span className="search-copy">Search products, SKU, or barcode</span>
           <kbd className="kbd">F3</kbd>
         </button>
-        <div className="catalog-mode-pill">
-          Tile catalog
-        </div>
+        <label className="stock-filter-toggle">
+          <input
+            checked={props.hideOutOfStock}
+            onChange={(event) => props.onHideOutOfStockChange(event.target.checked)}
+            role="switch"
+            type="checkbox"
+          />
+          <span className="stock-filter-switch" aria-hidden="true"><span /></span>
+          <span>Hide out of stock</span>
+        </label>
       </div>
 
       <div className="catalog-browser">
@@ -2618,6 +2709,7 @@ function SettingsModal(
 
 function SearchOverlay(
   props: {
+    hideOutOfStock: boolean;
     products: Product[];
     onClose: () => void;
     onPick: (product: Product) => void;
@@ -2638,6 +2730,10 @@ function SearchOverlay(
 
     function filterByScope(rows: Product[]) {
       return rows.filter((product) => {
+        if (props.hideOutOfStock && product.stockOnHand <= 0) {
+          return false;
+        }
+
         const categoryToken = getCategoryToken(product.categoryId).toLowerCase();
         if (!term) {
           return true;
@@ -2698,7 +2794,7 @@ function SearchOverlay(
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [props.products, query, scope]);
+  }, [props.hideOutOfStock, props.products, query, scope]);
 
   return (
     <ModalShell onClose={props.onClose} title="Search products" width="wide">
@@ -3481,11 +3577,19 @@ function DenominationRow(
   return (
     <div className="denomination-row">
       <div className="denomination-visual">
-        <img
-          className={`currency-image ${props.denomination.kind === 'coin' ? 'coin-image' : ''}`}
-              src={`./currency/${props.denomination.value}.png`}
-          alt={props.denomination.label}
-        />
+        <button
+          aria-label={`Add one ${props.denomination.label}`}
+          className="currency-image-button"
+          onClick={() => props.onChange(props.count + 1)}
+          title={`Add one ${props.denomination.label}`}
+          type="button"
+        >
+          <img
+            className={`currency-image ${props.denomination.kind === 'coin' ? 'coin-image' : ''}`}
+            src={`./currency/${props.denomination.value}.png`}
+            alt=""
+          />
+        </button>
         <span>{props.denomination.label}</span>
       </div>
       <div className="qty-stepper compact">
@@ -3569,7 +3673,16 @@ function ReceiptModal(
   },
 ) {
   const paidAmount = roundToMoney(props.sale.payments.reduce((sum, payment) => sum + payment.amount, 0));
+  const tenderedAmount = roundToMoney(props.sale.payments.reduce(
+    (sum, payment) => sum + (payment.tenderedAmount ?? payment.amount),
+    0,
+  ));
+  const changeDue = Math.max(0, roundToMoney(props.sale.payments.reduce(
+    (sum, payment) => sum + (payment.changeDue ?? 0),
+    0,
+  )));
   const balanceDue = Math.max(0, roundToMoney(props.sale.total - paidAmount));
+  const itemCount = props.sale.lines.reduce((sum, line) => sum + line.quantity, 0);
 
   return (
     <ModalShell onClose={props.onClose} title="Receipt" width="narrow">
@@ -3581,8 +3694,24 @@ function ReceiptModal(
         </div>
         <div className="receipt-divider" />
         <div className="receipt-meta">
+          <span>Receipt</span>
           <span>{props.sale.receiptNumber}</span>
+        </div>
+        <div className="receipt-meta">
+          <span>Date</span>
           <span>{formatDateTime(props.sale.createdAt)}</span>
+        </div>
+        <div className="receipt-meta">
+          <span>Cashier</span>
+          <span>{props.sale.cashierName}</span>
+        </div>
+        <div className="receipt-meta">
+          <span>Customer</span>
+          <span>{props.sale.customerName ?? 'Walk-in customer'}</span>
+        </div>
+        <div className="receipt-meta">
+          <span>Items</span>
+          <span>{formatInteger(itemCount)}</span>
         </div>
         <div className="receipt-divider" />
         {props.sale.lines.map((line) => (
@@ -3592,33 +3721,76 @@ function ReceiptModal(
               {getLineVariantSummary(line) != null && (
                 <div className="receipt-line-copy">{getLineVariantSummary(line)}</div>
               )}
+              <div className="receipt-line-copy">SKU {line.sku} · {line.tierLabel}</div>
               <div>{line.quantity} x {formatCurrency(line.unitPrice)}</div>
+              {line.discountAmount > 0 && (
+                <div className="receipt-line-copy">Discount -{formatCurrency(line.discountAmount)}</div>
+              )}
             </div>
             <span>{formatCurrency(line.lineTotal)}</span>
           </div>
         ))}
         <div className="receipt-divider" />
+        <div className="receipt-line-item">
+          <span>Subtotal</span>
+          <span>{formatCurrency(props.sale.subtotal)}</span>
+        </div>
+        <div className="receipt-line-item">
+          <span>Discount</span>
+          <span>-{formatCurrency(props.sale.discountTotal)}</span>
+        </div>
+        <div className="receipt-line-item">
+          <span>Tax</span>
+          <span>{formatCurrency(props.sale.taxTotal)}</span>
+        </div>
         <div className="receipt-line-item strong">
           <span>Total</span>
           <span>{formatCurrency(props.sale.total)}</span>
         </div>
         <div className="receipt-subheading">Payment(s)</div>
-        <div className="receipt-line-item strong">
-          <span>Paid</span>
-          <span>{formatCurrency(paidAmount)}</span>
-        </div>
         {props.sale.payments.map((payment, index) => (
-          <div key={`${payment.method}-${index}`} className="receipt-line-item">
-            <span>{payment.method}</span>
-            <span>{formatCurrency(payment.amount)}</span>
+          <div key={`${payment.method}-${index}`} className="receipt-payment-entry">
+            <div className="receipt-line-item">
+              <span>{PAYMENT_OPTIONS.find((option) => option.method === payment.method)?.label ?? payment.method}</span>
+              <span>{formatCurrency(payment.amount)}</span>
+            </div>
+            {payment.reference && (
+              <div className="receipt-payment-detail">
+                <span>Reference</span>
+                <span>{payment.reference}</span>
+              </div>
+            )}
+            {(payment.tenderedAmount ?? payment.amount) !== payment.amount && (
+              <div className="receipt-payment-detail">
+                <span>Tendered</span>
+                <span>{formatCurrency(payment.tenderedAmount ?? payment.amount)}</span>
+              </div>
+            )}
           </div>
         ))}
-        {balanceDue > 0 && (
-          <div className="receipt-line-item receipt-balance">
+        <div className="receipt-divider" />
+        <div className="receipt-settlement" aria-label="Receipt settlement summary">
+          <div className="receipt-line-item">
+            <span>Tendered</span>
+            <span>{formatCurrency(tenderedAmount)}</span>
+          </div>
+          <div className="receipt-line-item">
+            <span>Paid</span>
+            <span>{formatCurrency(paidAmount)}</span>
+          </div>
+          <div className={`receipt-line-item receipt-balance ${balanceDue === 0 ? 'settled' : ''}`}>
             <span>Balance due</span>
             <span>{formatCurrency(balanceDue)}</span>
           </div>
-        )}
+          <div className="receipt-line-item receipt-change">
+            <span>Change</span>
+            <span>{formatCurrency(changeDue)}</span>
+          </div>
+        </div>
+        <div className="receipt-footer">
+          <div>Thank you for shopping with Jingles.</div>
+          <div>Please retain this receipt for returns.</div>
+        </div>
       </div>
 
       <div className="modal-actions">

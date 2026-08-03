@@ -2,10 +2,12 @@ import {
   CashCountMode,
   CartLine,
   CashDeclaration,
+  PaymentMethod,
   POSUser,
   Product,
   ProductPriceTier,
   ProductVariant,
+  SaleSummary,
 } from '@jingles/shared';
 
 export interface DenominationDefinition {
@@ -39,6 +41,10 @@ export const DENOMINATIONS: DenominationDefinition[] = [
   { value: 2, label: 'Rs 2', kind: 'coin' },
   { value: 1, label: 'Rs 1', kind: 'coin' },
 ];
+
+export function saleIncludesCash(sale: Pick<SaleSummary, 'payments'>): boolean {
+  return sale.payments.some((payment) => payment.method === PaymentMethod.CASH);
+}
 
 export function sortPriceTiers(tiers: ProductPriceTier[]): ProductPriceTier[] {
   return [...tiers].sort((left, right) => {

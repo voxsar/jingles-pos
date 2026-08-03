@@ -855,7 +855,8 @@ button {
   gap: 10px;
 }
 
-.catalog-mode-pill {
+.catalog-mode-pill,
+.stock-filter-toggle {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -868,6 +869,55 @@ button {
   font-size: 11px;
   letter-spacing: 0.08em;
   text-transform: uppercase;
+}
+
+.stock-filter-toggle {
+  gap: 9px;
+  cursor: pointer;
+  white-space: nowrap;
+  user-select: none;
+}
+
+.stock-filter-toggle input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.stock-filter-switch {
+  position: relative;
+  width: 32px;
+  height: 18px;
+  flex: 0 0 32px;
+  border-radius: 999px;
+  background: rgba(77, 59, 38, 0.18);
+  transition: background 0.15s ease, box-shadow 0.15s ease;
+}
+
+.stock-filter-switch span {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--surface-keycap);
+  box-shadow: 0 1px 3px rgba(77, 59, 38, 0.24);
+  transition: transform 0.15s ease;
+}
+
+.stock-filter-toggle input:checked + .stock-filter-switch {
+  background: var(--accent);
+}
+
+.stock-filter-toggle input:checked + .stock-filter-switch span {
+  transform: translateX(14px);
+}
+
+.stock-filter-toggle input:focus-visible + .stock-filter-switch {
+  box-shadow: 0 0 0 3px rgba(13, 122, 91, 0.2);
 }
 
 .catalog-browser {
@@ -2291,6 +2341,29 @@ button {
   min-width: 0;
 }
 
+.currency-image-button {
+  border: 0;
+  border-radius: 7px;
+  padding: 0;
+  background: transparent;
+  cursor: pointer;
+  transition: transform 0.12s ease, box-shadow 0.12s ease;
+}
+
+.currency-image-button:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 10px rgba(77, 59, 38, 0.16);
+}
+
+.currency-image-button:active {
+  transform: translateY(0) scale(0.97);
+}
+
+.currency-image-button:focus-visible {
+  outline: 3px solid rgba(13, 122, 91, 0.24);
+  outline-offset: 2px;
+}
+
 .currency-image {
   display: block;
   width: 92px;
@@ -2385,6 +2458,22 @@ button {
   gap: 12px;
 }
 
+.receipt-meta {
+  padding: 2px 0;
+  font-size: 12px;
+}
+
+.receipt-meta span:first-child,
+.receipt-payment-detail span:first-child {
+  color: var(--ink-2);
+}
+
+.receipt-meta span:last-child,
+.receipt-line-item > span:last-child,
+.receipt-payment-detail span:last-child {
+  text-align: right;
+}
+
 .receipt-line-item {
   padding: 6px 0;
 }
@@ -2401,6 +2490,47 @@ button {
 .receipt-balance {
   color: var(--warning, #a55b00);
   font-weight: 700;
+}
+
+.receipt-balance.settled,
+.receipt-change {
+  color: var(--accent);
+}
+
+.receipt-payment-entry + .receipt-payment-entry {
+  border-top: 1px dotted rgba(77, 59, 38, 0.12);
+}
+
+.receipt-payment-detail {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 0 5px 12px;
+  font-size: 11px;
+}
+
+.receipt-settlement {
+  padding: 8px 10px;
+  border: 1px solid rgba(77, 59, 38, 0.12);
+  border-radius: 12px;
+  background: var(--surface-soft-subtle);
+}
+
+.receipt-settlement .receipt-line-item {
+  padding: 4px 0;
+}
+
+.receipt-settlement .receipt-balance,
+.receipt-settlement .receipt-change {
+  font-size: 15px;
+}
+
+.receipt-footer {
+  margin-top: 18px;
+  color: var(--ink-2);
+  font-size: 11px;
+  line-height: 1.5;
+  text-align: center;
 }
 
 .receipt-line-copy {

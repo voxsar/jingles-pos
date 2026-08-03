@@ -125,8 +125,18 @@ export async function createSale(input: CompleteSaleInput): Promise<SaleSummary>
 	return postJson<SaleSummary>('/sales', input);
 }
 
-export async function listSales(): Promise<SaleSummary[]> {
-	return getJson<SaleSummary[]>('/sales');
+export async function listSales(options?: { terminalId?: string; cashierId?: string; limit?: number }): Promise<SaleSummary[]> {
+	const params = new URLSearchParams();
+	if (options?.terminalId) {
+		params.set('terminalId', options.terminalId);
+	}
+	if (options?.cashierId) {
+		params.set('cashierId', options.cashierId);
+	}
+	if (typeof options?.limit === 'number' && Number.isFinite(options.limit)) {
+		params.set('limit', String(options.limit));
+	}
+	return getJson<SaleSummary[]>(`/sales${params.size > 0 ? `?${params.toString()}` : ''}`);
 }
 
 export async function getSale(saleId: string): Promise<SaleSummary> {
