@@ -1846,6 +1846,192 @@ button {
   color: var(--ink-1);
 }
 
+.orders-workspace {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.orders-tabs,
+.orders-filters,
+.orders-metrics {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.orders-tabs {
+  padding-bottom: 12px;
+  border-bottom: 1px solid rgba(77, 59, 38, 0.08);
+}
+
+.orders-tabs button {
+  border: 1px solid rgba(77, 59, 38, 0.09);
+  border-radius: 999px;
+  padding: 9px 14px;
+  background: var(--surface-card);
+  color: var(--ink-1);
+}
+
+.orders-tabs button.active {
+  border-color: rgba(13, 122, 91, 0.28);
+  background: rgba(13, 122, 91, 0.12);
+  color: var(--accent);
+  font-weight: 700;
+}
+
+.orders-mask-indicator {
+  margin-left: auto;
+  border-radius: 999px;
+  padding: 7px 11px;
+  background: rgba(183, 114, 23, 0.12);
+  color: var(--warning);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.orders-filters .glass-input:first-child {
+  flex: 1;
+}
+
+.orders-filters select {
+  width: min(230px, 28%);
+}
+
+.orders-metrics {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.orders-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.orders-summary-card {
+  min-width: 0;
+  border: 1px solid rgba(77, 59, 38, 0.08);
+  border-radius: 18px;
+  padding: 14px;
+  background: var(--surface-soft-subtle);
+}
+
+.orders-summary-card h3 {
+  margin: 0 0 10px;
+  font-size: 14px;
+}
+
+.orders-summary-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  max-height: 130px;
+  overflow: auto;
+}
+
+.orders-summary-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 10px;
+  align-items: center;
+  font-size: 12px;
+}
+
+.orders-summary-row span:first-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.orders-summary-row span:nth-child(2),
+.orders-summary-empty {
+  color: var(--ink-2);
+}
+
+.orders-summary-row b {
+  font-family: var(--mono);
+}
+
+.orders-list-wrap {
+  min-width: 900px;
+  border: 1px solid rgba(77, 59, 38, 0.09);
+  border-radius: 18px;
+  overflow: hidden;
+}
+
+.orders-list-head,
+.orders-row {
+  display: grid;
+  grid-template-columns: 1.15fr 1.25fr 0.75fr 1fr 1fr 0.8fr 0.9fr;
+  gap: 10px;
+  align-items: center;
+}
+
+.orders-list-head {
+  padding: 10px 12px;
+  background: var(--surface-soft-muted);
+  color: var(--ink-2);
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.orders-list {
+  max-height: 320px;
+  overflow: auto;
+}
+
+.orders-row {
+  width: 100%;
+  border: 0;
+  border-top: 1px solid rgba(77, 59, 38, 0.06);
+  padding: 11px 12px;
+  background: transparent;
+  color: var(--ink-0);
+  font-size: 11px;
+  text-align: left;
+}
+
+.orders-row:hover {
+  background: rgba(13, 122, 91, 0.07);
+}
+
+.orders-row > :last-child {
+  text-align: right;
+  font-family: var(--mono);
+}
+
+.order-status {
+  width: fit-content;
+  border-radius: 999px;
+  padding: 4px 7px;
+  background: var(--surface-soft-muted);
+  color: var(--ink-2);
+  font-size: 9px;
+  font-weight: 700;
+}
+
+.order-status.completed {
+  background: rgba(13, 122, 91, 0.1);
+  color: var(--accent);
+}
+
+.order-status.voided,
+.order-status.refunded {
+  background: rgba(166, 65, 45, 0.1);
+  color: var(--danger);
+}
+
+.orders-empty {
+  padding: 28px 14px;
+  color: var(--ink-2);
+  text-align: center;
+}
+
 .search-panel,
 .payment-layout,
 .return-layout {
@@ -2618,8 +2804,13 @@ button {
   .return-layout,
   .cash-grid,
   .report-stat-grid,
-  .settings-grid {
+  .settings-grid,
+  .orders-summary-grid {
     grid-template-columns: 1fr;
+  }
+
+  .orders-metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .split-payment-main {
@@ -2679,6 +2870,15 @@ button {
   .login-footer {
     flex-direction: column;
     align-items: stretch;
+  }
+
+  .orders-filters {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .orders-filters select {
+    width: 100%;
   }
 
   .cart-line-controls {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { CartLine, Product, UserRole } from '@jingles/shared';
+import { CartLine, PaymentMethod, Product, UserRole } from '@jingles/shared';
 import {
   calcCartTotals,
   createCartLine,
@@ -7,7 +7,22 @@ import {
   generateReceiptNumber,
   pickPriceTier,
   recalculateCartLine,
+  saleIncludesCash,
 } from '../utils/pos';
+
+describe('saleIncludesCash', () => {
+  it('recognises cash-only and mixed cash payments', () => {
+    expect(saleIncludesCash({ payments: [{ method: PaymentMethod.CASH, amount: 100 }] })).toBe(true);
+    expect(saleIncludesCash({ payments: [
+      { method: PaymentMethod.VISA, amount: 50 },
+      { method: PaymentMethod.CASH, amount: 50 },
+    ] })).toBe(true);
+  });
+
+  it('keeps non-cash sales visible', () => {
+    expect(saleIncludesCash({ payments: [{ method: PaymentMethod.MASTER, amount: 100 }] })).toBe(false);
+  });
+});
 
 describe('pickPriceTier', () => {
   const priceTiers = [

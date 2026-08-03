@@ -1597,7 +1597,7 @@ export default function PosWorkstation() {
 
       {moneyMode != null && (
         <MoneyDeclareModal
-          expectedDrawer={moneyMode === 'close' ? zReport?.expectedDrawer : undefined}
+          expectedDrawer={moneyMode === 'close' && !hideCashSales ? zReport?.expectedDrawer : undefined}
           mode={moneyMode}
           onClose={() => setMoneyMode(null)}
           onSubmit={(counts) => {
@@ -1612,9 +1612,11 @@ export default function PosWorkstation() {
 
       {isZOpen && zReport != null && activeShift != null && (
         <ZReportModal
+          cashSalesHidden={hideCashSales}
           cashierName={session.user.name}
           onClose={() => setIsZOpen(false)}
           report={zReport}
+          sales={visibleSales.filter((sale) => sale.shiftId === activeShift.id)}
           shift={activeShift}
           terminalCode={terminalCode}
         />
@@ -3607,16 +3609,42 @@ function DenominationRow(
 
 function ZReportModal(
   props: {
+    cashSalesHidden: boolean;
     cashierName: string;
     onClose: () => void;
     report: ZReportSummary;
+    sales: SaleSummary[];
     shift: ShiftSummary;
     terminalCode: string;
   },
 ) {
+  const visibleReport = useMemo<ZReportSummary>(() => {
+    if (!props.cashSalesHidden) return props.report;
+
+    const paymentBreakdown = props.sales.reduce<Record<string, number>>((summary, sale) => {
+      for (const payment of sale.payments) {
+        summary[payment.method] = (summary[payment.method] ?? 0) + payment.amount;
+      }
+      return summary;
+    }, {});
+
+    return {
+      ...props.report,
+      grossSales: props.sales.reduce((sum, sale) => sum + sale.subtotal, 0),
+      discounts: props.sales.reduce((sum, sale) => sum + sale.discountTotal, 0),
+      refunds: 0,
+      netSales: props.sales.reduce((sum, sale) => sum + sale.total, 0),
+      transactionCount: props.sales.length,
+      paymentBreakdown,
+    };
+  }, [props.cashSalesHidden, props.report, props.sales]);
+
   return (
     <ModalShell onClose={props.onClose} title="Z-report" width="wide">
       <div className="modal-stack">
+        {props.cashSalesHidden && (
+          <div className="inline-alert info">Cash sales and drawer figures are hidden from this report view.</div>
+        )}
         <div className="report-stat-grid">
           <MetricCard label="Shift" value={props.shift.id.slice(0, 8)} />
           <MetricCard label="Cashier" value={props.cashierName} />
@@ -3624,23 +3652,23 @@ function ZReportModal(
         </div>
 
         <div className="report-grid">
-          <ReportRow label="Gross sales" value={formatCurrency(props.report.grossSales)} />
-          <ReportRow label="Discounts" value={`- ${formatCurrency(props.report.discounts)}`} muted />
-          <ReportRow label="Refunds" value={`- ${formatCurrency(props.report.refunds)}`} muted />
-          <ReportRow label="Net sales" value={formatCurrency(props.report.netSales)} strong />
-          <ReportRow label="Transactions" value={formatInteger(props.report.transactionCount)} />
-          <ReportRow label="Opening float" value={formatCurrency(props.report.openingFloat)} />
-          <ReportRow label="Expected drawer" value={formatCurrency(props.report.expectedDrawer)} strong />
-          {props.report.countedDrawer != null && (
+          <ReportRow label="Gross sales" value={formatCurrency(visibleReport.grossSales)} />
+          <ReportRow label="Discounts" value={`- ${formatCurrency(visibleReport.discounts)}`} muted />
+          {!props.cashSalesHidden && <ReportRow label="Refunds" value={`- ${formatCurrency(visibleReport.refunds)}`} muted />}
+          <ReportRow label="Net sales" value={formatCurrency(visibleReport.netSales)} strong />
+          <ReportRow label="Transactions" value={formatInteger(visibleReport.transactionCount)} />
+          {!props.cashSalesHidden && <ReportRow label="Opening float" value={formatCurrency(visibleReport.openingFloat)} />}
+          {!props.cashSalesHidden && <ReportRow label="Expected drawer" value={formatCurrency(visibleReport.expectedDrawer)} strong />}
+          {!props.cashSalesHidden && visibleReport.countedDrawer != null && (
             <>
-              <ReportRow label="Counted drawer" value={formatCurrency(props.report.countedDrawer)} />
-              <ReportRow label="Variance" value={formatCurrency(props.report.variance ?? 0)} muted />
+              <ReportRow label="Counted drawer" value={formatCurrency(visibleReport.countedDrawer)} />
+              <ReportRow label="Variance" value={formatCurrency(visibleReport.variance ?? 0)} muted />
             </>
           )}
         </div>
 
         <div className="report-breakdown">
-          {Object.entries(props.report.paymentBreakdown).map(([method, amount]) => (
+          {Object.entries(visibleReport.paymentBreakdown).map(([method, amount]) => (
             <div key={method} className="report-chip">
               <span>{method}</span>
               <b>{formatCurrency(amount)}</b>
@@ -3662,6 +3690,218 @@ function ReportRow(props: { label: string; value: string; muted?: boolean; stron
       <span className={`report-label ${props.muted ? 'muted' : ''} ${props.strong ? 'strong' : ''}`}>{props.label}</span>
       <span className={`report-value ${props.muted ? 'muted' : ''} ${props.strong ? 'strong' : ''}`}>{props.value}</span>
     </>
+  );
+}
+
+type OrderHistoryTab = 'current' | 'other';
+
+function OrderHistoryModal(
+  props: {
+    cashSalesHidden: boolean;
+    currentTerminalId: string;
+    isLoading: boolean;
+    isManager: boolean;
+    onClose: () => void;
+    onOpenReceipt: (sale: SaleSummary) => void;
+    sales: SaleSummary[];
+    terminals: POSBootstrap['terminals'];
+    users: POSUser[];
+  },
+) {
+  const [activeTab, setActiveTab] = useState<OrderHistoryTab>('current');
+  const [cashierId, setCashierId] = useState('all');
+  const [terminalId, setTerminalId] = useState('all');
+  const [query, setQuery] = useState('');
+
+  const terminalMap = useMemo(
+    () => new Map(props.terminals.map((terminal) => [terminal.id, terminal])),
+    [props.terminals],
+  );
+  const baseSales = useMemo(
+    () => props.sales.filter((sale) => (
+      activeTab === 'current'
+        ? sale.terminalId === props.currentTerminalId
+        : sale.terminalId !== props.currentTerminalId
+    )),
+    [activeTab, props.currentTerminalId, props.sales],
+  );
+  const availableCashiers = useMemo(() => {
+    const cashierIds = new Set(baseSales.map((sale) => sale.cashierId));
+    return props.users
+      .filter((user) => cashierIds.has(user.id))
+      .sort((left, right) => left.name.localeCompare(right.name));
+  }, [baseSales, props.users]);
+  const availableTerminals = useMemo(() => {
+    const terminalIds = new Set(baseSales.map((sale) => sale.terminalId));
+    return props.terminals.filter((terminal) => terminalIds.has(terminal.id));
+  }, [baseSales, props.terminals]);
+  const filteredSales = useMemo(() => {
+    const needle = query.trim().toLowerCase();
+    return baseSales.filter((sale) => {
+      if (cashierId !== 'all' && sale.cashierId !== cashierId) return false;
+      if (activeTab === 'other' && terminalId !== 'all' && sale.terminalId !== terminalId) return false;
+      if (!needle) return true;
+      return [
+        sale.receiptNumber,
+        sale.cashierName,
+        sale.customerName ?? '',
+        terminalMap.get(sale.terminalId)?.code ?? sale.terminalId,
+        sale.status,
+      ].some((value) => value.toLowerCase().includes(needle));
+    });
+  }, [activeTab, baseSales, cashierId, query, terminalId, terminalMap]);
+
+  const cashierSummaries = useMemo(
+    () => groupSalesSummary(filteredSales, (sale) => sale.cashierId, (sale) => sale.cashierName),
+    [filteredSales],
+  );
+  const terminalSummaries = useMemo(
+    () => groupSalesSummary(
+      filteredSales,
+      (sale) => sale.terminalId,
+      (sale) => {
+        const terminal = terminalMap.get(sale.terminalId);
+        return terminal ? `${terminal.code} - ${terminal.name}` : sale.terminalId;
+      },
+    ),
+    [filteredSales, terminalMap],
+  );
+  const totalRevenue = useMemo(
+    () => filteredSales.reduce((sum, sale) => sum + sale.total, 0),
+    [filteredSales],
+  );
+
+  const switchTab = (tab: OrderHistoryTab) => {
+    setActiveTab(tab);
+    setCashierId('all');
+    setTerminalId('all');
+    setQuery('');
+  };
+
+  return (
+    <ModalShell onClose={props.onClose} title="Orders" width="payment">
+      <div className="orders-workspace">
+        <div className="orders-tabs" role="tablist" aria-label="Order history scope">
+          <button
+            className={activeTab === 'current' ? 'active' : ''}
+            onClick={() => switchTab('current')}
+            role="tab"
+            aria-selected={activeTab === 'current'}
+          >
+            This terminal
+          </button>
+          {props.isManager && (
+            <button
+              className={activeTab === 'other' ? 'active' : ''}
+              onClick={() => switchTab('other')}
+              role="tab"
+              aria-selected={activeTab === 'other'}
+            >
+              Other terminals
+            </button>
+          )}
+          {props.cashSalesHidden && <span className="orders-mask-indicator">Cash sales hidden</span>}
+        </div>
+
+        <div className="orders-filters">
+          <input
+            className="glass-input"
+            onChange={(event) => setQuery(event.target.value)}
+            placeholder="Receipt, customer, cashier or status"
+            value={query}
+          />
+          {activeTab === 'other' && (
+            <select className="glass-input" value={terminalId} onChange={(event) => setTerminalId(event.target.value)}>
+              <option value="all">All other terminals</option>
+              {availableTerminals.map((terminal) => (
+                <option key={terminal.id} value={terminal.id}>{terminal.code} - {terminal.name}</option>
+              ))}
+            </select>
+          )}
+          <select className="glass-input" value={cashierId} onChange={(event) => setCashierId(event.target.value)}>
+            <option value="all">All cashiers</option>
+            {availableCashiers.map((user) => <option key={user.id} value={user.id}>{user.name}</option>)}
+          </select>
+        </div>
+
+        <div className="orders-metrics">
+          <MetricCard label="Orders" value={formatInteger(filteredSales.length)} />
+          <MetricCard label="Revenue" value={formatCurrency(totalRevenue)} />
+          <MetricCard label="Cashiers" value={formatInteger(cashierSummaries.length)} />
+          <MetricCard label="Terminals" value={formatInteger(terminalSummaries.length)} />
+        </div>
+
+        <div className="orders-summary-grid">
+          <OrderSummaryCard title="Summary by cashier" rows={cashierSummaries} />
+          <OrderSummaryCard title="Summary by terminal" rows={terminalSummaries} />
+        </div>
+
+        <div className="orders-list-wrap">
+          <div className="orders-list-head">
+            <span>Receipt</span>
+            <span>Date</span>
+            <span>Terminal</span>
+            <span>Cashier</span>
+            <span>Payment</span>
+            <span>Status</span>
+            <span>Total</span>
+          </div>
+          <div className="orders-list">
+            {props.isLoading && <div className="orders-empty">Loading orders...</div>}
+            {!props.isLoading && filteredSales.map((sale) => (
+              <button className="orders-row" key={sale.id} onClick={() => props.onOpenReceipt(sale)}>
+                <b>{sale.receiptNumber}</b>
+                <span>{formatDateTime(sale.createdAt)}</span>
+                <span>{terminalMap.get(sale.terminalId)?.code ?? sale.terminalId}</span>
+                <span>{sale.cashierName}</span>
+                <span>{sale.payments.map((payment) => payment.method).join(' + ') || 'Unpaid'}</span>
+                <span className={`order-status ${sale.status.toLowerCase()}`}>{sale.status}</span>
+                <b>{formatCurrency(sale.total)}</b>
+              </button>
+            ))}
+            {!props.isLoading && filteredSales.length === 0 && (
+              <div className="orders-empty">No orders match this view.</div>
+            )}
+          </div>
+        </div>
+      </div>
+    </ModalShell>
+  );
+}
+
+type OrderSummaryRow = { id: string; label: string; count: number; total: number };
+
+function groupSalesSummary(
+  sales: SaleSummary[],
+  getId: (sale: SaleSummary) => string,
+  getLabel: (sale: SaleSummary) => string,
+): OrderSummaryRow[] {
+  const grouped = new Map<string, OrderSummaryRow>();
+  for (const sale of sales) {
+    const id = getId(sale);
+    const current = grouped.get(id) ?? { id, label: getLabel(sale), count: 0, total: 0 };
+    current.count += 1;
+    current.total += sale.total;
+    grouped.set(id, current);
+  }
+  return [...grouped.values()].sort((left, right) => right.total - left.total);
+}
+
+function OrderSummaryCard(props: { rows: OrderSummaryRow[]; title: string }) {
+  return (
+    <section className="orders-summary-card">
+      <h3>{props.title}</h3>
+      <div className="orders-summary-rows">
+        {props.rows.map((row) => (
+          <div className="orders-summary-row" key={row.id}>
+            <span>{row.label}</span>
+            <span>{formatInteger(row.count)} orders</span>
+            <b>{formatCurrency(row.total)}</b>
+          </div>
+        ))}
+        {props.rows.length === 0 && <div className="orders-summary-empty">No data in this view.</div>}
+      </div>
+    </section>
   );
 }
 
