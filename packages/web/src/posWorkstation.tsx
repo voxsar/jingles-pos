@@ -28,6 +28,7 @@ import {
   closeShift,
   createReturn,
   createSale,
+  endActiveShift,
   getZReport,
   listHeldSales,
   listSales,
@@ -892,7 +893,7 @@ export default function PosWorkstation() {
   ]);
 
   const handleSignOut = useCallback(async () => {
-    if (activeShift != null) {
+    if (session != null && activeShift != null) {
       showNotice('error', 'Close the active shift before signing out.');
       return;
     }
@@ -907,7 +908,32 @@ export default function PosWorkstation() {
     setIsHoldOpen(false);
     await logout();
     navigate('/login', { replace: true });
-  }, [activeShift, logout, navigate, showNotice]);
+  }, [activeShift, logout, navigate, session, showNotice]);
+
+  const handleEndActiveSession = useCallback(async () => {
+    if (activeShift == null || authUser?.role !== UserRole.MANAGER) {
+      return;
+    }
+
+    const terminal = terminals.find((candidate) => candidate.id === selectedTerminalId);
+    const confirmed = window.confirm(
+      `End ${activeShift.cashierName}'s active session on ${terminal?.code ?? 'this terminal'}? `
+      + 'Completed sales will be kept and the action will be recorded.',
+    );
+    if (!confirmed) {
+      return;
+    }
+
+    try {
+      await endActiveShift(activeShift.id, selectedTerminalId);
+      setActiveShift(null);
+      showNotice('success', 'The abandoned shift was ended. This terminal is available again.');
+      await reloadBootstrap(selectedTerminalId, { silent: true });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to end the active session';
+      showNotice('error', message);
+    }
+  }, [activeShift, authUser?.role, reloadBootstrap, selectedTerminalId, showNotice, terminals]);
 
   const handleCustomerChange = useCallback((nextCustomerId: string) => {
     const nextCustomer = customerMap.get(nextCustomerId);
@@ -1376,13 +1402,21 @@ export default function PosWorkstation() {
           branches={branches}
           notice={notice}
           onBranchChange={setSelectedBranchId}
+          onEndActiveSession={() => void handleEndActiveSession()}
           onEnterWorkstation={handleStartSession}
           onOpenHelp={() => setIsHelpOpen(true)}
           onSignOut={() => void handleSignOut()}
           selectedBranchId={selectedBranchId}
           selectedTerminalId={selectedTerminalId}
           terminals={branchTerminals.length > 0 ? branchTerminals : terminals}
-          onTerminalChange={setSelectedTerminalId}
+          onTerminalChange={(terminalId) => {
+            setSelectedTerminalId(terminalId);
+            const terminal = terminals.find((candidate) => candidate.id === terminalId);
+            if (terminal != null) {
+              setSelectedBranchId(terminal.branchId);
+            }
+            void reloadBootstrap(terminalId, { silent: true });
+          }}
         />
         {isHelpOpen && <HelpGuide onClose={() => setIsHelpOpen(false)} />}
       </>
@@ -1710,6 +1744,7 @@ type WorkstationAccessScreenProps = {
   branches: POSBootstrap['branches'];
   notice: Notice;
   onBranchChange: (value: string) => void;
+  onEndActiveSession: () => void;
   onEnterWorkstation: () => void;
   onOpenHelp: () => void;
   onSignOut: () => void;
@@ -1750,7 +1785,14 @@ function WorkstationAccessScreen(props: WorkstationAccessScreenProps) {
 
         {props.activeShift != null && (
           <div className="inline-alert info">
-            Active shift on this terminal: {props.activeShift.cashierName} since {formatTime(props.activeShift.openedAt)}
+            <div>
+              Active shift on this terminal: {props.activeShift.cashierName} since {formatTime(props.activeShift.openedAt)}
+            </div>
+            {props.authenticatedUser?.role === UserRole.MANAGER && (
+              <button className="ghost-button" onClick={props.onEndActiveSession}>
+                End active session
+              </button>
+            )}
           </div>
         )}
 

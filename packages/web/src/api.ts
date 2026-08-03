@@ -114,6 +114,10 @@ export async function closeShift(input: ShiftCloseInput & { terminalId?: string 
 	return postJson<ShiftSummary>(`/shifts/${encodeURIComponent(input.shiftId)}/close`, input);
 }
 
+export async function endActiveShift(shiftId: string, terminalId: string): Promise<ShiftSummary> {
+	return postJson<ShiftSummary>(`/shifts/${encodeURIComponent(shiftId)}/end-session`, { terminalId });
+}
+
 export async function saveHeldSale(
 	input: Omit<HoldSaleInput, 'holdNumber'> & { holdNumber?: string },
 ): Promise<HeldSaleSummary> {

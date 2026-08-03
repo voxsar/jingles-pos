@@ -593,6 +593,47 @@ router.post('/shifts/:id/close', async (req: Request, res: Response) => {
   }
 });
 
+router.post('/shifts/:id/end-session', async (req: Request, res: Response) => {
+  try {
+    const actor = (req as Request & { user?: { id: string; email?: string; code?: string; role: string } }).user;
+    if (actor?.role !== UserRole.MANAGER) {
+      return res.status(403).json({ error: 'Only a manager can end another user’s active session' });
+    }
+
+    const shift = await prisma.pOSShift.findUnique({ where: { id: req.params.id } });
+    if (!shift) {
+      return res.status(404).json({ error: 'Shift not found' });
+    }
+    if (shift.status !== ShiftStatus.OPEN) {
+      const userMap = await getUserMap();
+      return res.json(mapShift(shift, userMap));
+    }
+    if (req.body.terminalId && req.body.terminalId !== shift.terminalId) {
+      return res.status(409).json({ error: 'The active shift belongs to a different terminal' });
+    }
+
+    const auditNote = `Session ended by manager ${actor.email ?? actor.code ?? actor.id}`;
+    await applyWorkstationEvent(req, {
+      aggregateType: 'shift',
+      aggregateId: shift.id,
+      eventType: SyncEventType.SHIFT_CLOSED,
+      terminalId: shift.terminalId,
+      payload: {
+        shiftId: shift.id,
+        closingFloat: shift.closingFloat ?? shift.openingFloat,
+        notes: [shift.notes, auditNote].filter(Boolean).join('\n'),
+      },
+    });
+
+    const userMap = await getUserMap();
+    const closedShift = await prisma.pOSShift.findUnique({ where: { id: shift.id } });
+    return res.json(closedShift ? mapShift(closedShift, userMap) : null);
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({ error: 'Failed to end the active session' });
+  }
+});
+
 router.get('/shifts/active', async (req: Request, res: Response) => {
   try {
     await ensureSeedData();
