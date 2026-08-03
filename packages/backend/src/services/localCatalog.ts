@@ -324,16 +324,29 @@ function replaceLocalCatalogSnapshotDirect(snapshot: SharedCatalogSnapshot) {
     const insertCategory = db.prepare(`
       INSERT INTO "Category" (id, name, icon, sortOrder, createdAt, updatedAt)
       VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+      ON CONFLICT(id) DO UPDATE SET name=excluded.name, icon=excluded.icon,
+        sortOrder=excluded.sortOrder, updatedAt=CURRENT_TIMESTAMP
     `);
     const insertProduct = db.prepare(`
       INSERT INTO "Product" (
         id, sku, barcode, name, price, categoryId, subcategory, packSize,
         unitLabel, stockOnHand, stock_by_branch_json, pricing_rules_json, description, variants_json, lastVectorClock, createdAt, updatedAt
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+      ON CONFLICT(id) DO UPDATE SET sku=excluded.sku, barcode=excluded.barcode,
+        name=excluded.name, price=excluded.price, categoryId=excluded.categoryId,
+        subcategory=excluded.subcategory, packSize=excluded.packSize,
+        unitLabel=excluded.unitLabel, stockOnHand=excluded.stockOnHand,
+        stock_by_branch_json=excluded.stock_by_branch_json,
+        pricing_rules_json=excluded.pricing_rules_json,
+        description=excluded.description, variants_json=excluded.variants_json,
+        lastVectorClock=excluded.lastVectorClock, updatedAt=CURRENT_TIMESTAMP
     `);
     const upsertBranch = db.prepare(`
       INSERT INTO "Branch" (id, code, name, createdAt, updatedAt) VALUES (?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
       ON CONFLICT(id) DO UPDATE SET code=excluded.code, name=excluded.name, updatedAt=CURRENT_TIMESTAMP
+    `);
+    const alignBranchId = db.prepare(`
+      UPDATE "Branch" SET id=?, updatedAt=CURRENT_TIMESTAMP WHERE code=? AND id<>?
     `);
     const upsertUser = db.prepare(`
       INSERT INTO "POSUser" (id, code, email, name, initials, role, createdAt, updatedAt)
@@ -341,6 +354,14 @@ function replaceLocalCatalogSnapshotDirect(snapshot: SharedCatalogSnapshot) {
       ON CONFLICT(id) DO UPDATE SET code=excluded.code, email=excluded.email, name=excluded.name,
         initials=excluded.initials, role=excluded.role, updatedAt=CURRENT_TIMESTAMP
     `);
+    const userReferenceTables = [
+      ['POSShift', 'userId'],
+      ['Sale', 'userId'],
+      ['HeldSale', 'userId'],
+      ['Return', 'userId'],
+      ['SaleLine', 'salespersonId'],
+      ['HeldSaleLine', 'salespersonId'],
+    ] as const;
     const insertBatchPrice = db.prepare(`
       INSERT INTO "BatchPrice" (id, productId, label, minQty, price, priority, isDefault, createdAt)
       VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
@@ -351,11 +372,40 @@ function replaceLocalCatalogSnapshotDirect(snapshot: SharedCatalogSnapshot) {
     try {
       db.prepare('DELETE FROM product_search').run();
       db.prepare('DELETE FROM "BatchPrice"').run();
-      db.prepare('DELETE FROM "Product"').run();
-      db.prepare('DELETE FROM "Category"').run();
 
-      for (const branch of snapshot.branches ?? []) upsertBranch.run(branch.id, branch.code, branch.name);
-      for (const user of snapshot.users ?? []) upsertUser.run(user.id, user.code, user.email ?? null, user.name, user.initials, user.role);
+      db.exec('CREATE TEMP TABLE IF NOT EXISTS catalog_snapshot_products (id TEXT PRIMARY KEY);');
+      db.prepare('DELETE FROM catalog_snapshot_products').run();
+      const markSnapshotProduct = db.prepare('INSERT INTO catalog_snapshot_products (id) VALUES (?)');
+      for (const product of snapshot.products) markSnapshotProduct.run(product.id);
+
+      // Preserve products referenced by historical sales/returns, while
+      // removing obsolete unreferenced catalog rows. Current products are
+      // updated in-place below so their foreign-key identity remains stable.
+      db.prepare(`
+        DELETE FROM "Product"
+        WHERE NOT EXISTS (SELECT 1 FROM catalog_snapshot_products active WHERE active.id = "Product".id)
+          AND NOT EXISTS (SELECT 1 FROM "SaleLine" line WHERE line.productId = "Product".id)
+          AND NOT EXISTS (SELECT 1 FROM "ReturnLine" line WHERE line.productId = "Product".id)
+      `).run();
+
+      for (const branch of snapshot.branches ?? []) {
+        // Branch codes are the stable business identity in older POS caches.
+        // Align a legacy local UUID first; Terminal foreign keys cascade to it.
+        alignBranchId.run(branch.id, branch.code, branch.id);
+        upsertBranch.run(branch.id, branch.code, branch.name);
+      }
+      for (const user of snapshot.users ?? []) {
+        if (user.email) {
+          for (const [table, column] of userReferenceTables) {
+            db.prepare(`
+              UPDATE "${table}" SET "${column}"=?
+              WHERE "${column}" IN (SELECT id FROM "POSUser" WHERE email=? AND id<>?)
+            `).run(user.id, user.email, user.id);
+          }
+          db.prepare('DELETE FROM "POSUser" WHERE email=? AND id<>?').run(user.email, user.id);
+        }
+        upsertUser.run(user.id, user.code, user.email ?? null, user.name, user.initials, user.role);
+      }
       if (snapshot.branches?.length) {
         const ids = snapshot.branches.map((branch) => `'${branch.id.replace(/'/g, "''")}'`).join(',');
         db.exec(`UPDATE "Terminal" SET branchId='${snapshot.branches[0]!.id.replace(/'/g, "''")}' WHERE branchId NOT IN (${ids});`);
@@ -396,6 +446,11 @@ function replaceLocalCatalogSnapshotDirect(snapshot: SharedCatalogSnapshot) {
           );
         }
       }
+
+      db.prepare(`
+        DELETE FROM "Category"
+        WHERE NOT EXISTS (SELECT 1 FROM "Product" WHERE "Product".categoryId = "Category".id)
+      `).run();
 
       db.exec('COMMIT;');
     } catch (error) {

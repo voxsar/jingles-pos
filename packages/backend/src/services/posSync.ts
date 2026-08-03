@@ -1551,7 +1551,17 @@ async function runSyncWithUpstream(options?: {
       status: await getLocalSyncStatus(deviceId, terminalId),
     };
   } catch (error: any) {
-    await recordLocalSyncFailure(error.message, deviceId, terminalId);
+    // Catalog projection is independent from transactional event playback. A
+    // rejected sale/shift event must not leave the workstation on a stale SKU
+    // list or stale inventory quantities indefinitely.
+    let failureMessage = error.message;
+    try {
+      await refreshLocalCatalogFromUpstream();
+    } catch (catalogError: any) {
+      failureMessage = `${failureMessage}; Catalog refresh failed: ${catalogError.message}`;
+    }
+
+    await recordLocalSyncFailure(failureMessage, deviceId, terminalId);
     return {
       accepted: 0,
       remoteApplied: 0,
