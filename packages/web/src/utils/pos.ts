@@ -8,6 +8,7 @@ import {
   ProductPriceTier,
   ProductVariant,
   SaleSummary,
+  ShiftSummary,
 } from '@jingles/shared';
 
 export interface DenominationDefinition {
@@ -261,6 +262,30 @@ export function formatDateTime(value?: string): string {
     hour: '2-digit',
     minute: '2-digit',
   });
+}
+
+export function formatShiftReference(
+  shift: Pick<ShiftSummary, 'openedAt' | 'terminalId'>,
+  terminalCode?: string,
+): string {
+  const openedAt = new Date(shift.openedAt);
+  const terminal = terminalCode?.trim() || 'POS';
+
+  if (Number.isNaN(openedAt.getTime())) {
+    return terminal;
+  }
+
+  const date = openedAt.toLocaleDateString('en-GB', {
+    day: '2-digit',
+    month: 'short',
+    year: 'numeric',
+  });
+  const time = openedAt.toLocaleTimeString('en-GB', {
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+
+  return `${terminal} · ${date}, ${time}`;
 }
 
 export function generateReceiptNumber(terminalCode: string = 'TERM-00'): string {

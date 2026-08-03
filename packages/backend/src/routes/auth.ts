@@ -61,7 +61,7 @@ function mapAuthUser(user: LocalAuthUser) {
     name: user.name,
     initials: user.initials,
     role: user.role,
-    hasPin: Boolean(user.pin),
+    hasPin: /^\d{4,6}$/.test(user.pin ?? ''),
   };
 }
 
@@ -581,7 +581,7 @@ router.post('/unlock', authenticate, async (req: AuthenticatedRequest, res: Resp
     }
 
     const user = await prisma.pOSUser.findUnique({ where: { id: req.user!.id } });
-    if (!user?.pin) {
+    if (!user?.pin || !/^\d{4,6}$/.test(user.pin)) {
       return res.status(409).json({ error: 'No workstation PIN is configured for this user' });
     }
 

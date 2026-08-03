@@ -60,6 +60,7 @@ import {
   formatCurrency,
   formatDateTime,
   formatInteger,
+  formatShiftReference,
   formatTime,
   generateHoldNumber,
   generateReceiptNumber,
@@ -1886,7 +1887,7 @@ function HeaderBar(props: HeaderBarProps) {
         </div>
         {props.activeShift != null ? (
           <div className="status-pill">
-            Shift {props.activeShift.id.slice(0, 8)} - {formatTime(props.activeShift.openedAt)}
+            Shift {formatShiftReference(props.activeShift, props.terminalCode)}
           </div>
         ) : (
           <div className="status-pill warning">No active shift</div>
@@ -3658,7 +3659,7 @@ function ZReportModal(
           <div className="inline-alert info">Cash sales and drawer figures are hidden from this report view.</div>
         )}
         <div className="report-stat-grid">
-          <MetricCard label="Shift" value={props.shift.id.slice(0, 8)} />
+          <MetricCard label="Shift" value={formatShiftReference(props.shift, props.terminalCode)} />
           <MetricCard label="Cashier" value={props.cashierName} />
           <MetricCard label="Terminal" value={props.terminalCode} />
         </div>

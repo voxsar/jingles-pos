@@ -4,11 +4,21 @@ import {
   calcCartTotals,
   createCartLine,
   formatCurrency,
+  formatShiftReference,
   generateReceiptNumber,
   pickPriceTier,
   recalculateCartLine,
   saleIncludesCash,
 } from '../utils/pos';
+
+describe('formatShiftReference', () => {
+  it('shows the terminal and opening date instead of an internal UUID', () => {
+    const openedAt = new Date(2026, 7, 3, 21, 7).toISOString();
+
+    expect(formatShiftReference({ openedAt, terminalId: 'terminal-uuid' }, 'TERM-01'))
+      .toBe('TERM-01 · 03 Aug 2026, 21:07');
+  });
+});
 
 describe('saleIncludesCash', () => {
   it('recognises cash-only and mixed cash payments', () => {
