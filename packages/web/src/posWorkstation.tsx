@@ -157,7 +157,9 @@ export default function PosWorkstation() {
   const [activeShift, setActiveShift] = useState<ShiftSummary | null>(null);
   const [sales, setSales] = useState<SaleSummary[]>([]);
   const [salesLoading, setSalesLoading] = useState(false);
-  const [hideCashSales, setHideCashSales] = useState(false);
+  const [hideCashSales, setHideCashSales] = useState(
+    () => window.sessionStorage.getItem('jingles-pos-hide-cash-sales') === 'true',
+  );
   const [syncStatus, setSyncStatus] = useState<SyncStatusSummary | null>(null);
 
   const [cart, setCart] = useState<CartLine[]>([]);
@@ -724,6 +726,15 @@ export default function PosWorkstation() {
   }, [reloadSales, session]);
 
   useEffect(() => {
+    const handleCashVisibility = (event: Event) => {
+      const hidden = Boolean((event as CustomEvent<{ hidden?: boolean }>).detail?.hidden);
+      setHideCashSales(hidden);
+    };
+    window.addEventListener('jingles:cash-visibility', handleCashVisibility);
+    return () => window.removeEventListener('jingles:cash-visibility', handleCashVisibility);
+  }, []);
+
+  useEffect(() => {
     const handler = (event: KeyboardEvent) => {
       if (session != null && event.key === 'Control' && !event.repeat) {
         controlPressCountRef.current += 1;
@@ -735,6 +746,7 @@ export default function PosWorkstation() {
           controlPressCountRef.current = 0;
           setHideCashSales((previous) => {
             const next = !previous;
+            window.sessionStorage.setItem('jingles-pos-hide-cash-sales', String(next));
             showNotice('success', next ? 'Cash sales are hidden.' : 'Cash sales are visible.');
             return next;
           });

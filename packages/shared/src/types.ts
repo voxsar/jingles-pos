@@ -34,6 +34,7 @@ export interface POSUser {
   initials: string;
   role: UserRole;
   pin?: string;
+  hasPin?: boolean;
 }
 
 export interface Customer {

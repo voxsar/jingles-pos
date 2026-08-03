@@ -15,6 +15,7 @@ import {
 } from '../api';
 
 const TOKEN_STORAGE_KEY = 'jingles-pos-auth-token';
+const LAST_ACTIVITY_STORAGE_KEY = 'jingles-pos-last-activity-at';
 
 type AuthContextValue = {
   user: POSUser | null;
@@ -73,6 +74,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     try {
       const result = await requestLogin({ identifier, password });
       localStorage.setItem(TOKEN_STORAGE_KEY, result.token);
+      localStorage.setItem(LAST_ACTIVITY_STORAGE_KEY, String(Date.now()));
       setToken(result.token);
       setUser(result.user);
     } catch (nextError) {
@@ -95,6 +97,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
 
     localStorage.removeItem(TOKEN_STORAGE_KEY);
+    localStorage.removeItem(LAST_ACTIVITY_STORAGE_KEY);
     setToken(null);
     setUser(null);
     setError(null);

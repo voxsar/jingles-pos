@@ -76,6 +76,13 @@ export async function logout(token: string): Promise<void> {
 	await postJson<{ ok: true }>('/auth/logout', {}, { token });
 }
 
+export async function unlockSession(
+	pin: string,
+	token: string,
+): Promise<{ ok: true; mode: 'normal' | 'no-cash' }> {
+	return postJson('/auth/unlock', { pin }, { token });
+}
+
 export async function refreshHostSyncAuth(
 	identifier: string,
 	password: string,

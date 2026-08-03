@@ -33,7 +33,7 @@ jest.mock('../prisma', () => ({
 }));
 
 const { buildZReport, confirmPlayback, getLocalSyncStatus, getServerVectorClock } = require('../services/posSync') as typeof import('../services/posSync');
-const { authenticate } = require('../routes/auth') as typeof import('../routes/auth');
+const { authenticate, resolveUnlockMode } = require('../routes/auth') as typeof import('../routes/auth');
 const originalPosSyncAppToken = process.env.JINGLES_POS_SYNC_APP_TOKEN;
 const originalLegacyPosSyncAppToken = process.env.POS_SYNC_APP_TOKEN;
 
@@ -49,6 +49,12 @@ afterAll(() => {
 });
 
 describe('event sourced POS backend services', () => {
+  it('uses a reversed PIN to enter no-cash mode', () => {
+    expect(resolveUnlockMode('1042', '1042')).toBe('normal');
+    expect(resolveUnlockMode('1042', '2401')).toBe('no-cash');
+    expect(resolveUnlockMode('1042', '9999')).toBeNull();
+  });
+
   it('rejects POS business requests without a login token', async () => {
     const status = jest.fn().mockReturnThis();
     const json = jest.fn();

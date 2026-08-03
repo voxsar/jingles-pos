@@ -61,6 +61,7 @@ function mapAuthUser(user: LocalAuthUser) {
     name: user.name,
     initials: user.initials,
     role: user.role,
+    hasPin: Boolean(user.pin),
   };
 }
 
@@ -71,6 +72,15 @@ function mapStoredAuthUser(user: Pick<LocalAuthUser, 'id' | 'code' | 'email' | '
     email: user.email ?? undefined,
     role: user.role,
   };
+}
+
+export function resolveUnlockMode(
+  storedPin: string,
+  enteredPin: string,
+): 'normal' | 'no-cash' | null {
+  if (enteredPin === storedPin) return 'normal';
+  if (enteredPin.split('').reverse().join('') === storedPin) return 'no-cash';
+  return null;
 }
 
 async function findUserByIdentifier(identifier: string) {
@@ -560,6 +570,28 @@ router.post('/login', async (req: Request, res: Response) => {
   } catch (error) {
     console.error(error);
     return res.status(500).json({ error: 'POS login failed' });
+  }
+});
+
+router.post('/unlock', authenticate, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const enteredPin = typeof req.body.pin === 'string' ? req.body.pin.trim() : '';
+    if (!/^\d{4,6}$/.test(enteredPin)) {
+      return res.status(422).json({ error: 'Enter a valid 4 to 6 digit PIN' });
+    }
+
+    const user = await prisma.pOSUser.findUnique({ where: { id: req.user!.id } });
+    if (!user?.pin) {
+      return res.status(409).json({ error: 'No workstation PIN is configured for this user' });
+    }
+
+    const mode = resolveUnlockMode(user.pin, enteredPin);
+    if (mode) return res.json({ ok: true, mode });
+
+    return res.status(422).json({ error: 'Incorrect PIN' });
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({ error: 'Unable to unlock the workstation' });
   }
 });
 
