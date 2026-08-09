@@ -1,4 +1,5 @@
 import path from 'path';
+import { createHash } from 'crypto';
 import type { ProductPriceTier, Product, ProductVariant, SharedCatalogSnapshot } from '@jingles/shared';
 import prisma from '../prisma';
 import { isLocalPosBackendMode } from '../localMode';
@@ -21,6 +22,7 @@ type LocalProductRow = {
 
 type DirectSqliteStatement = {
   run: (...params: Array<string | number | null>) => unknown;
+  get: (...params: Array<string | number | null>) => Record<string, unknown> | undefined;
 };
 
 type DirectSqliteDatabase = {
@@ -321,6 +323,21 @@ function replaceLocalCatalogSnapshotDirect(snapshot: SharedCatalogSnapshot) {
   try {
     ensureLocalCatalogSearchIndexDirect(db);
 
+    const snapshotHash = createHash('sha256')
+      .update(JSON.stringify({
+        branches: snapshot.branches ?? [],
+        users: snapshot.users ?? [],
+        categories: snapshot.categories,
+        products: snapshot.products,
+      }))
+      .digest('hex');
+    const existingHash = db.prepare(
+      'SELECT value FROM "ConfigEntry" WHERE key=?',
+    ).get('catalogSnapshotHash')?.value;
+    if (existingHash === snapshotHash) {
+      return true;
+    }
+
     const insertCategory = db.prepare(`
       INSERT INTO "Category" (id, name, icon, sortOrder, createdAt, updatedAt)
       VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
@@ -347,6 +364,13 @@ function replaceLocalCatalogSnapshotDirect(snapshot: SharedCatalogSnapshot) {
     `);
     const alignBranchId = db.prepare(`
       UPDATE "Branch" SET id=?, updatedAt=CURRENT_TIMESTAMP WHERE code=? AND id<>?
+    `);
+    const ensureBranchTerminal = db.prepare(`
+      INSERT INTO "Terminal" (id, code, name, branchId, createdAt, updatedAt)
+      SELECT ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+      WHERE NOT EXISTS (SELECT 1 FROM "Terminal" WHERE branchId=?)
+      ON CONFLICT(id) DO UPDATE SET code=excluded.code, name=excluded.name,
+        branchId=excluded.branchId, updatedAt=CURRENT_TIMESTAMP
     `);
     const upsertUser = db.prepare(`
       INSERT INTO "POSUser" (id, code, email, name, initials, role, createdAt, updatedAt)
@@ -409,6 +433,15 @@ function replaceLocalCatalogSnapshotDirect(snapshot: SharedCatalogSnapshot) {
       if (snapshot.branches?.length) {
         const ids = snapshot.branches.map((branch) => `'${branch.id.replace(/'/g, "''")}'`).join(',');
         db.exec(`UPDATE "Terminal" SET branchId='${snapshot.branches[0]!.id.replace(/'/g, "''")}' WHERE branchId NOT IN (${ids});`);
+        for (const branch of snapshot.branches) {
+          ensureBranchTerminal.run(
+            `terminal-branch-${branch.id}`,
+            `POS-${branch.code}`,
+            `${branch.name} POS`,
+            branch.id,
+            branch.id,
+          );
+        }
       }
 
       for (const category of snapshot.categories) {
@@ -451,6 +484,12 @@ function replaceLocalCatalogSnapshotDirect(snapshot: SharedCatalogSnapshot) {
         DELETE FROM "Category"
         WHERE NOT EXISTS (SELECT 1 FROM "Product" WHERE "Product".categoryId = "Category".id)
       `).run();
+
+      db.prepare(`
+        INSERT INTO "ConfigEntry" (key, value, createdAt, updatedAt)
+        VALUES ('catalogSnapshotHash', ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+        ON CONFLICT(key) DO UPDATE SET value=excluded.value, updatedAt=CURRENT_TIMESTAMP
+      `).run(snapshotHash);
 
       db.exec('COMMIT;');
     } catch (error) {
