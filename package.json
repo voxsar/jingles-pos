@@ -14,6 +14,7 @@
 		"electron:deps": "npm run native:rebuild --workspace=packages/electron",
 		"electron:run": "npm run build:desktop && npm run start --workspace=packages/electron",
 		"electron:exe": "npm run build:desktop && npm run electron:pack --workspace=packages/electron",
+		"release:update:pos": "npm run build:desktop && npm run electron:update --workspace=packages/electron",
 		"build": "npm run build:shared && npm run build:backend && npm run build:web && npm run build --workspace=packages/electron",
 		"test": "npm run test --workspaces --if-present",
 		"test:backend": "npm run test --workspace=packages/backend",
