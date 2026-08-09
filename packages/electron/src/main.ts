@@ -1,98 +1,17 @@
 import fs from 'fs';
 import path from 'path';
-import os from 'os';
-import { app, BrowserWindow, dialog, ipcMain, Menu, type OpenDialogOptions } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, type OpenDialogOptions } from 'electron';
 import { getDesktopLocalApiUrl, startLocalApiServer, type LocalApiServer } from './backend/localApi';
-import { JinglesMdnsService, type DiscoveredJinglesDevice } from './network/mdns';
 import {
   copyDatabaseSnapshotIfNeeded,
   createDesktopBackup,
   readDesktopSettings,
   saveDesktopSettings,
 } from './desktopSettings';
-import { getUpdateMenu, initializeUpdater } from './updater';
 
 let mainWindow: BrowserWindow | null = null;
 let localApiServer: LocalApiServer | null = null;
-let mdnsService: JinglesMdnsService | null = null;
-let deviceHeartbeatTimer: NodeJS.Timeout | null = null;
-let activeLanInventoryUrl: string | null = null;
 const STARTUP_LOG_PATH = path.join(process.env.TEMP || process.cwd(), 'jingles-pos-electron.log');
-const DEVICES_CHANGED_EVENT = 'devices:changed';
-const DEVICE_HEARTBEAT_INTERVAL_MS = 30_000;
-
-function selectInventoryHub(devices: DiscoveredJinglesDevice[]) {
-  return devices
-    .filter((device) => device.application === 'inventory' && device.port > 0)
-    .sort((left, right) => Date.parse(right.lastSeenAt) - Date.parse(left.lastSeenAt))[0] ?? null;
-}
-
-function broadcastDevices(devices: DiscoveredJinglesDevice[]) {
-  for (const window of BrowserWindow.getAllWindows()) {
-    if (!window.isDestroyed()) window.webContents.send(DEVICES_CHANGED_EVENT, devices);
-  }
-}
-
-async function updatePosNetworkState(devices = mdnsService?.getDevices() ?? []) {
-  if (!localApiServer || !mdnsService) return;
-  const settings = readDesktopSettings();
-  const hub = selectInventoryHub(devices);
-  const nextLanUrl = hub ? `${hub.protocol ?? 'http'}://${hub.address}:${hub.port}` : null;
-  activeLanInventoryUrl = nextLanUrl;
-  try {
-    const result = await localApiServer.updateNetworkState({
-      upstreamUrl: nextLanUrl,
-      heartbeat: {
-        deviceId: settings.deviceId,
-        deviceName: settings.deviceName,
-        applicationVersion: app.getVersion(),
-        platform: `${process.platform}-${process.arch}`,
-        hostname: os.hostname(),
-        terminalId: process.env.JINGLES_POS_TERMINAL_ID,
-        connection: nextLanUrl ? 'lan' : 'cloud',
-      },
-    });
-    if (
-      typeof result?.deviceName === 'string' && result.deviceName.trim() &&
-      typeof result?.nameVersion === 'number' && result.nameVersion >= settings.deviceNameVersion
-    ) {
-      const saved = saveDesktopSettings({
-        ...settings,
-        deviceName: result.deviceName.trim(),
-        deviceNameVersion: result.nameVersion,
-      });
-      mdnsService.updateAdvertisement({ deviceName: saved.deviceName });
-    }
-  } catch (error) {
-    appendStartupLog('Device registry heartbeat was unavailable', error);
-  }
-}
-
-function startDeviceDiscovery() {
-  const settings = readDesktopSettings();
-  const port = Number(process.env.JINGLES_POS_LOCAL_API_PORT ?? 3631);
-  mdnsService = new JinglesMdnsService({
-    deviceId: settings.deviceId,
-    deviceName: settings.deviceName,
-    application: 'pos',
-    applicationVersion: app.getVersion(),
-    port,
-    protocol: 'http',
-    apiPath: '/api/pos',
-    terminalId: process.env.JINGLES_POS_TERMINAL_ID,
-  });
-  mdnsService.subscribe((devices) => {
-    broadcastDevices(devices);
-    const selected = selectInventoryHub(devices);
-    const selectedUrl = selected
-      ? `${selected.protocol ?? 'http'}://${selected.address}:${selected.port}`
-      : null;
-    if (selectedUrl !== activeLanInventoryUrl) void updatePosNetworkState(devices);
-  });
-  mdnsService.start();
-  void updatePosNetworkState();
-  deviceHeartbeatTimer = setInterval(() => void updatePosNetworkState(), DEVICE_HEARTBEAT_INTERVAL_MS);
-}
 
 function formatError(error: unknown): string {
   if (error instanceof Error) {
@@ -209,16 +128,7 @@ async function restartLocalApiServer() {
 app.whenReady().then(async () => {
   try {
     app.setAppUserModelId('com.jingles.pos');
-    initializeUpdater('JINGLES_POS_UPDATE_URL');
-    Menu.setApplicationMenu(Menu.buildFromTemplate([
-      { role: 'fileMenu' },
-      { role: 'editMenu' },
-      { role: 'viewMenu' },
-      { role: 'windowMenu' },
-      getUpdateMenu(),
-    ]));
     localApiServer = await restartLocalApiServer();
-    startDeviceDiscovery();
     await createWindow();
   } catch (error) {
     showStartupError('Jingles POS failed to start', 'Desktop startup aborted before the window was ready.', error);
@@ -228,10 +138,6 @@ app.whenReady().then(async () => {
 });
 
 app.on('before-quit', () => {
-  if (deviceHeartbeatTimer) clearInterval(deviceHeartbeatTimer);
-  deviceHeartbeatTimer = null;
-  mdnsService?.stop();
-  mdnsService = null;
   void stopLocalApiServer();
 });
 
@@ -247,13 +153,6 @@ ipcMain.on('app:backend-url-sync', (event) => {
 
 ipcMain.handle('app:backend-url', () => {
   return localApiServer?.url ?? getDesktopLocalApiUrl();
-});
-
-ipcMain.handle('devices:list', () => mdnsService?.getDevices() ?? []);
-ipcMain.handle('devices:refresh', () => {
-  mdnsService?.query();
-  void updatePosNetworkState();
-  return mdnsService?.getDevices() ?? [];
 });
 
 ipcMain.handle('desktop-settings:get', () => {
@@ -307,7 +206,6 @@ ipcMain.handle('desktop-settings:save', async (_event, nextSettings) => {
   try {
     if (shouldRestartBackend) {
       await restartLocalApiServer();
-      await updatePosNetworkState();
     }
 
     return {

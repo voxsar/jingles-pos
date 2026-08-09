@@ -19,7 +19,6 @@ import {
   getLocalPosDeviceId,
   getLocalPosTerminalId,
   isLocalPosBackendMode,
-  setPosRuntimeUpstreamUrl,
 } from '../localMode';
 import { ensureSeedData } from '../seed';
 import {
@@ -33,7 +32,6 @@ import {
   getServerVectorClock,
   playbackEvents,
   syncWithUpstream,
-  heartbeatManagedDevice,
   validateUpstreamVoucher,
 } from '../services/posSync';
 import { syncSharedCatalogProjection, validateSharedVoucher } from '../sharedInventory';
@@ -49,16 +47,6 @@ const router = Router();
 // Keep this ahead of catalog preparation so unauthenticated requests cannot trigger
 // database work or mutate workstation state.
 router.use((req: Request, res: Response, next: NextFunction) => {
-  const localControlToken = process.env.JINGLES_DESKTOP_CONTROL_TOKEN?.trim();
-  if (
-    isLocalPosBackendMode() &&
-    req.path === '/local/device-control' &&
-    localControlToken &&
-    req.header('x-jingles-desktop-control') === localControlToken
-  ) {
-    next();
-    return;
-  }
   const isMachineSyncEndpoint = ['/sync/handshake', '/sync/playback', '/sync/confirm'].includes(req.path);
   const configuredAppToken = (
     process.env.JINGLES_POS_SYNC_APP_TOKEN?.trim()
@@ -1052,32 +1040,6 @@ router.post('/local/sync/now', async (req: Request, res: Response) => {
   } catch (error) {
     console.error(error);
     return res.status(500).json({ error: 'Local sync failed' });
-  }
-});
-
-router.post('/local/device-control', async (req: Request, res: Response) => {
-  if (!isLocalPosBackendMode()) {
-    return res.status(404).json({ error: 'Not found' });
-  }
-  try {
-    const upstreamUrl = typeof req.body?.upstreamUrl === 'string' ? req.body.upstreamUrl : null;
-    setPosRuntimeUpstreamUrl(upstreamUrl);
-    const heartbeat = req.body?.heartbeat;
-    if (!heartbeat || typeof heartbeat !== 'object') {
-      return res.json({ upstreamUrl });
-    }
-    const status = await getLocalSyncStatus(getLocalPosDeviceId(), getLocalPosTerminalId());
-    return res.json(await heartbeatManagedDevice({
-      ...heartbeat,
-      lastSyncAt: status.lastSyncAt,
-      pendingCount: status.pendingEvents,
-      conflictCount: status.conflictCount,
-    }));
-  } catch (error) {
-    console.error(error);
-    return res.status(503).json({
-      error: error instanceof Error ? error.message : 'Device heartbeat failed',
-    });
   }
 });
 

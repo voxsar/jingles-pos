@@ -417,9 +417,6 @@ export interface POSSyncTokenResult {
 export type POSThemeMode = 'light' | 'dark';
 
 export interface POSDesktopSettings {
-  deviceId: string;
-  deviceName: string;
-  deviceNameVersion: number;
   syncUrl: string;
   databasePath: string;
   backupDirectory: string;

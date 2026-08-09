@@ -375,11 +375,11 @@ export class JinglesMdnsService {
       const service = serviceByInstance.get(key);
       if (!txt?.id || !txt.name || !service || !['inventory', 'pos'].includes(txt.app)) continue;
       const now = new Date();
-      const ttl = Math.max(1, service.ttl || DEFAULT_TTL_SECONDS);
-      if (ttl === 0) {
+      if (service.ttl === 0) {
         changed = this.devices.delete(txt.id) || changed;
         continue;
       }
+      const ttl = Math.max(1, service.ttl || DEFAULT_TTL_SECONDS);
       const previous = this.devices.get(txt.id);
       const address = addressByHostname.get(normalizeDnsName(service.hostname)) ?? remote.address;
       this.devices.set(txt.id, {
