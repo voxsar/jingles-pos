@@ -1,0 +1,21 @@
+# Project-scoped MCP configuration. Codex loads this only after the repository is trusted.
+
+[mcp_servers.context7]
+command = "npx"
+args = ["-y", "@upstash/context7-mcp"]
+enabled = true
+required = false
+startup_timeout_sec = 30
+tool_timeout_sec = 60
+default_tools_approval_mode = "auto"
+
+[mcp_servers.dbhub_pos]
+command = "npx"
+args = ["-y", "@bytebase/dbhub@latest", "--config", ".codex/dbhub.toml"]
+cwd = "."
+env = { POS_DATABASE_URL = "sqlite:///C:/Users/vox/AppData/Roaming/@jingles/electron/backend/jingles-pos.sqlite" }
+enabled = true
+required = false
+startup_timeout_sec = 30
+tool_timeout_sec = 30
+default_tools_approval_mode = "auto"

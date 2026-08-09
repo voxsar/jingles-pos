@@ -1,0 +1,20 @@
+# Set POS_DATABASE_URL before starting Codex.
+# For SQLite on Windows use: sqlite:///C:/absolute/path/to/jingles-pos.sqlite
+# The active desktop database path is shown in the POS desktop settings.
+# This connection is intentionally restricted to read-only development diagnostics.
+
+[[sources]]
+id = "pos_dev"
+description = "Jingles POS development SQLite database"
+dsn = "${POS_DATABASE_URL}"
+lazy = true
+
+[[tools]]
+name = "execute_sql"
+source = "pos_dev"
+readonly = true
+max_rows = 200
+
+[[tools]]
+name = "search_objects"
+source = "pos_dev"
