@@ -672,6 +672,32 @@ router.get('/shifts/:id/z-report', async (req: Request, res: Response) => {
   }
 });
 
+router.get('/legacy-records', async (req: Request, res: Response) => {
+  try {
+    const page = Math.max(1, Number(req.query.page) || 1);
+    const pageSize = Math.min(500, Math.max(1, Number(req.query.pageSize) || 100));
+    const sourceTable = typeof req.query.sourceTable === 'string' ? req.query.sourceTable.toLowerCase() : undefined;
+    const where = sourceTable ? { sourceTable } : {};
+    const [total, items] = await Promise.all([
+      prisma.legacyPOSRecord.count({ where }),
+      prisma.legacyPOSRecord.findMany({
+        where,
+        orderBy: [{ sourceTable: 'asc' }, { sourceId: 'asc' }],
+        skip: (page - 1) * pageSize,
+        take: pageSize,
+      }),
+    ]);
+    return res.json({
+      page,
+      pageSize,
+      total,
+      items: items.map((item) => ({ ...item, payload: JSON.parse(item.payload) })),
+    });
+  } catch (error: any) {
+    return res.status(500).json({ error: error.message ?? 'Failed to load legacy POS records' });
+  }
+});
+
 router.post('/held-sales', async (req: Request, res: Response) => {
   try {
     await ensureSeedData();

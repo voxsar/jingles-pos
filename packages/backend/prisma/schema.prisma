@@ -325,3 +325,17 @@ model SyncConflict {
   createdAt     DateTime @default(now())
   resolvedAt    DateTime?
 }
+
+// Lossless workstation replica of operational/report rows imported from the
+// retired legacy POS. These remain separate from live POS entities so historic
+// sales cannot alter current stock or active shifts.
+model LegacyPOSRecord {
+  sourceTable   String
+  sourceId      String
+  payload       String
+  firstSyncedAt DateTime
+  lastSyncedAt  DateTime
+
+  @@id([sourceTable, sourceId])
+  @@index([sourceTable])
+}

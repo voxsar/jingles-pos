@@ -1492,6 +1492,52 @@ export async function refreshLocalCatalogFromUpstream(): Promise<SharedCatalogSn
   return snapshot;
 }
 
+type LegacyRecordPage = {
+  page: number;
+  pageSize: number;
+  total: number;
+  items: Array<{
+    source_table: string;
+    source_id: string;
+    payload: Record<string, unknown>;
+    first_synced_at: string;
+    last_synced_at: string;
+  }>;
+};
+
+export async function refreshLegacyPosRecordsFromUpstream(): Promise<number> {
+  const pageSize = 500;
+  let page = 1;
+  let imported = 0;
+  while (true) {
+    const result = await fetchUpstreamJson<LegacyRecordPage>(
+      `/api/pos/legacy-records?page=${page}&pageSize=${pageSize}`,
+    );
+    if (result.items.length > 0) {
+      await prisma.$transaction(
+        result.items.map((item) => prisma.legacyPOSRecord.upsert({
+          where: { sourceTable_sourceId: { sourceTable: item.source_table, sourceId: item.source_id } },
+          create: {
+            sourceTable: item.source_table,
+            sourceId: item.source_id,
+            payload: JSON.stringify(item.payload),
+            firstSyncedAt: new Date(item.first_synced_at),
+            lastSyncedAt: new Date(item.last_synced_at),
+          },
+          update: {
+            payload: JSON.stringify(item.payload),
+            lastSyncedAt: new Date(item.last_synced_at),
+          },
+        })),
+      );
+      imported += result.items.length;
+    }
+    if (page * pageSize >= result.total || result.items.length === 0) break;
+    page += 1;
+  }
+  return imported;
+}
+
 async function runSyncWithUpstream(options?: {
   deviceId?: string;
   terminalId?: string;
@@ -1540,8 +1586,9 @@ async function runSyncWithUpstream(options?: {
 
     try {
       await refreshLocalCatalogFromUpstream();
+      await refreshLegacyPosRecordsFromUpstream();
     } catch (catalogError: any) {
-      await recordLocalSyncFailure(`Catalog refresh failed: ${catalogError.message}`, deviceId, terminalId);
+      await recordLocalSyncFailure(`Projection refresh failed: ${catalogError.message}`, deviceId, terminalId);
     }
 
     return {
@@ -1557,8 +1604,9 @@ async function runSyncWithUpstream(options?: {
     let failureMessage = error.message;
     try {
       await refreshLocalCatalogFromUpstream();
+      await refreshLegacyPosRecordsFromUpstream();
     } catch (catalogError: any) {
-      failureMessage = `${failureMessage}; Catalog refresh failed: ${catalogError.message}`;
+      failureMessage = `${failureMessage}; Projection refresh failed: ${catalogError.message}`;
     }
 
     await recordLocalSyncFailure(failureMessage, deviceId, terminalId);
