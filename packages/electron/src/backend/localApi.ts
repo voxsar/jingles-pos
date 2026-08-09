@@ -1,6 +1,7 @@
 import fs from 'fs';
 import http from 'http';
 import path from 'path';
+import { randomBytes } from 'crypto';
 import { spawn } from 'child_process';
 import { app } from 'electron';
 import { DEFAULT_DEVICE_ID, DEFAULT_TERMINAL_ID } from '@jingles/shared';
@@ -13,6 +14,7 @@ import { readDesktopSettings } from '../desktopSettings';
 
 export type LocalApiServer = {
   url: string;
+  updateNetworkState: (input: { upstreamUrl: string | null; heartbeat?: Record<string, unknown> }) => Promise<any>;
   close: () => Promise<void>;
 };
 
@@ -173,6 +175,7 @@ export async function startLocalApiServer(): Promise<LocalApiServer> {
   const desktopSettings = readDesktopSettings();
   const fileEnv = readDesktopEnvOverrides(runtimeRoot);
   const baseEnv = { ...fileEnv, ...process.env };
+  const controlToken = randomBytes(32).toString('hex');
   const child = spawn(process.execPath, [localBackendEntryPath], {
     cwd: runtimeRoot,
     env: {
@@ -184,9 +187,10 @@ export async function startLocalApiServer(): Promise<LocalApiServer> {
       PORT: String(LOCAL_API_PORT),
       DATABASE_URL: getDesktopSqliteDatabaseUrl(),
       JINGLES_POS_LOCAL_MODE: 'true',
-      JINGLES_POS_DEVICE_ID: baseEnv.JINGLES_POS_DEVICE_ID?.trim() || DEFAULT_DEVICE_ID,
+      JINGLES_POS_DEVICE_ID: baseEnv.JINGLES_POS_DEVICE_ID?.trim() || desktopSettings.deviceId || DEFAULT_DEVICE_ID,
       JINGLES_POS_TERMINAL_ID: baseEnv.JINGLES_POS_TERMINAL_ID?.trim() || DEFAULT_TERMINAL_ID,
       JINGLES_POS_UPSTREAM_URL: desktopSettings.syncUrl,
+      JINGLES_DESKTOP_CONTROL_TOKEN: controlToken,
     },
     stdio: ['ignore', 'pipe', 'pipe'],
     windowsHide: true,
@@ -197,6 +201,19 @@ export async function startLocalApiServer(): Promise<LocalApiServer> {
 
   return {
     url: readyUrl,
+    updateNetworkState: async (input) => {
+      const response = await fetch(`${readyUrl}/api/pos/local/device-control`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-jingles-desktop-control': controlToken,
+        },
+        body: JSON.stringify(input),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+      return payload;
+    },
     close: () => stopChildProcess(child),
   };
 }

@@ -32,7 +32,7 @@ import {
   getLocalPosDeviceId,
   getLocalPosTerminalId,
   getPosSyncAppToken,
-  getPosUpstreamUrl,
+  getPosUpstreamUrls,
   isLocalPosBackendMode,
 } from '../localMode';
 import {
@@ -1452,34 +1452,50 @@ async function fetchUpstreamJson<T>(path: string, options?: { method?: 'GET' | '
     throw new Error(HOST_SYNC_AUTH_REQUIRED_ERROR);
   }
 
-  const response = await fetch(`${getPosUpstreamUrl()}${path}`, {
-    method: options?.method ?? 'GET',
-    headers: {
-      'Content-Type': 'application/json',
-      ...(appToken
-        ? { [POS_SYNC_APP_TOKEN_HEADER]: appToken }
-        : { Authorization: `Bearer ${syncAuth!.token}` }),
-    },
-    ...(typeof options?.body === 'undefined'
-      ? {}
-      : { body: JSON.stringify(options.body) }),
-  });
+  const candidates = getPosUpstreamUrls();
+  let lastError: Error | null = null;
 
-  if (!response.ok) {
-    const payload = await response.json().catch(() => ({ error: `HTTP ${response.status}` })) as { error?: string };
-    if (response.status === 401 || response.status === 403) {
-      if (!appToken) {
-        await clearStoredSyncAuth(prisma, { preserveIdentity: true });
-        throw new Error(HOST_SYNC_AUTH_REQUIRED_ERROR);
+  for (let index = 0; index < candidates.length; index += 1) {
+    const serverUrl = candidates[index];
+    const isFallbackAvailable = index < candidates.length - 1;
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), isFallbackAvailable ? 2500 : 15000);
+    try {
+      const response = await fetch(`${serverUrl}${path}`, {
+        method: options?.method ?? 'GET',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(appToken
+            ? { [POS_SYNC_APP_TOKEN_HEADER]: appToken }
+            : { Authorization: `Bearer ${syncAuth!.token}` }),
+        },
+        ...(typeof options?.body === 'undefined'
+          ? {}
+          : { body: JSON.stringify(options.body) }),
+        signal: controller.signal,
+      });
+
+      if (response.ok) return response.json() as Promise<T>;
+      const payload = await response.json().catch(() => ({ error: `HTTP ${response.status}` })) as { error?: string };
+      lastError = new Error(`${serverUrl}: ${payload.error || `HTTP ${response.status}`}`);
+      if (isFallbackAvailable) continue;
+
+      if (response.status === 401 || response.status === 403) {
+        if (!appToken) {
+          await clearStoredSyncAuth(prisma, { preserveIdentity: true });
+          throw new Error(HOST_SYNC_AUTH_REQUIRED_ERROR);
+        }
+        throw new Error(POS_SYNC_APP_TOKEN_REJECTED_ERROR);
       }
-
-      throw new Error(POS_SYNC_APP_TOKEN_REJECTED_ERROR);
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error(String(error));
+      if (isFallbackAvailable) continue;
+    } finally {
+      clearTimeout(timeout);
     }
-
-    throw new Error(payload.error || `HTTP ${response.status}`);
   }
 
-  return response.json() as Promise<T>;
+  throw lastError ?? new Error('No inventory sync endpoint is available');
 }
 
 export async function validateUpstreamVoucher(context: unknown) {
@@ -1490,6 +1506,30 @@ export async function refreshLocalCatalogFromUpstream(): Promise<SharedCatalogSn
   const snapshot = await fetchUpstreamJson<SharedCatalogSnapshot>('/api/pos/catalog/snapshot');
   await replaceLocalCatalogSnapshot(snapshot);
   return snapshot;
+}
+
+export async function heartbeatManagedDevice(input: {
+  deviceId: string;
+  deviceName: string;
+  applicationVersion: string;
+  platform?: string;
+  hostname?: string;
+  branchId?: string;
+  terminalId?: string;
+  connection?: 'lan' | 'cloud';
+  lastSyncAt?: string;
+  pendingCount?: number;
+  conflictCount?: number;
+}) {
+  return fetchUpstreamJson<{
+    deviceId: string;
+    deviceName: string;
+    nameVersion: number;
+    serverTime: string;
+  }>('/api/devices/heartbeat', {
+    method: 'POST',
+    body: { ...input, application: 'pos' },
+  });
 }
 
 type LegacyRecordPage = {

@@ -40,6 +40,15 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.invoke('desktop-settings:backup-now') as Promise<POSDesktopBackupResult>
     ),
   },
+  devices: {
+    list: () => ipcRenderer.invoke('devices:list'),
+    refresh: () => ipcRenderer.invoke('devices:refresh'),
+    onChanged: (callback: (devices: unknown[]) => void) => {
+      const listener = (_event: Electron.IpcRendererEvent, devices: unknown[]) => callback(devices);
+      ipcRenderer.on('devices:changed', listener);
+      return () => ipcRenderer.removeListener('devices:changed', listener);
+    },
+  },
 });
 
 declare global {
@@ -54,6 +63,11 @@ declare global {
         pickDatabasePath: (currentPath?: string) => Promise<string | null>;
         pickBackupDirectory: (currentPath?: string) => Promise<string | null>;
         backupNow: () => Promise<POSDesktopBackupResult>;
+      };
+      devices?: {
+        list: () => Promise<unknown[]>;
+        refresh: () => Promise<unknown[]>;
+        onChanged: (callback: (devices: unknown[]) => void) => () => void;
       };
     };
   }
