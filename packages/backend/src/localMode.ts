@@ -13,8 +13,6 @@ function trimTrailingSlash(value: string) {
   return value.replace(/\/+$/, '');
 }
 
-let runtimeUpstreamUrl: string | null = null;
-
 export function isLocalPosBackendMode() {
   return normalizeBoolean(process.env.JINGLES_POS_LOCAL_MODE);
 }
@@ -28,28 +26,12 @@ export function getLocalPosTerminalId() {
 }
 
 export function getPosUpstreamUrl() {
-  return runtimeUpstreamUrl ?? getConfiguredPosUpstreamUrl();
-}
-
-export function getConfiguredPosUpstreamUrl() {
   const configured =
     process.env.JINGLES_POS_UPSTREAM_URL?.trim() ||
     process.env.BACKEND_URL?.trim() ||
     'https://inv.theredsun.org';
 
   return trimTrailingSlash(configured);
-}
-
-export function getPosUpstreamUrls() {
-  return Array.from(new Set([
-    ...(runtimeUpstreamUrl ? [runtimeUpstreamUrl] : []),
-    getConfiguredPosUpstreamUrl(),
-  ]));
-}
-
-export function setPosRuntimeUpstreamUrl(value: string | null) {
-  const normalized = value?.trim();
-  runtimeUpstreamUrl = normalized ? trimTrailingSlash(normalized) : null;
 }
 
 export function getPosSyncAppToken() {
