@@ -1401,7 +1401,14 @@ export default function PosWorkstation() {
           authenticatedUser={authUser}
           branches={branches}
           notice={notice}
-          onBranchChange={setSelectedBranchId}
+          onBranchChange={(branchId) => {
+            setSelectedBranchId(branchId);
+            const terminal = terminals.find((candidate) => candidate.branchId === branchId);
+            if (terminal != null) {
+              setSelectedTerminalId(terminal.id);
+              void reloadBootstrap(terminal.id, { silent: true });
+            }
+          }}
           onEndActiveSession={() => void handleEndActiveSession()}
           onEnterWorkstation={handleStartSession}
           onOpenHelp={() => setIsHelpOpen(true)}
