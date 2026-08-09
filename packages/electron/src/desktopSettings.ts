@@ -1,7 +1,5 @@
 import fs from 'fs';
-import os from 'os';
 import path from 'path';
-import { randomUUID } from 'crypto';
 import Database from 'better-sqlite3';
 import { app } from 'electron';
 import type {
@@ -71,11 +69,6 @@ function normalizeAbsolutePath(value: string | null | undefined, fallback: strin
 
 function toSnapshot(value: StoredDesktopSettings | null | undefined): POSDesktopSettings {
   return {
-    deviceId: value?.deviceId?.trim() || randomUUID(),
-    deviceName: value?.deviceName?.trim() || `POS - ${os.hostname()}`,
-    deviceNameVersion: Number.isInteger(value?.deviceNameVersion) && Number(value?.deviceNameVersion) >= 0
-      ? Number(value?.deviceNameVersion)
-      : 0,
     syncUrl: normalizeSyncUrl(value?.syncUrl),
     databasePath: normalizeAbsolutePath(value?.databasePath, getDefaultDatabasePath()),
     backupDirectory: normalizeAbsolutePath(value?.backupDirectory, getDefaultBackupDirectory()),
@@ -118,12 +111,7 @@ function backupDatabaseFile(sourcePath: string, destinationPath: string) {
 }
 
 export function readDesktopSettings(): POSDesktopSettings {
-  const stored = parseStoredDesktopSettings();
-  const snapshot = toSnapshot(stored);
-  if (!stored.deviceId || !stored.deviceName || !Number.isInteger(stored.deviceNameVersion)) {
-    writeSnapshot(snapshot);
-  }
-  return snapshot;
+  return toSnapshot(parseStoredDesktopSettings());
 }
 
 export function saveDesktopSettings(input: StoredDesktopSettings): POSDesktopSettings {

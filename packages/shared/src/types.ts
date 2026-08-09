@@ -417,9 +417,6 @@ export interface POSSyncTokenResult {
 export type POSThemeMode = 'light' | 'dark';
 
 export interface POSDesktopSettings {
-  deviceId: string;
-  deviceName: string;
-  deviceNameVersion: number;
   syncUrl: string;
   databasePath: string;
   backupDirectory: string;
@@ -427,25 +424,6 @@ export interface POSDesktopSettings {
   addDenominationsToPaymentList: boolean;
   showDenominationCombinations: boolean;
   allowShortPayments: boolean;
-}
-
-export interface ElectronDiscoveredDevice {
-  deviceId: string;
-  deviceName: string;
-  application: 'inventory' | 'pos';
-  applicationVersion: string;
-  address: string;
-  port: number;
-  protocol?: 'http' | 'https';
-  apiPath?: string;
-  branchId?: string;
-  terminalId?: string;
-  hostname: string;
-  instanceName: string;
-  discoveredAt: string;
-  lastSeenAt: string;
-  expiresAt: string;
-  source: 'mdns';
 }
 
 export interface POSDesktopSettingsSaveResult {

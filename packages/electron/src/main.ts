@@ -1,5 +1,4 @@
 import fs from 'fs';
-import os from 'os';
 import path from 'path';
 import { app, BrowserWindow, dialog, ipcMain, type OpenDialogOptions } from 'electron';
 import { getDesktopLocalApiUrl, startLocalApiServer, type LocalApiServer } from './backend/localApi';
@@ -9,13 +8,9 @@ import {
   readDesktopSettings,
   saveDesktopSettings,
 } from './desktopSettings';
-import { JinglesMdnsService, type DiscoveredJinglesDevice } from './network/mdns';
 
 let mainWindow: BrowserWindow | null = null;
 let localApiServer: LocalApiServer | null = null;
-let mdnsService: JinglesMdnsService | null = null;
-let deviceHeartbeatTimer: NodeJS.Timeout | null = null;
-let activeLanInventoryUrl: string | null = null;
 const STARTUP_LOG_PATH = path.join(process.env.TEMP || process.cwd(), 'jingles-pos-electron.log');
 
 function formatError(error: unknown): string {
@@ -130,71 +125,10 @@ async function restartLocalApiServer() {
   return localApiServer;
 }
 
-function selectInventoryHub(devices: DiscoveredJinglesDevice[]) {
-  return devices
-    .filter((device) => device.application === 'inventory' && device.port > 0)
-    .sort((left, right) => left.deviceId.localeCompare(right.deviceId))[0] ?? null;
-}
-
-async function updatePosNetworkState(devices = mdnsService?.getDevices() ?? []) {
-  if (!localApiServer) return;
-  const hub = selectInventoryHub(devices);
-  activeLanInventoryUrl = hub ? `${hub.protocol ?? 'http'}://${hub.address}:${hub.port}` : null;
-  const settings = readDesktopSettings();
-  try {
-    const result = await localApiServer.updateNetworkState({
-      upstreamUrl: activeLanInventoryUrl,
-      heartbeat: {
-        deviceId: settings.deviceId,
-        deviceName: settings.deviceName,
-        applicationVersion: app.getVersion(),
-        platform: `${process.platform}-${process.arch}`,
-        hostname: os.hostname(),
-        terminalId: process.env.JINGLES_POS_TERMINAL_ID?.trim() || 'pos-terminal-1',
-        connection: activeLanInventoryUrl ? 'lan' : 'cloud',
-      },
-    });
-    if (!result || typeof result !== 'object') return;
-    const response = result as { deviceName?: unknown; nameVersion?: unknown };
-    const remoteName = typeof response.deviceName === 'string' ? response.deviceName.trim() : '';
-    const remoteVersion = Number(response.nameVersion);
-    if (remoteName && Number.isInteger(remoteVersion) && remoteVersion > settings.deviceNameVersion) {
-      const saved = saveDesktopSettings({ deviceName: remoteName, deviceNameVersion: remoteVersion });
-      mdnsService?.updateAdvertisement({ deviceName: saved.deviceName });
-    }
-  } catch (error) {
-    appendStartupLog('Device heartbeat could not reach the LAN hub or cloud registry.', error);
-  }
-}
-
-function startDeviceDiscovery() {
-  const settings = readDesktopSettings();
-  mdnsService?.stop();
-  mdnsService = new JinglesMdnsService({
-    deviceId: settings.deviceId,
-    deviceName: settings.deviceName,
-    application: 'pos',
-    applicationVersion: app.getVersion(),
-    port: 3631,
-    protocol: 'http',
-    apiPath: '/api/pos',
-    terminalId: process.env.JINGLES_POS_TERMINAL_ID?.trim() || 'pos-terminal-1',
-  });
-  mdnsService.subscribe((devices) => {
-    mainWindow?.webContents.send('devices:changed', devices);
-    void updatePosNetworkState(devices);
-  });
-  mdnsService.start();
-  void updatePosNetworkState();
-  if (deviceHeartbeatTimer) clearInterval(deviceHeartbeatTimer);
-  deviceHeartbeatTimer = setInterval(() => void updatePosNetworkState(), 30_000);
-}
-
 app.whenReady().then(async () => {
   try {
     app.setAppUserModelId('com.jingles.pos');
     localApiServer = await restartLocalApiServer();
-    startDeviceDiscovery();
     await createWindow();
   } catch (error) {
     showStartupError('Jingles POS failed to start', 'Desktop startup aborted before the window was ready.', error);
@@ -204,10 +138,6 @@ app.whenReady().then(async () => {
 });
 
 app.on('before-quit', () => {
-  if (deviceHeartbeatTimer) clearInterval(deviceHeartbeatTimer);
-  deviceHeartbeatTimer = null;
-  mdnsService?.stop();
-  mdnsService = null;
   void stopLocalApiServer();
 });
 
@@ -223,13 +153,6 @@ ipcMain.on('app:backend-url-sync', (event) => {
 
 ipcMain.handle('app:backend-url', () => {
   return localApiServer?.url ?? getDesktopLocalApiUrl();
-});
-
-ipcMain.handle('devices:list', () => mdnsService?.getDevices() ?? []);
-
-ipcMain.handle('devices:refresh', () => {
-  mdnsService?.query();
-  return mdnsService?.getDevices() ?? [];
 });
 
 ipcMain.handle('desktop-settings:get', () => {
@@ -283,11 +206,6 @@ ipcMain.handle('desktop-settings:save', async (_event, nextSettings) => {
   try {
     if (shouldRestartBackend) {
       await restartLocalApiServer();
-      await updatePosNetworkState();
-    }
-
-    if (savedSettings.deviceName !== previousSettings.deviceName) {
-      mdnsService?.updateAdvertisement({ deviceName: savedSettings.deviceName });
     }
 
     return {
