@@ -8,8 +8,7 @@
     "dev": "node scripts/start-electron.cjs",
     "test": "jest --forceExit",
     "native:rebuild": "electron-rebuild -f -w better-sqlite3 -m .",
-    "electron:pack": "electron-builder --win nsis",
-    "electron:update": "node scripts/build-update.cjs JINGLES_POS_UPDATE_URL"
+    "electron:pack": "electron-builder --win nsis"
   },
   "dependencies": {
     "@jingles/shared": "*",
@@ -18,7 +17,6 @@
     "better-sqlite3": "^12.10.0",
     "cors": "^2.8.5",
     "dotenv": "^16.3.1",
-    "electron-updater": "^6.8.9",
     "express": "^4.18.2",
     "express-rate-limit": "^8.3.1",
     "express-validator": "^7.0.1",

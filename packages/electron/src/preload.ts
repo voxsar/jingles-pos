@@ -1,6 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron';
 import type {
-  ElectronDiscoveredDevice,
   POSDesktopBackupResult,
   POSDesktopSettings,
   POSDesktopSettingsSaveResult,
@@ -41,26 +40,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.invoke('desktop-settings:backup-now') as Promise<POSDesktopBackupResult>
     ),
   },
-  devices: {
-    list: () => ipcRenderer.invoke('devices:list') as Promise<ElectronDiscoveredDevice[]>,
-    refresh: () => ipcRenderer.invoke('devices:refresh') as Promise<ElectronDiscoveredDevice[]>,
-    onChanged: (callback: (devices: ElectronDiscoveredDevice[]) => void) => {
-      const listener = (_event: Electron.IpcRendererEvent, devices: ElectronDiscoveredDevice[]) => callback(devices);
-      ipcRenderer.on('devices:changed', listener);
-      return () => ipcRenderer.removeListener('devices:changed', listener);
-    },
-  },
-  updates: {
-    getStatus: () => ipcRenderer.invoke('updater:get-status'),
-    check: () => ipcRenderer.invoke('updater:check'),
-    choosePolicy: () => ipcRenderer.invoke('updater:choose-policy'),
-    install: () => ipcRenderer.invoke('updater:install'),
-    onStatus: (callback: (status: unknown) => void) => {
-      const listener = (_event: Electron.IpcRendererEvent, status: unknown) => callback(status);
-      ipcRenderer.on('updater:status', listener);
-      return () => ipcRenderer.removeListener('updater:status', listener);
-    },
-  },
 });
 
 declare global {
@@ -75,18 +54,6 @@ declare global {
         pickDatabasePath: (currentPath?: string) => Promise<string | null>;
         pickBackupDirectory: (currentPath?: string) => Promise<string | null>;
         backupNow: () => Promise<POSDesktopBackupResult>;
-      };
-      devices?: {
-        list: () => Promise<ElectronDiscoveredDevice[]>;
-        refresh: () => Promise<ElectronDiscoveredDevice[]>;
-        onChanged: (callback: (devices: ElectronDiscoveredDevice[]) => void) => () => void;
-      };
-      updates?: {
-        getStatus: () => Promise<unknown>;
-        check: () => Promise<unknown>;
-        choosePolicy: () => Promise<'automatic' | 'ask' | 'manual'>;
-        install: () => Promise<boolean>;
-        onStatus: (callback: (status: unknown) => void) => () => void;
       };
     };
   }
