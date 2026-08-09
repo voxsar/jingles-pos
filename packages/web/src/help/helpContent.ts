@@ -94,7 +94,7 @@ export const HELP_TOPICS: HelpTopic[] = [
       },
     ],
     tips: [
-      'The Z-Report can be viewed at any time while the shift is open from the account menu under Reports.',
+      'Open Reports from the account menu to browse open and closed sales slots by week, month, or year. Each slot runs from its actual opening to its close, including days that closed early.',
       'If the app is restarted mid-shift the open shift is detected and resumed automatically.',
     ],
   },
@@ -291,7 +291,7 @@ export const HELP_TOPICS: HelpTopic[] = [
       {
         title: 'Open the report',
         body:
-          'Open the account menu in the header and choose Reports while a shift is open. The same figures are shown one final time when you close the shift.',
+          'Open the account menu in the header and choose Reports. Select a week, month, or year, then choose an open or closed sales slot from the list.',
         image: image('zreport.png', 'The Z-Report: shift totals, payment breakdown and expected drawer.'),
       },
     ],

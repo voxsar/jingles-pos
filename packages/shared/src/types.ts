@@ -285,6 +285,14 @@ export interface ZReportSummary {
   openingFloat: number;
   countedDrawer?: number;
   variance?: number;
+  paymentCounts: Record<string, number>;
+  discountedLineCount: number;
+  productCount: number;
+}
+
+export interface ZReportSlot {
+  shift: ShiftSummary;
+  report: ZReportSummary;
 }
 
 export interface ShiftOpenInput {

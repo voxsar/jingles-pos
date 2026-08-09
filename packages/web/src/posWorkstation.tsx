@@ -21,6 +21,7 @@ import {
   SyncStatusSummary,
   UserRole,
   ZReportSummary,
+  ZReportSlot,
   DEFAULT_TERMINAL_ID,
 } from '@jingles/shared';
 import {
@@ -30,6 +31,7 @@ import {
   createSale,
   endActiveShift,
   getZReport,
+  listZReportSlots,
   listHeldSales,
   listSales,
   openShift,
@@ -1346,17 +1348,12 @@ export default function PosWorkstation() {
   }, [refreshWorkspace, showNotice]);
 
   const handleOpenZReport = useCallback(async () => {
-    if (activeShift == null) {
-      showNotice('error', 'Open a shift before viewing a Z-report.');
-      return;
-    }
-
+    setIsZOpen(true);
+    if (activeShift == null) return;
     try {
-      const report = await getZReport(activeShift.id);
-      setZReport(report);
-      setIsZOpen(true);
+      setZReport(await getZReport(activeShift.id));
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Failed to build Z-report';
+      const message = error instanceof Error ? error.message : 'Failed to build the current Z-report';
       showNotice('error', message);
     }
   }, [activeShift, showNotice]);
@@ -1664,14 +1661,11 @@ export default function PosWorkstation() {
         />
       )}
 
-      {isZOpen && zReport != null && activeShift != null && (
+      {isZOpen && (
         <ZReportModal
           cashSalesHidden={hideCashSales}
-          cashierName={session.user.name}
           onClose={() => setIsZOpen(false)}
-          report={zReport}
-          sales={visibleSales.filter((sale) => sale.shiftId === activeShift.id)}
-          shift={activeShift}
+          terminalId={currentTerminalId}
           terminalCode={terminalCode}
         />
       )}
@@ -3669,63 +3663,76 @@ function DenominationRow(
   );
 }
 
-function ZReportModal(
-  props: {
-    cashSalesHidden: boolean;
-    cashierName: string;
-    onClose: () => void;
-    report: ZReportSummary;
-    sales: SaleSummary[];
-    shift: ShiftSummary;
-    terminalCode: string;
-  },
-) {
-  const visibleReport = useMemo<ZReportSummary>(() => {
-    if (!props.cashSalesHidden) return props.report;
+type ReportPeriod = 'week' | 'month' | 'year';
 
-    const paymentBreakdown = props.sales.reduce<Record<string, number>>((summary, sale) => {
-      for (const payment of sale.payments) {
-        summary[payment.method] = (summary[payment.method] ?? 0) + payment.amount;
-      }
-      return summary;
-    }, {});
-	delete paymentBreakdown.CASH;
+function reportPeriodRange(period: ReportPeriod, anchor: Date) {
+  const start = new Date(anchor);
+  start.setHours(0, 0, 0, 0);
+  if (period === 'week') start.setDate(start.getDate() - ((start.getDay() + 6) % 7));
+  if (period === 'month') start.setDate(1);
+  if (period === 'year') { start.setMonth(0, 1); }
+  const end = new Date(start);
+  if (period === 'week') end.setDate(end.getDate() + 7);
+  if (period === 'month') end.setMonth(end.getMonth() + 1);
+  if (period === 'year') end.setFullYear(end.getFullYear() + 1);
+  end.setMilliseconds(end.getMilliseconds() - 1);
+  return { start, end };
+}
 
-    return {
-      ...props.report,
-      grossSales: props.sales.reduce((sum, sale) => sum + sale.subtotal, 0),
-      discounts: props.sales.reduce((sum, sale) => sum + sale.discountTotal, 0),
-      refunds: 0,
-      netSales: props.sales.reduce((sum, sale) => sum + sale.total, 0),
-      transactionCount: props.sales.length,
-      paymentBreakdown,
-    };
-  }, [props.cashSalesHidden, props.report, props.sales]);
+function moveReportPeriod(period: ReportPeriod, anchor: Date, direction: number) {
+  const next = new Date(anchor);
+  if (period === 'week') next.setDate(next.getDate() + (7 * direction));
+  if (period === 'month') next.setMonth(next.getMonth() + direction);
+  if (period === 'year') next.setFullYear(next.getFullYear() + direction);
+  return next;
+}
 
-  const zReading = useMemo(() => {
-    const paymentCounts = props.sales.reduce<Record<string, number>>((counts, sale) => {
-      for (const payment of sale.payments) counts[payment.method] = (counts[payment.method] ?? 0) + 1;
-      return counts;
-    }, {});
-    const discountedLines = props.sales.flatMap((sale) => sale.lines).filter((line) => line.discountAmount > 0);
-    return {
-      paymentCounts,
-      discountedLineCount: discountedLines.length,
-      productCount: props.sales.reduce((sum, sale) => sum + sale.lines.reduce((lineSum, line) => lineSum + line.quantity, 0), 0),
-      cashSales: visibleReport.paymentBreakdown.CASH ?? 0,
-      nonCashSales: Object.entries(visibleReport.paymentBreakdown)
-        .filter(([method]) => method !== 'CASH')
-        .reduce((sum, [, amount]) => sum + amount, 0),
-    };
-  }, [props.sales, visibleReport.paymentBreakdown]);
+function ZReportModal(props: { cashSalesHidden: boolean; onClose: () => void; terminalId: string; terminalCode: string }) {
+  const [period, setPeriod] = useState<ReportPeriod>('week');
+  const [anchor, setAnchor] = useState(() => new Date());
+  const [slots, setSlots] = useState<ZReportSlot[]>([]);
+  const [selectedShiftId, setSelectedShiftId] = useState('');
+  const [isLoadingSlots, setIsLoadingSlots] = useState(true);
+  const [loadError, setLoadError] = useState('');
+  const selectedSlot = slots.find((slot) => slot.shift.id === selectedShiftId) ?? slots[0];
+  const range = useMemo(() => reportPeriodRange(period, anchor), [period, anchor]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setIsLoadingSlots(true);
+    setLoadError('');
+    listZReportSlots({ fromDate: range.start.toISOString(), toDate: range.end.toISOString(), terminalId: props.terminalId })
+      .then((rows) => {
+        if (cancelled) return;
+        setSlots(rows);
+        setSelectedShiftId((current) => rows.some((row) => row.shift.id === current) ? current : (rows[0]?.shift.id ?? ''));
+      })
+      .catch((error) => { if (!cancelled) setLoadError(error instanceof Error ? error.message : 'Failed to load Z-report slots'); })
+      .finally(() => { if (!cancelled) setIsLoadingSlots(false); });
+    return () => { cancelled = true; };
+  }, [props.terminalId, range.start.getTime(), range.end.getTime()]);
+
+  const visibleReport = selectedSlot?.report;
+  const zReading = visibleReport ? {
+    paymentCounts: visibleReport.paymentCounts,
+    discountedLineCount: visibleReport.discountedLineCount,
+    productCount: visibleReport.productCount,
+    cashSales: visibleReport.paymentBreakdown.CASH ?? 0,
+    nonCashSales: Object.entries(visibleReport.paymentBreakdown).filter(([method]) => method !== 'CASH').reduce((sum, [, amount]) => sum + amount, 0),
+  } : null;
 
   const downloadSheet = () => {
+    if (!selectedSlot || !visibleReport || !zReading) return;
     const rows: Array<[string, string | number, string | number]> = [
       ['Metric', 'Count', 'Amount'],
-      ['Gross sale', visibleReport.transactionCount, visibleReport.grossSales],
-      ['Product discount', zReading.discountedLineCount, visibleReport.discounts],
-      ['Refunds', '', visibleReport.refunds],
-      ['Net sale', visibleReport.transactionCount, visibleReport.netSales],
+	  ...(!props.cashSalesHidden ? [
+        ['Gross sale', visibleReport.transactionCount, visibleReport.grossSales],
+        ['Product discount', zReading.discountedLineCount, visibleReport.discounts],
+        ['Refunds', '', visibleReport.refunds],
+        ['Net sale', visibleReport.transactionCount, visibleReport.netSales],
+	  ] as Array<[string, string | number, string | number]> : [
+		['Visible non-cash sale', '', zReading.nonCashSales],
+	  ] as Array<[string, string | number, string | number]>),
 	  ...(!props.cashSalesHidden ? [
 		['Opening float', '', visibleReport.openingFloat],
 		['Cash sale', zReading.paymentCounts.CASH ?? 0, zReading.cashSales],
@@ -3737,16 +3744,18 @@ function ZReportModal(
 		['Counted drawer', '', visibleReport.countedDrawer ?? ''],
 		['Variance', '', visibleReport.variance ?? ''],
 	  ] as Array<[string, string | number, string | number]> : []),
-      ['Bill count', visibleReport.transactionCount, ''],
-      ['Product count', zReading.productCount, ''],
+	  ...(!props.cashSalesHidden ? [
+        ['Bill count', visibleReport.transactionCount, ''],
+        ['Product count', zReading.productCount, ''],
+	  ] as Array<[string, string | number, string | number]> : []),
     ];
     const cell = (value: string | number) => String(value).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
     const body = rows.map((row) => `<tr>${row.map((value) => `<td>${cell(value)}</td>`).join('')}</tr>`).join('');
-    const html = `<html><head><meta charset="utf-8"></head><body><h2>JINGLES - Z Reading</h2><p>Shift: ${cell(formatShiftReference(props.shift, props.terminalCode))}</p><p>Cashier: ${cell(props.cashierName)} | Unit: ${cell(props.terminalCode)}</p><table border="1">${body}</table></body></html>`;
+    const html = `<html><head><meta charset="utf-8"></head><body><h2>JINGLES - Z Reading</h2><p>Slot: ${cell(formatShiftReference(selectedSlot.shift, props.terminalCode))}</p><p>Cashier: ${cell(selectedSlot.shift.cashierName)} | Unit: ${cell(props.terminalCode)}</p><table border="1">${body}</table></body></html>`;
     const url = URL.createObjectURL(new Blob([html], { type: 'application/vnd.ms-excel;charset=utf-8' }));
     const link = document.createElement('a');
     link.href = url;
-    link.download = `z-reading-${formatShiftReference(props.shift, props.terminalCode).replace(/[^a-z0-9]+/gi, '-').toLowerCase()}.xls`;
+    link.download = `z-reading-${formatShiftReference(selectedSlot.shift, props.terminalCode).replace(/[^a-z0-9]+/gi, '-').toLowerCase()}.xls`;
     document.body.appendChild(link);
     link.click();
     link.remove();
@@ -3756,25 +3765,58 @@ function ZReportModal(
   return (
     <ModalShell onClose={props.onClose} title="Z-report" width="wide">
       <div className="modal-stack z-report-modal">
+        <div className="z-period-toolbar">
+          <div className="orders-tabs" role="tablist" aria-label="Report period">
+            {(['week', 'month', 'year'] as ReportPeriod[]).map((value) => (
+              <button key={value} className={period === value ? 'active' : ''} onClick={() => { setPeriod(value); setAnchor(new Date()); }}>
+                {value[0].toUpperCase() + value.slice(1)}
+              </button>
+            ))}
+          </div>
+          <div className="z-period-nav">
+            <button className="ghost-button" onClick={() => setAnchor((current) => moveReportPeriod(period, current, -1))}>‹</button>
+            <strong>{range.start.toLocaleDateString()} – {range.end.toLocaleDateString()}</strong>
+            <button className="ghost-button" onClick={() => setAnchor((current) => moveReportPeriod(period, current, 1))}>›</button>
+          </div>
+        </div>
         {props.cashSalesHidden && (
           <div className="inline-alert info">Cash sales and drawer figures are hidden from this report view.</div>
         )}
-        <div className="z-reading-paper">
+        {loadError && <div className="inline-alert error">{loadError}</div>}
+        <div className="z-slot-layout">
+          <aside className="z-slot-list" aria-label="Z-report slots">
+            <h3>Sales slots</h3>
+            {isLoadingSlots && <p>Loading slots…</p>}
+            {!isLoadingSlots && slots.length === 0 && <p>No open or closed slots in this period.</p>}
+            {slots.map((slot) => (
+              <button key={slot.shift.id} className={selectedSlot?.shift.id === slot.shift.id ? 'active' : ''} onClick={() => setSelectedShiftId(slot.shift.id)}>
+                <strong>{slot.shift.closedAt ? new Date(slot.shift.closedAt).toLocaleDateString() : 'Current open slot'}</strong>
+                <span>{formatDateTime(slot.shift.openedAt)} → {slot.shift.closedAt ? formatDateTime(slot.shift.closedAt) : 'Open'}</span>
+                <small>{slot.shift.cashierName} · {formatCurrency(props.cashSalesHidden
+                  ? Object.entries(slot.report.paymentBreakdown).filter(([method]) => method !== 'CASH').reduce((sum, [, amount]) => sum + amount, 0)
+                  : slot.report.netSales)}</small>
+              </button>
+            ))}
+          </aside>
+          {selectedSlot && visibleReport && zReading ? <div className="z-reading-paper">
           <header className="z-reading-header">
             <strong>JINGLES</strong>
             <span>For everything you look for</span>
-            <span>Cashier: {props.cashierName}</span>
+            <span>Cashier: {selectedSlot.shift.cashierName}</span>
             <span>Unit No: {props.terminalCode}</span>
-            <span>Location: {props.shift.branchId || 'JINGLES'}</span>
+            <span>Location: {selectedSlot.shift.branchId || 'JINGLES'}</span>
             <h2>Z Reading</h2>
-            <small>{formatDateTime(props.shift.openedAt)}{props.shift.closedAt ? ` - ${formatDateTime(props.shift.closedAt)}` : ''}</small>
+            <small>{formatDateTime(selectedSlot.shift.openedAt)}{selectedSlot.shift.closedAt ? ` - ${formatDateTime(selectedSlot.shift.closedAt)}` : ' - Open'}</small>
           </header>
 
           <div className="z-reading-lines">
-            <ReportRow label="Gross sale" value={formatCurrency(visibleReport.grossSales)} />
-            <ReportRow label="Product discount" value={`${formatInteger(zReading.discountedLineCount)}    ${formatCurrency(visibleReport.discounts)}`} muted />
-            {!props.cashSalesHidden && <ReportRow label="Refunds" value={formatCurrency(visibleReport.refunds)} muted />}
-            <ReportRow label="Net sale" value={formatCurrency(visibleReport.netSales)} strong />
+			{!props.cashSalesHidden && <>
+			  <ReportRow label="Gross sale" value={formatCurrency(visibleReport.grossSales)} />
+			  <ReportRow label="Product discount" value={`${formatInteger(zReading.discountedLineCount)}    ${formatCurrency(visibleReport.discounts)}`} muted />
+			  <ReportRow label="Refunds" value={formatCurrency(visibleReport.refunds)} muted />
+			  <ReportRow label="Net sale" value={formatCurrency(visibleReport.netSales)} strong />
+			</>}
+			{props.cashSalesHidden && <ReportRow label="Visible non-cash sale" value={formatCurrency(zReading.nonCashSales)} strong />}
           </div>
 
           {!props.cashSalesHidden && (
@@ -3796,15 +3838,18 @@ function ZReportModal(
           </section>
 
           <footer className="z-reading-footer">
-            <span>Bill count: {formatInteger(visibleReport.transactionCount)}</span>
-            <span>Product count: {formatInteger(zReading.productCount)}</span>
-            <span>Shift: {formatShiftReference(props.shift, props.terminalCode)}</span>
+			{!props.cashSalesHidden && <>
+			  <span>Bill count: {formatInteger(visibleReport.transactionCount)}</span>
+			  <span>Product count: {formatInteger(zReading.productCount)}</span>
+			</>}
+            <span>Slot: {formatShiftReference(selectedSlot.shift, props.terminalCode)}</span>
           </footer>
+        </div> : <div className="z-reading-empty">Select a sales slot to view its Z reading.</div>}
         </div>
 
         <div className="modal-actions">
           <button className="ghost-button" onClick={() => window.print()}>Print</button>
-          <button className="ghost-button" onClick={downloadSheet}>Download Excel</button>
+          <button className="ghost-button" onClick={downloadSheet} disabled={!selectedSlot}>Download Excel</button>
           <button className="ghost-button" onClick={props.onClose}>Close</button>
         </div>
       </div>

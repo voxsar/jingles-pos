@@ -1642,17 +1642,11 @@ export async function syncWithUpstream(options?: {
   return nextRun;
 }
 
-export async function buildZReport(shiftId: string): Promise<ZReportSummary> {
-  return prisma.$transaction(async (tx) => {
-    const shift = await tx.pOSShift.findUnique({
-      where: { id: shiftId },
-      include: { cashCounts: true, sales: { include: { payments: true, returns: true } } },
-    });
+const zReportInclude = { cashCounts: true, sales: { include: { payments: true, returns: true, lines: true } } } as const;
+type ZReportShift = Prisma.POSShiftGetPayload<{ include: typeof zReportInclude }>;
 
-    if (!shift) {
-      throw new Error('Shift not found');
-    }
-
+function summarizeZShift(shift: ZReportShift): ZReportSummary {
+    const shiftId = shift.id;
     const grossSales = shift.sales.reduce((sum, sale) => sum + sale.subtotal, 0);
     const discounts = shift.sales.reduce((sum, sale) => sum + sale.discountTotal, 0);
     const refunds = shift.sales.reduce(
@@ -1666,6 +1660,20 @@ export async function buildZReport(shiftId: string): Promise<ZReportSummary> {
       }
       return bucket;
     }, {});
+    const paymentCounts = shift.sales.reduce<Record<string, number>>((bucket, sale) => {
+      for (const payment of sale.payments) {
+        bucket[payment.method] = (bucket[payment.method] ?? 0) + 1;
+      }
+      return bucket;
+    }, {});
+    const discountedLineCount = shift.sales.reduce(
+      (count, sale) => count + (sale.lines ?? []).filter((line) => line.discountAmount > 0).length,
+      0,
+    );
+    const productCount = shift.sales.reduce(
+      (count, sale) => count + (sale.lines ?? []).reduce((lineCount, line) => lineCount + line.quantity, 0),
+      0,
+    );
     const countedDrawer = shift.cashCounts
       .filter((item) => item.mode === CashCountMode.CLOSING)
       .sort((left, right) => right.createdAt.getTime() - left.createdAt.getTime())[0]?.total;
@@ -1683,6 +1691,25 @@ export async function buildZReport(shiftId: string): Promise<ZReportSummary> {
       openingFloat: shift.openingFloat,
       countedDrawer,
       variance: countedDrawer == null ? undefined : countedDrawer - expectedDrawer,
+      paymentCounts,
+      discountedLineCount,
+      productCount,
     };
+}
+
+export async function buildZReport(shiftId: string): Promise<ZReportSummary> {
+  return prisma.$transaction(async (tx) => {
+    const shift = await tx.pOSShift.findUnique({ where: { id: shiftId }, include: zReportInclude });
+    if (!shift) throw new Error('Shift not found');
+    return summarizeZShift(shift);
   });
+}
+
+export async function buildZReports(shiftIds: string[]): Promise<ZReportSummary[]> {
+  if (shiftIds.length === 0) return [];
+  const shifts = await prisma.pOSShift.findMany({
+    where: { id: { in: shiftIds } },
+    include: zReportInclude,
+  });
+  return shifts.map(summarizeZShift);
 }

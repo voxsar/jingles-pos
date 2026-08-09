@@ -2152,6 +2152,14 @@ export function buildLocalZReport(shiftId: string): ZReportSummary {
     INNER JOIN sales ON sales.id = payments.sale_id
     WHERE sales.shift_id = ?
   `).all(shiftId) as any[]);
+  const lineTotals = db.prepare(`
+    SELECT
+      COALESCE(SUM(sale_lines.quantity), 0) AS product_count,
+      COALESCE(SUM(CASE WHEN sale_lines.discount_amount > 0 THEN 1 ELSE 0 END), 0) AS discounted_line_count
+    FROM sale_lines
+    INNER JOIN sales ON sales.id = sale_lines.sale_id
+    WHERE sales.shift_id = ?
+  `).get(shiftId) as any;
   const closingCount = db.prepare(`
     SELECT * FROM shift_cash_counts
     WHERE shift_id = ? AND mode = ?
@@ -2164,6 +2172,10 @@ export function buildLocalZReport(shiftId: string): ZReportSummary {
   const refunds = returns.reduce((sum, row) => sum + row.total_refund, 0);
   const paymentBreakdown = paymentRows.reduce<Record<string, number>>((bucket, row) => {
     bucket[row.method] = (bucket[row.method] ?? 0) + row.amount;
+    return bucket;
+  }, {});
+  const paymentCounts = paymentRows.reduce<Record<string, number>>((bucket, row) => {
+    bucket[row.method] = (bucket[row.method] ?? 0) + 1;
     return bucket;
   }, {});
   const expectedDrawer = shift.opening_float + (paymentBreakdown.CASH ?? 0) - refunds;
@@ -2180,5 +2192,8 @@ export function buildLocalZReport(shiftId: string): ZReportSummary {
     openingFloat: shift.opening_float,
     countedDrawer: closingCount?.total ?? undefined,
     variance: closingCount ? closingCount.total - expectedDrawer : undefined,
+    paymentCounts,
+    discountedLineCount: Number(lineTotals?.discounted_line_count ?? 0),
+    productCount: Number(lineTotals?.product_count ?? 0),
   };
 }

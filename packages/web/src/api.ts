@@ -17,6 +17,7 @@ import {
 	ShiftOpenInput,
 	SyncStatusSummary,
 	ZReportSummary,
+	ZReportSlot,
 } from '@jingles/shared';
 import { resolveBackendUrl } from './runtime';
 
@@ -167,6 +168,12 @@ export async function createReturn(input: ReturnInput): Promise<{ id: string; sa
 
 export async function getZReport(shiftId: string): Promise<ZReportSummary> {
 	return getJson(`/shifts/${encodeURIComponent(shiftId)}/z-report`);
+}
+
+export async function listZReportSlots(options: { fromDate: string; toDate: string; terminalId?: string }): Promise<ZReportSlot[]> {
+	const params = new URLSearchParams({ fromDate: options.fromDate, toDate: options.toDate });
+	if (options.terminalId) params.set('terminalId', options.terminalId);
+	return getJson<ZReportSlot[]>(`/z-reports?${params.toString()}`);
 }
 
 export async function getSyncStatus(options?: { deviceId?: string; terminalId?: string }): Promise<SyncStatusSummary> {

@@ -123,6 +123,7 @@ describe('event sourced POS backend services', () => {
           total: 180,
           payments: [{ method: 'CASH', amount: 180 }],
           returns: [{ totalRefund: 40 }],
+          lines: [{ quantity: 2, discountAmount: 20 }],
         },
         {
           subtotal: 100,
@@ -130,6 +131,7 @@ describe('event sourced POS backend services', () => {
           total: 100,
           payments: [{ method: 'VISA', amount: 100 }],
           returns: [],
+          lines: [{ quantity: 1, discountAmount: 0 }],
         },
       ],
     });
@@ -151,6 +153,9 @@ describe('event sourced POS backend services', () => {
       openingFloat: 500,
       countedDrawer: 650,
       variance: 10,
+      paymentCounts: { CASH: 1, VISA: 1 },
+      discountedLineCount: 1,
+      productCount: 3,
     });
   });
 

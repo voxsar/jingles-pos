@@ -27,6 +27,7 @@ import {
   getLocalSyncDashboard,
   getLocalSyncStatus,
   buildZReport,
+  buildZReports,
   confirmPlayback,
   getServerVectorClock,
   playbackEvents,
@@ -669,6 +670,52 @@ router.get('/shifts/:id/z-report', async (req: Request, res: Response) => {
       return res.status(404).json({ error: error.message });
     }
     return res.status(500).json({ error: 'Failed to build Z-report' });
+  }
+});
+
+router.get('/z-reports', async (req: Request, res: Response) => {
+  try {
+    await ensureSeedData();
+    const fromDate = typeof req.query.fromDate === 'string' ? new Date(req.query.fromDate) : undefined;
+    const toDate = typeof req.query.toDate === 'string' ? new Date(req.query.toDate) : undefined;
+    const terminalId = typeof req.query.terminalId === 'string' ? req.query.terminalId : undefined;
+    if (!fromDate || !toDate) {
+      return res.status(400).json({ error: 'A report start and end date are required' });
+    }
+    if ((fromDate && Number.isNaN(fromDate.getTime())) || (toDate && Number.isNaN(toDate.getTime()))) {
+      return res.status(400).json({ error: 'Invalid report date range' });
+    }
+
+    const shifts = await prisma.pOSShift.findMany({
+      where: {
+        terminalId,
+        OR: [
+          {
+            closedAt: {
+              gte: fromDate,
+              lte: toDate,
+            },
+          },
+          {
+            status: ShiftStatus.OPEN,
+            openedAt: { gte: fromDate, lte: toDate },
+          },
+        ],
+      },
+      orderBy: [{ closedAt: 'desc' }, { openedAt: 'desc' }],
+      take: 500,
+    });
+    const userMap = await getUserMap();
+    const reports = await buildZReports(shifts.map((shift) => shift.id));
+    const reportMap = new Map(reports.map((report) => [report.shiftId, report]));
+    const slots = shifts.map((shift) => ({
+      shift: mapShift(shift, userMap),
+      report: reportMap.get(shift.id),
+    })).filter((slot) => slot.report != null);
+    return res.json(slots);
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({ error: 'Failed to load Z-report slots' });
   }
 });
 
