@@ -3689,6 +3689,7 @@ function ZReportModal(
       }
       return summary;
     }, {});
+	delete paymentBreakdown.CASH;
 
     return {
       ...props.report,
@@ -3701,44 +3702,109 @@ function ZReportModal(
     };
   }, [props.cashSalesHidden, props.report, props.sales]);
 
+  const zReading = useMemo(() => {
+    const paymentCounts = props.sales.reduce<Record<string, number>>((counts, sale) => {
+      for (const payment of sale.payments) counts[payment.method] = (counts[payment.method] ?? 0) + 1;
+      return counts;
+    }, {});
+    const discountedLines = props.sales.flatMap((sale) => sale.lines).filter((line) => line.discountAmount > 0);
+    return {
+      paymentCounts,
+      discountedLineCount: discountedLines.length,
+      productCount: props.sales.reduce((sum, sale) => sum + sale.lines.reduce((lineSum, line) => lineSum + line.quantity, 0), 0),
+      cashSales: visibleReport.paymentBreakdown.CASH ?? 0,
+      nonCashSales: Object.entries(visibleReport.paymentBreakdown)
+        .filter(([method]) => method !== 'CASH')
+        .reduce((sum, [, amount]) => sum + amount, 0),
+    };
+  }, [props.sales, visibleReport.paymentBreakdown]);
+
+  const downloadSheet = () => {
+    const rows: Array<[string, string | number, string | number]> = [
+      ['Metric', 'Count', 'Amount'],
+      ['Gross sale', visibleReport.transactionCount, visibleReport.grossSales],
+      ['Product discount', zReading.discountedLineCount, visibleReport.discounts],
+      ['Refunds', '', visibleReport.refunds],
+      ['Net sale', visibleReport.transactionCount, visibleReport.netSales],
+	  ...(!props.cashSalesHidden ? [
+		['Opening float', '', visibleReport.openingFloat],
+		['Cash sale', zReading.paymentCounts.CASH ?? 0, zReading.cashSales],
+	  ] as Array<[string, string | number, string | number]> : []),
+      ['Non-cash total', '', zReading.nonCashSales],
+      ...Object.entries(visibleReport.paymentBreakdown).map(([method, amount]) => [method, zReading.paymentCounts[method] ?? 0, amount] as [string, number, number]),
+	  ...(!props.cashSalesHidden ? [
+		['Expected drawer', '', visibleReport.expectedDrawer],
+		['Counted drawer', '', visibleReport.countedDrawer ?? ''],
+		['Variance', '', visibleReport.variance ?? ''],
+	  ] as Array<[string, string | number, string | number]> : []),
+      ['Bill count', visibleReport.transactionCount, ''],
+      ['Product count', zReading.productCount, ''],
+    ];
+    const cell = (value: string | number) => String(value).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const body = rows.map((row) => `<tr>${row.map((value) => `<td>${cell(value)}</td>`).join('')}</tr>`).join('');
+    const html = `<html><head><meta charset="utf-8"></head><body><h2>JINGLES - Z Reading</h2><p>Shift: ${cell(formatShiftReference(props.shift, props.terminalCode))}</p><p>Cashier: ${cell(props.cashierName)} | Unit: ${cell(props.terminalCode)}</p><table border="1">${body}</table></body></html>`;
+    const url = URL.createObjectURL(new Blob([html], { type: 'application/vnd.ms-excel;charset=utf-8' }));
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `z-reading-${formatShiftReference(props.shift, props.terminalCode).replace(/[^a-z0-9]+/gi, '-').toLowerCase()}.xls`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+  };
+
   return (
     <ModalShell onClose={props.onClose} title="Z-report" width="wide">
-      <div className="modal-stack">
+      <div className="modal-stack z-report-modal">
         {props.cashSalesHidden && (
           <div className="inline-alert info">Cash sales and drawer figures are hidden from this report view.</div>
         )}
-        <div className="report-stat-grid">
-          <MetricCard label="Shift" value={formatShiftReference(props.shift, props.terminalCode)} />
-          <MetricCard label="Cashier" value={props.cashierName} />
-          <MetricCard label="Terminal" value={props.terminalCode} />
-        </div>
+        <div className="z-reading-paper">
+          <header className="z-reading-header">
+            <strong>JINGLES</strong>
+            <span>For everything you look for</span>
+            <span>Cashier: {props.cashierName}</span>
+            <span>Unit No: {props.terminalCode}</span>
+            <span>Location: {props.shift.branchId || 'JINGLES'}</span>
+            <h2>Z Reading</h2>
+            <small>{formatDateTime(props.shift.openedAt)}{props.shift.closedAt ? ` - ${formatDateTime(props.shift.closedAt)}` : ''}</small>
+          </header>
 
-        <div className="report-grid">
-          <ReportRow label="Gross sales" value={formatCurrency(visibleReport.grossSales)} />
-          <ReportRow label="Discounts" value={`- ${formatCurrency(visibleReport.discounts)}`} muted />
-          {!props.cashSalesHidden && <ReportRow label="Refunds" value={`- ${formatCurrency(visibleReport.refunds)}`} muted />}
-          <ReportRow label="Net sales" value={formatCurrency(visibleReport.netSales)} strong />
-          <ReportRow label="Transactions" value={formatInteger(visibleReport.transactionCount)} />
-          {!props.cashSalesHidden && <ReportRow label="Opening float" value={formatCurrency(visibleReport.openingFloat)} />}
-          {!props.cashSalesHidden && <ReportRow label="Expected drawer" value={formatCurrency(visibleReport.expectedDrawer)} strong />}
-          {!props.cashSalesHidden && visibleReport.countedDrawer != null && (
-            <>
-              <ReportRow label="Counted drawer" value={formatCurrency(visibleReport.countedDrawer)} />
-              <ReportRow label="Variance" value={formatCurrency(visibleReport.variance ?? 0)} muted />
-            </>
-          )}
-        </div>
+          <div className="z-reading-lines">
+            <ReportRow label="Gross sale" value={formatCurrency(visibleReport.grossSales)} />
+            <ReportRow label="Product discount" value={`${formatInteger(zReading.discountedLineCount)}    ${formatCurrency(visibleReport.discounts)}`} muted />
+            {!props.cashSalesHidden && <ReportRow label="Refunds" value={formatCurrency(visibleReport.refunds)} muted />}
+            <ReportRow label="Net sale" value={formatCurrency(visibleReport.netSales)} strong />
+          </div>
 
-        <div className="report-breakdown">
-          {Object.entries(visibleReport.paymentBreakdown).map(([method, amount]) => (
-            <div key={method} className="report-chip">
-              <span>{method}</span>
-              <b>{formatCurrency(amount)}</b>
+          {!props.cashSalesHidden && (
+            <div className="z-reading-lines">
+              <ReportRow label="Cash sale" value={`${formatInteger(zReading.paymentCounts.CASH ?? 0)}    ${formatCurrency(zReading.cashSales)}`} />
+              <ReportRow label="Opening float" value={formatCurrency(visibleReport.openingFloat)} />
+              <ReportRow label="Expected drawer" value={formatCurrency(visibleReport.expectedDrawer)} strong />
+              {visibleReport.countedDrawer != null && <ReportRow label="Declared amount" value={formatCurrency(visibleReport.countedDrawer)} />}
+              {visibleReport.variance != null && <ReportRow label="Cash excess / (short)" value={formatCurrency(visibleReport.variance)} strong />}
             </div>
-          ))}
+          )}
+
+          <section className="z-reading-noncash">
+            <h3>Non cash sales</h3>
+            {Object.entries(visibleReport.paymentBreakdown).filter(([method]) => method !== 'CASH').map(([method, amount]) => (
+              <ReportRow key={method} label={method} value={`${formatInteger(zReading.paymentCounts[method] ?? 0)}    ${formatCurrency(amount)}`} />
+            ))}
+            <ReportRow label="Non cash total" value={formatCurrency(zReading.nonCashSales)} strong />
+          </section>
+
+          <footer className="z-reading-footer">
+            <span>Bill count: {formatInteger(visibleReport.transactionCount)}</span>
+            <span>Product count: {formatInteger(zReading.productCount)}</span>
+            <span>Shift: {formatShiftReference(props.shift, props.terminalCode)}</span>
+          </footer>
         </div>
 
         <div className="modal-actions">
+          <button className="ghost-button" onClick={() => window.print()}>Print</button>
+          <button className="ghost-button" onClick={downloadSheet}>Download Excel</button>
           <button className="ghost-button" onClick={props.onClose}>Close</button>
         </div>
       </div>

@@ -2971,6 +2971,8 @@ button {
 
 @media print {
   .workstation-header,
+  .workstation-grid,
+  .bg-layer,
   .action-bar,
   .toast-banner,
   .modal-actions {
@@ -2990,6 +2992,37 @@ button {
     border: 0;
     background: transparent;
   }
+}
+
+.z-reading-paper {
+  width: min(420px, 100%);
+  margin: 0 auto;
+  padding: 22px 26px;
+  border: 1px dashed var(--line);
+  background: #fff;
+  color: #111;
+  font-family: "Courier New", monospace;
+}
+
+.z-reading-header,
+.z-reading-footer {
+  display: flex;
+  flex-direction: column;
+  text-align: center;
+}
+
+.z-reading-header strong { font-size: 26px; }
+.z-reading-header h2 { margin: 20px 0 4px; font-size: 22px; font-weight: 600; }
+.z-reading-lines, .z-reading-noncash { border-top: 1px dashed #555; margin-top: 16px; padding-top: 12px; }
+.z-reading-lines { display: grid; grid-template-columns: 1fr auto; gap: 8px 16px; }
+.z-reading-noncash h3 { text-align: center; text-transform: uppercase; font-size: 14px; margin: 0 0 12px; }
+.z-reading-noncash { display: grid; grid-template-columns: 1fr auto; gap: 8px 16px; }
+.z-reading-noncash h3 { grid-column: 1 / -1; }
+.z-reading-footer { border-top: 1px dashed #555; margin-top: 16px; padding-top: 12px; gap: 4px; }
+
+@media print {
+  .z-report-modal .inline-alert { display: none; }
+  .z-reading-paper { border: 0; width: 80mm; padding: 4mm; }
 }
 
 /* ---------------------------------------------------------------------------
