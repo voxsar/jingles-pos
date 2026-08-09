@@ -38,6 +38,9 @@ export function persistThemeMode(themeMode: POSThemeMode) {
 
 export function buildFallbackDesktopSettings(themeMode: POSThemeMode): POSDesktopSettings {
   return {
+    deviceId: 'browser-pos',
+    deviceName: 'Browser POS',
+    deviceNameVersion: 0,
     syncUrl: DEFAULT_POS_SYNC_URL,
     databasePath: '',
     backupDirectory: '',

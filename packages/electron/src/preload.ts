@@ -1,5 +1,6 @@
 import { contextBridge, ipcRenderer } from 'electron';
 import type {
+  ElectronDiscoveredDevice,
   POSDesktopBackupResult,
   POSDesktopSettings,
   POSDesktopSettingsSaveResult,
@@ -40,6 +41,15 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.invoke('desktop-settings:backup-now') as Promise<POSDesktopBackupResult>
     ),
   },
+  devices: {
+    list: () => ipcRenderer.invoke('devices:list') as Promise<ElectronDiscoveredDevice[]>,
+    refresh: () => ipcRenderer.invoke('devices:refresh') as Promise<ElectronDiscoveredDevice[]>,
+    onChanged: (callback: (devices: ElectronDiscoveredDevice[]) => void) => {
+      const listener = (_event: Electron.IpcRendererEvent, devices: ElectronDiscoveredDevice[]) => callback(devices);
+      ipcRenderer.on('devices:changed', listener);
+      return () => ipcRenderer.removeListener('devices:changed', listener);
+    },
+  },
 });
 
 declare global {
@@ -54,6 +64,11 @@ declare global {
         pickDatabasePath: (currentPath?: string) => Promise<string | null>;
         pickBackupDirectory: (currentPath?: string) => Promise<string | null>;
         backupNow: () => Promise<POSDesktopBackupResult>;
+      };
+      devices?: {
+        list: () => Promise<ElectronDiscoveredDevice[]>;
+        refresh: () => Promise<ElectronDiscoveredDevice[]>;
+        onChanged: (callback: (devices: ElectronDiscoveredDevice[]) => void) => () => void;
       };
     };
   }
