@@ -43,6 +43,7 @@ import {
 } from './api';
 import { useAuth } from './auth/AuthContext';
 import HelpGuide from './help/HelpGuide';
+import SearchableSelect from './components/SearchableSelect';
 import {
   buildFallbackDesktopSettings,
   createDesktopBackup,
@@ -207,7 +208,7 @@ export default function PosWorkstation() {
   const [chromeOffsets, setChromeOffsets] = useState({ top: 136, bottom: 140 });
 
   const discountInputRef = useRef<HTMLInputElement>(null);
-  const customerSelectRef = useRef<HTMLSelectElement>(null);
+  const customerSelectRef = useRef<HTMLButtonElement>(null);
   const headerBarRef = useRef<HTMLElement>(null);
   const actionBarRef = useRef<HTMLDivElement>(null);
   const workstationGridRef = useRef<HTMLDivElement>(null);
@@ -1807,31 +1808,23 @@ function WorkstationAccessScreen(props: WorkstationAccessScreenProps) {
 
         <div className="login-grid">
           <LabelBlock label="Branch">
-            <select
+            <SearchableSelect
               className="glass-input"
               value={props.selectedBranchId}
-              onChange={(event) => props.onBranchChange(event.target.value)}
-            >
-              {props.branches.map((branch) => (
-                <option key={branch.id} value={branch.id}>
-                  {branch.code} - {branch.name}
-                </option>
-              ))}
-            </select>
+              onChange={props.onBranchChange}
+              options={props.branches.map((branch) => ({ value: branch.id, label: `${branch.code} - ${branch.name}` }))}
+              ariaLabel="Branch"
+            />
           </LabelBlock>
 
           <LabelBlock label="Terminal">
-            <select
+            <SearchableSelect
               className="glass-input"
               value={props.selectedTerminalId}
-              onChange={(event) => props.onTerminalChange(event.target.value)}
-            >
-              {props.terminals.map((terminal) => (
-                <option key={terminal.id} value={terminal.id}>
-                  {terminal.code} - {terminal.name}
-                </option>
-              ))}
-            </select>
+              onChange={props.onTerminalChange}
+              options={props.terminals.map((terminal) => ({ value: terminal.id, label: `${terminal.code} - ${terminal.name}` }))}
+              ariaLabel="Terminal"
+            />
           </LabelBlock>
         </div>
 
@@ -2229,7 +2222,7 @@ type CartPanelProps = {
   billDiscount: number;
   cart: CartLine[];
   customerId: string;
-  customerSelectRef: React.RefObject<HTMLSelectElement>;
+  customerSelectRef: React.RefObject<HTMLButtonElement>;
   customers: Customer[];
   defaultTierLabel: string;
   defaultTierOptions: string[];
@@ -2266,32 +2259,24 @@ function CartPanel(props: CartPanelProps) {
 
       <div className="cart-select-grid">
         <LabelBlock label="Customer">
-          <select
+          <SearchableSelect
             ref={props.customerSelectRef}
             className="glass-input compact"
             value={props.customerId}
-            onChange={(event) => props.onCustomerChange(event.target.value)}
-          >
-            {props.customers.map((customer) => (
-              <option key={customer.id} value={customer.id}>
-                {customer.name} - {customer.tier}
-              </option>
-            ))}
-          </select>
+            onChange={props.onCustomerChange}
+            options={props.customers.map((customer) => ({ value: customer.id, label: `${customer.name} - ${customer.tier}` }))}
+            ariaLabel="Customer"
+          />
         </LabelBlock>
 
         <LabelBlock label="Default tier">
-          <select
+          <SearchableSelect
             className="glass-input compact"
             value={props.defaultTierLabel}
-            onChange={(event) => props.onDefaultTierChange(event.target.value)}
-          >
-            {props.defaultTierOptions.map((label) => (
-              <option key={label} value={label}>
-                {label}
-              </option>
-            ))}
-          </select>
+            onChange={props.onDefaultTierChange}
+            options={props.defaultTierOptions.map((label) => ({ value: label, label }))}
+            ariaLabel="Default tier"
+          />
         </LabelBlock>
       </div>
 
@@ -2340,32 +2325,24 @@ function CartPanel(props: CartPanelProps) {
 
                   <label className="mini-field">
                     <span>Tier</span>
-                    <select
+                    <SearchableSelect
                       className="line-select"
                       value={line.tierLabel}
-                      onChange={(event) => props.onLineTierChange(line.uid, event.target.value)}
-                    >
-                      {line.priceTiers.map((tier) => (
-                        <option key={tier.id} value={tier.label}>
-                          {tier.label} - {formatCurrency(tier.price)}
-                        </option>
-                      ))}
-                    </select>
+                      onChange={(value) => props.onLineTierChange(line.uid, value)}
+                      options={line.priceTiers.map((tier) => ({ value: tier.label, label: `${tier.label} - ${formatCurrency(tier.price)}` }))}
+                      ariaLabel="Line price tier"
+                    />
                   </label>
 
                   <label className="mini-field">
                     <span>Staff</span>
-                    <select
+                    <SearchableSelect
                       className="line-select"
                       value={line.salespersonId}
-                      onChange={(event) => props.onLineSalespersonChange(line.uid, event.target.value)}
-                    >
-                      {props.salespeople.map((salesperson) => (
-                        <option key={salesperson.id} value={salesperson.id}>
-                          {salesperson.initials} - {salesperson.name}
-                        </option>
-                      ))}
-                    </select>
+                      onChange={(value) => props.onLineSalespersonChange(line.uid, value)}
+                      options={props.salespeople.map((salesperson) => ({ value: salesperson.id, label: `${salesperson.initials} - ${salesperson.name}` }))}
+                      ariaLabel="Line salesperson"
+                    />
                   </label>
 
                   <label className="mini-field">
@@ -3383,14 +3360,14 @@ function PaymentModal(
 
           {method === PaymentMethod.INSTALLMENT ? (
             <LabelBlock label="Number of installments">
-              <select
+              <SearchableSelect
                 className="glass-input large"
-                value={installmentCount}
+                value={String(installmentCount)}
                 disabled={splitPayments.length > 0}
-                onChange={(event) => setInstallmentCount(Number(event.target.value))}
-              >
-                {[2, 3, 4, 6, 12].map((count) => <option key={count} value={count}>{count} installments</option>)}
-              </select>
+                onChange={(value) => setInstallmentCount(Number(value))}
+                options={[2, 3, 4, 6, 12].map((count) => ({ value: String(count), label: `${count} installments` }))}
+                ariaLabel="Number of installments"
+              />
               <div className="installment-preview">
                 {formatCurrency(roundToMoney(props.total / installmentCount))} per installment
               </div>
@@ -3984,17 +3961,9 @@ function OrderHistoryModal(
             value={query}
           />
           {activeTab === 'other' && (
-            <select className="glass-input" value={terminalId} onChange={(event) => setTerminalId(event.target.value)}>
-              <option value="all">All other terminals</option>
-              {availableTerminals.map((terminal) => (
-                <option key={terminal.id} value={terminal.id}>{terminal.code} - {terminal.name}</option>
-              ))}
-            </select>
+            <SearchableSelect className="glass-input" value={terminalId} onChange={setTerminalId} options={[{ value: 'all', label: 'All other terminals' }, ...availableTerminals.map((terminal) => ({ value: terminal.id, label: `${terminal.code} - ${terminal.name}` }))]} ariaLabel="Terminal filter" />
           )}
-          <select className="glass-input" value={cashierId} onChange={(event) => setCashierId(event.target.value)}>
-            <option value="all">All cashiers</option>
-            {availableCashiers.map((user) => <option key={user.id} value={user.id}>{user.name}</option>)}
-          </select>
+          <SearchableSelect className="glass-input" value={cashierId} onChange={setCashierId} options={[{ value: 'all', label: 'All cashiers' }, ...availableCashiers.map((user) => ({ value: user.id, label: user.name }))]} ariaLabel="Cashier filter" />
         </div>
 
         <div className="orders-metrics">
@@ -4315,12 +4284,7 @@ function ReturnModal(
               </div>
 
               <LabelBlock label="Reason">
-                <select className="glass-input compact" value={reason} onChange={(event) => setReason(event.target.value)}>
-                  <option>Customer return</option>
-                  <option>Damaged item</option>
-                  <option>Pricing error</option>
-                  <option>Order cancellation</option>
-                </select>
+                <SearchableSelect className="glass-input compact" value={reason} onChange={setReason} options={['Customer return', 'Damaged item', 'Pricing error', 'Order cancellation'].map((label) => ({ value: label, label }))} ariaLabel="Return reason" />
               </LabelBlock>
 
               <div className="return-lines">
