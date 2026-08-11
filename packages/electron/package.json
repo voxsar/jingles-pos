@@ -95,7 +95,7 @@
     },
     "win": {
       "icon": "icon.ico",
-      "publisherName": "The Red Sun",
+      "verifyUpdateCodeSignature": false,
       "target": [
         "nsis"
       ]
