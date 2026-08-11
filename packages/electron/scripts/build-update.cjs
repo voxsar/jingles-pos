@@ -1,7 +1,11 @@
 const { spawnSync } = require('child_process');
 
 const variableName = process.argv[2] || 'JINGLES_UPDATE_URL';
-const rawUrl = process.env[variableName];
+const defaultUrls = {
+  JINGLES_INVENTORY_UPDATE_URL: 'https://inv.theredsun.org/updates/inventory',
+  JINGLES_POS_UPDATE_URL: 'https://pos.theredsun.org/updates/pos',
+};
+const rawUrl = process.env[variableName] || defaultUrls[variableName];
 if (!rawUrl) {
   console.error(`Missing ${variableName}. Set it to this application's HTTPS update directory.`);
   process.exit(1);

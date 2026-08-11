@@ -1,6 +1,8 @@
 {
   "name": "@jingles/electron",
   "version": "1.0.1",
+  "description": "Offline-capable Federation Commerce point-of-sale desktop application",
+  "author": "The Red Sun",
   "main": "dist/main.js",
   "scripts": {
     "build": "tsc",
@@ -45,6 +47,7 @@
     "electronVersion": "41.4.0",
     "npmRebuild": false,
     "productName": "Jingles POS",
+    "copyright": "Copyright © 2026 The Red Sun",
     "files": [
       "dist/**/*",
       "package.json",
@@ -92,9 +95,17 @@
     },
     "win": {
       "icon": "icon.ico",
+      "publisherName": "The Red Sun",
       "target": [
         "nsis"
       ]
-    }
+    },
+    "publish": [
+      {
+        "provider": "generic",
+        "url": "https://pos.theredsun.org/updates/pos",
+        "channel": "latest"
+      }
+    ]
   }
 }

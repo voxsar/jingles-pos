@@ -7,6 +7,7 @@ APP_DIR="/var/www/federation-inventory/jingles-pos"
 DOMAIN="pos.theredsun.org"
 NGINX_CONF="/etc/nginx/sites-available/${DOMAIN}.conf"
 DATA_DIR="${APP_DIR}/data"
+UPDATE_DIR="/var/www/federation-inventory/desktop-updates/pos"
 
 echo "=== Jingles POS Deployment ==="
 
@@ -31,6 +32,7 @@ npm run build
 # ── 3. Prisma client & database ──────────────────────────────────────────────
 echo "[4/7] Preparing database..."
 mkdir -p "${DATA_DIR}"
+mkdir -p "${UPDATE_DIR}"
 
 # Update DATABASE_URL in .env if the data dir is different from default
 if [ ! -f "${APP_DIR}/packages/backend/.env" ]; then
