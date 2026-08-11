@@ -10,6 +10,7 @@ import {
   getDesktopSqliteDatabaseUrl,
 } from './runtimePaths';
 import { readDesktopSettings } from '../desktopSettings';
+import { getLanSyncTargetPath } from '../network/lanSyncTarget';
 
 export type LocalApiServer = {
   url: string;
@@ -187,6 +188,7 @@ export async function startLocalApiServer(): Promise<LocalApiServer> {
       JINGLES_POS_DEVICE_ID: baseEnv.JINGLES_POS_DEVICE_ID?.trim() || DEFAULT_DEVICE_ID,
       JINGLES_POS_TERMINAL_ID: baseEnv.JINGLES_POS_TERMINAL_ID?.trim() || DEFAULT_TERMINAL_ID,
       JINGLES_POS_UPSTREAM_URL: desktopSettings.syncUrl,
+      JINGLES_POS_LAN_UPSTREAM_FILE: getLanSyncTargetPath(),
     },
     stdio: ['ignore', 'pipe', 'pipe'],
     windowsHide: true,

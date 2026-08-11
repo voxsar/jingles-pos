@@ -1,4 +1,5 @@
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 import { app, BrowserWindow, dialog, ipcMain, type OpenDialogOptions } from 'electron';
 import { getDesktopLocalApiUrl, startLocalApiServer, type LocalApiServer } from './backend/localApi';
@@ -8,9 +9,13 @@ import {
   readDesktopSettings,
   saveDesktopSettings,
 } from './desktopSettings';
+import { JinglesMdnsService, type DiscoveredJinglesDevice } from './network/mdns';
+import { writeLanSyncTarget } from './network/lanSyncTarget';
+import { DEFAULT_DEVICE_ID, DEFAULT_TERMINAL_ID } from '@jingles/shared';
 
 let mainWindow: BrowserWindow | null = null;
 let localApiServer: LocalApiServer | null = null;
+let mdnsService: JinglesMdnsService | null = null;
 const STARTUP_LOG_PATH = path.join(process.env.TEMP || process.cwd(), 'jingles-pos-electron.log');
 
 function formatError(error: unknown): string {
@@ -34,6 +39,37 @@ function appendStartupLog(message: string, error?: unknown) {
   } catch {
     // Ignore secondary log-write failures.
   }
+}
+
+function selectInventoryLanTarget(devices: DiscoveredJinglesDevice[]) {
+  return devices
+    .filter((device) => device.application === 'inventory' && Date.parse(device.expiresAt) > Date.now())
+    .sort((left, right) => Date.parse(right.lastSeenAt) - Date.parse(left.lastSeenAt))[0] ?? null;
+}
+
+function startLanDiscovery() {
+  const deviceId = process.env.JINGLES_POS_DEVICE_ID?.trim() || DEFAULT_DEVICE_ID;
+  const terminalId = process.env.JINGLES_POS_TERMINAL_ID?.trim() || DEFAULT_TERMINAL_ID;
+  mdnsService = new JinglesMdnsService({
+    deviceId,
+    deviceName: `Jingles POS - ${os.hostname()} (${terminalId})`,
+    application: 'pos',
+    applicationVersion: app.getVersion(),
+    port: 3631,
+    protocol: 'http',
+    apiPath: '/api/pos',
+    terminalId,
+  });
+  mdnsService.subscribe((devices) => {
+    const target = selectInventoryLanTarget(devices);
+    writeLanSyncTarget(target);
+    appendStartupLog(
+      target
+        ? `LAN inventory route discovered: ${target.deviceName} at ${target.address}:${target.port}`
+        : 'No Inventory desktop LAN route is currently available.',
+    );
+  });
+  mdnsService.start();
 }
 
 function showStartupError(title: string, message: string, error: unknown) {
@@ -128,6 +164,7 @@ async function restartLocalApiServer() {
 app.whenReady().then(async () => {
   try {
     app.setAppUserModelId('com.jingles.pos');
+    startLanDiscovery();
     localApiServer = await restartLocalApiServer();
     await createWindow();
   } catch (error) {
@@ -138,6 +175,8 @@ app.whenReady().then(async () => {
 });
 
 app.on('before-quit', () => {
+  mdnsService?.stop();
+  mdnsService = null;
   void stopLocalApiServer();
 });
 

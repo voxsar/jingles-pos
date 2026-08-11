@@ -838,6 +838,51 @@ button {
   font-size: 14px;
 }
 
+.sync-progress-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.sync-progress-heading div {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.sync-progress-heading span,
+.sync-progress-metrics {
+  color: var(--ink-2);
+  font-size: 12px;
+}
+
+.sync-progress-heading strong {
+  color: var(--accent);
+  font-size: 18px;
+}
+
+.sync-progress-track {
+  height: 10px;
+  margin: 14px 0 10px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(24, 38, 34, 0.1);
+}
+
+.sync-progress-fill {
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #159875, #72c9b2);
+  transition: width 240ms ease;
+}
+
+.sync-progress-metrics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 18px;
+}
+
 .sync-clock-panel {
   border-radius: 20px;
   padding: 14px;

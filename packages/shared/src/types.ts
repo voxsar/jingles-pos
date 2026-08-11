@@ -385,6 +385,9 @@ export interface SyncConflict {
 
 export interface SyncStatusSummary {
   online: boolean;
+  connectionMode?: 'lan' | 'cloud' | 'offline';
+  connectionName?: string;
+  activeEndpoint?: string;
   pendingEvents: number;
   conflictCount: number;
   deviceId: string;
@@ -396,6 +399,22 @@ export interface SyncStatusSummary {
   syncAuthIdentity?: string;
   syncAuthMode?: 'app_token' | 'user_token';
   needsSyncAuth?: boolean;
+  lastAttemptAt?: string;
+  progress?: POSSyncProgress;
+}
+
+export interface POSSyncProgress {
+  running: boolean;
+  phase: 'idle' | 'connecting' | 'pushing' | 'pulling' | 'confirming' | 'catalog' | 'history' | 'complete' | 'failed';
+  label: string;
+  detail?: string;
+  percent: number;
+  startedAt?: string;
+  updatedAt: string;
+  accepted?: number;
+  remoteApplied?: number;
+  historyImported?: number;
+  historyTotal?: number;
 }
 
 export interface POSAuthLoginInput {

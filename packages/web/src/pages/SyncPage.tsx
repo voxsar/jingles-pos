@@ -5,7 +5,7 @@ import { getSyncDashboard, refreshHostSyncAuth, subscribeSyncStatus, syncNow } f
 import { useAuth } from '../auth/AuthContext';
 import { formatDateTime, formatInteger } from '../utils/pos';
 
-const REFRESH_INTERVAL_MS = 15000;
+const REFRESH_INTERVAL_MS = 2000;
 
 function readClockEntries(clock?: Record<string, number>) {
   return Object.entries(clock ?? {}) as Array<[string, number]>;
@@ -144,6 +144,15 @@ export default function SyncPage() {
       ? 'Host sync authentication is required. Reconnect host sync for this workstation.'
       : null
   );
+  const progress = status?.progress;
+  const primarySyncRunning = Boolean(
+    progress?.running && progress.phase !== 'history',
+  );
+  const connectionLabel = status?.online
+    ? status.connectionMode === 'lan'
+      ? 'Online via LAN'
+      : 'Online via cloud'
+    : 'Offline';
 
   return (
     <div className="screen-fill workstation-app sync-page">
@@ -166,8 +175,8 @@ export default function SyncPage() {
           <button className="ghost-button" onClick={() => void loadDashboard()}>
             Refresh
           </button>
-          <button className="btn-primary" disabled={isSyncing} onClick={() => void handleSyncNow()}>
-            {isSyncing ? 'Syncing...' : 'Sync now'}
+          <button className="btn-primary" disabled={isSyncing || primarySyncRunning} onClick={() => void handleSyncNow()}>
+            {isSyncing || primarySyncRunning ? progress?.label ?? 'Syncing...' : 'Sync now'}
           </button>
           <button className="ghost-button danger" onClick={() => void handleLogout()}>
             Sign out
@@ -190,12 +199,39 @@ export default function SyncPage() {
           <section className="glass-panel sync-card">
             <div className="sync-card-title">Current status</div>
             <div className="sync-stat-grid">
-              <SyncStat label="Connection" value={status?.online ? 'Online' : 'Offline'} />
+              <SyncStat label="Connection" value={connectionLabel} />
+              <SyncStat label="Route" value={status?.connectionName ?? status?.activeEndpoint ?? 'No active route'} />
               <SyncStat label="Pending" value={formatInteger(status?.pendingEvents ?? 0)} />
               <SyncStat label="Conflicts" value={formatInteger(status?.conflictCount ?? 0)} />
               <SyncStat label="Last sync" value={formatDateTime(status?.lastSyncAt)} />
+              <SyncStat label="Last attempt" value={formatDateTime(status?.lastAttemptAt)} />
               <SyncStat label="Device" value={status?.deviceId ?? 'Unknown'} mono />
               <SyncStat label="Last error" value={status?.lastError ?? 'None'} />
+            </div>
+          </section>
+
+          <section className="glass-panel sync-card sync-card-wide">
+            <div className="sync-card-title">Sync progress</div>
+            <div className="sync-progress-heading">
+              <div>
+                <b>{progress?.label ?? 'Waiting for the next sync run'}</b>
+                <span>{progress?.detail ?? 'The POS will sync automatically when an endpoint is available.'}</span>
+              </div>
+              <strong>{formatInteger(progress?.percent ?? 0)}%</strong>
+            </div>
+            <div className="sync-progress-track" aria-label="Sync progress">
+              <div className="sync-progress-fill" style={{ width: `${progress?.percent ?? 0}%` }} />
+            </div>
+            <div className="sync-progress-metrics">
+              <span>Phase: {progress?.phase ?? 'idle'}</span>
+              <span>Accepted: {formatInteger(progress?.accepted ?? 0)}</span>
+              <span>Remote applied: {formatInteger(progress?.remoteApplied ?? 0)}</span>
+              {typeof progress?.historyTotal === 'number' && (
+                <span>
+                  History: {formatInteger(progress.historyImported ?? 0)} / {formatInteger(progress.historyTotal)}
+                </span>
+              )}
+              <span>Updated: {formatDateTime(progress?.updatedAt)}</span>
             </div>
           </section>
 

@@ -31,8 +31,8 @@ import prisma from '../prisma';
 import {
   getLocalPosDeviceId,
   getLocalPosTerminalId,
+  getPosUpstreamCandidates,
   getPosSyncAppToken,
-  getPosUpstreamUrl,
   isLocalPosBackendMode,
 } from '../localMode';
 import {
@@ -62,6 +62,31 @@ type SyncRunResult = {
 };
 const inFlightSyncRuns = new Map<string, Promise<SyncRunResult>>();
 let legacyRefreshInFlight: Promise<number> | null = null;
+let lastTransportSuccess: {
+  at: Date;
+  mode: 'lan' | 'cloud';
+  url: string;
+  name?: string;
+} | null = null;
+let lastSyncAttemptAt: Date | null = null;
+let syncProgress: SyncStatusSummary['progress'] = {
+  running: false,
+  phase: 'idle',
+  label: 'Waiting for the next sync run',
+  percent: 0,
+  updatedAt: new Date().toISOString(),
+};
+
+function updateSyncProgress(
+  patch: Partial<NonNullable<SyncStatusSummary['progress']>> & Pick<NonNullable<SyncStatusSummary['progress']>, 'running' | 'phase' | 'label' | 'percent'>,
+) {
+  syncProgress = {
+    ...syncProgress,
+    ...patch,
+    percent: Math.max(0, Math.min(100, Math.round(patch.percent))),
+    updatedAt: new Date().toISOString(),
+  };
+}
 
 function parseJson<T>(value: unknown, fallback: T): T {
   if (value == null) {
@@ -1260,7 +1285,10 @@ async function buildLocalSyncStatusInTransaction(
   const syncAuth = appToken ? null : await readStoredSyncAuth(tx);
 
   return {
-    online: state?.online ?? false,
+    online: Boolean(lastTransportSuccess && Date.now() - lastTransportSuccess.at.getTime() < 60_000),
+    connectionMode: lastTransportSuccess?.mode ?? 'offline',
+    connectionName: lastTransportSuccess?.name,
+    activeEndpoint: lastTransportSuccess?.url,
     pendingEvents,
     conflictCount,
     deviceId,
@@ -1275,6 +1303,8 @@ async function buildLocalSyncStatusInTransaction(
     syncAuthIdentity: syncAuth?.identity,
     syncAuthMode: appToken ? 'app_token' : syncAuth?.token ? 'user_token' : undefined,
     needsSyncAuth: !appToken && !syncAuth?.token,
+    lastAttemptAt: lastSyncAttemptAt?.toISOString(),
+    progress: syncProgress,
   };
 }
 
@@ -1446,49 +1476,73 @@ export async function appendRemoteEventsFromServer(
   });
 }
 
-async function fetchUpstreamJson<T>(path: string, options?: { method?: 'GET' | 'POST'; body?: unknown }) {
+async function fetchUpstreamJson<T>(
+  path: string,
+  options?: { method?: 'GET' | 'POST'; body?: unknown; cloudOnly?: boolean },
+) {
   const appToken = getPosSyncAppToken();
   const syncAuth = appToken ? null : await readStoredSyncAuth();
   if (!appToken && !syncAuth?.token) {
     throw new Error(HOST_SYNC_AUTH_REQUIRED_ERROR);
   }
 
-  const response = await fetch(`${getPosUpstreamUrl()}${path}`, {
-    method: options?.method ?? 'GET',
-    headers: {
-      'Content-Type': 'application/json',
-      ...(appToken
-        ? { [POS_SYNC_APP_TOKEN_HEADER]: appToken }
-        : { Authorization: `Bearer ${syncAuth!.token}` }),
-    },
-    ...(typeof options?.body === 'undefined'
-      ? {}
-      : { body: JSON.stringify(options.body) }),
-  });
+  const candidates = getPosUpstreamCandidates({ cloudOnly: options?.cloudOnly });
+  let lastError: Error | null = null;
 
-  if (!response.ok) {
-    const payload = await response.json().catch(() => ({ error: `HTTP ${response.status}` })) as { error?: string };
-    if (response.status === 401 || response.status === 403) {
-      if (!appToken) {
-        await clearStoredSyncAuth(prisma, { preserveIdentity: true });
-        throw new Error(HOST_SYNC_AUTH_REQUIRED_ERROR);
+  for (const [index, candidate] of candidates.entries()) {
+    try {
+      const response = await fetch(`${candidate.url}${path}`, {
+        method: options?.method ?? 'GET',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(appToken
+            ? { [POS_SYNC_APP_TOKEN_HEADER]: appToken }
+            : { Authorization: `Bearer ${syncAuth!.token}` }),
+        },
+        signal: AbortSignal.timeout(candidate.mode === 'lan' ? 2500 : 15_000),
+        ...(typeof options?.body === 'undefined'
+          ? {}
+          : { body: JSON.stringify(options.body) }),
+      });
+
+      if (response.ok) {
+        lastTransportSuccess = {
+          at: new Date(),
+          mode: candidate.mode,
+          url: candidate.url,
+          name: candidate.name,
+        };
+        return response.json() as Promise<T>;
       }
 
-      throw new Error(POS_SYNC_APP_TOKEN_REJECTED_ERROR);
+      const payload = await response.json().catch(() => ({ error: `HTTP ${response.status}` })) as { error?: string };
+      if (candidate.mode === 'lan' && index < candidates.length - 1) {
+        lastError = new Error(payload.error || `LAN HTTP ${response.status}`);
+        continue;
+      }
+      if (response.status === 401 || response.status === 403) {
+        if (!appToken) {
+          await clearStoredSyncAuth(prisma, { preserveIdentity: true });
+          throw new Error(HOST_SYNC_AUTH_REQUIRED_ERROR);
+        }
+        throw new Error(POS_SYNC_APP_TOKEN_REJECTED_ERROR);
+      }
+      throw new Error(payload.error || `HTTP ${response.status}`);
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error(String(error));
+      if (candidate.mode !== 'lan' || index === candidates.length - 1) throw lastError;
     }
-
-    throw new Error(payload.error || `HTTP ${response.status}`);
   }
 
-  return response.json() as Promise<T>;
+  throw lastError ?? new Error('No sync endpoint is available.');
 }
 
 export async function validateUpstreamVoucher(context: unknown) {
-  return fetchUpstreamJson<any>('/api/pos/vouchers/validate', { method: 'POST', body: context });
+  return fetchUpstreamJson<any>('/api/pos/vouchers/validate', { method: 'POST', body: context, cloudOnly: true });
 }
 
 export async function refreshLocalCatalogFromUpstream(): Promise<SharedCatalogSnapshot> {
-  const snapshot = await fetchUpstreamJson<SharedCatalogSnapshot>('/api/pos/catalog/snapshot');
+  const snapshot = await fetchUpstreamJson<SharedCatalogSnapshot>('/api/pos/catalog/snapshot', { cloudOnly: true });
   await replaceLocalCatalogSnapshot(snapshot);
   return snapshot;
 }
@@ -1513,6 +1567,7 @@ export async function refreshLegacyPosRecordsFromUpstream(): Promise<number> {
   while (true) {
     const result = await fetchUpstreamJson<LegacyRecordPage>(
       `/api/pos/legacy-records?page=${page}&pageSize=${pageSize}`,
+      { cloudOnly: true },
     );
     if (result.items.length > 0) {
       await prisma.$transaction(
@@ -1532,6 +1587,17 @@ export async function refreshLegacyPosRecordsFromUpstream(): Promise<number> {
         })),
       );
       imported += result.items.length;
+      if (inFlightSyncRuns.size === 0) {
+        updateSyncProgress({
+          running: true,
+          phase: 'history',
+          label: 'Importing historical POS records',
+          detail: `Imported ${imported.toLocaleString()} of ${result.total.toLocaleString()} historical rows from cloud.`,
+          percent: result.total > 0 ? 90 + (imported / result.total) * 9 : 99,
+          historyImported: imported,
+          historyTotal: result.total,
+        });
+      }
     }
     if (page * pageSize >= result.total || result.items.length === 0) break;
     page += 1;
@@ -1551,6 +1617,15 @@ function queueLegacyPosRecordRefresh() {
     })
     .finally(() => {
       legacyRefreshInFlight = null;
+      if (inFlightSyncRuns.size === 0) {
+        updateSyncProgress({
+          running: false,
+          phase: 'complete',
+          label: 'Sync complete',
+          detail: 'Transactional events, catalog, and historical records are current.',
+          percent: 100,
+        });
+      }
     });
 }
 
@@ -1560,6 +1635,20 @@ async function runSyncWithUpstream(options?: {
 }): Promise<SyncRunResult> {
   const deviceId = options?.deviceId ?? getLocalPosDeviceId();
   const terminalId = options?.terminalId ?? getLocalPosTerminalId();
+  const startedAt = new Date().toISOString();
+  lastSyncAttemptAt = new Date();
+  updateSyncProgress({
+    running: true,
+    phase: 'connecting',
+    label: 'Connecting to sync endpoint',
+    detail: 'Looking for an Inventory desktop on LAN before using the cloud host.',
+    percent: 5,
+    startedAt,
+    accepted: 0,
+    remoteApplied: 0,
+    historyImported: 0,
+    historyTotal: undefined,
+  });
 
   try {
     const currentStatus = await getLocalSyncStatus(deviceId, terminalId);
@@ -1570,6 +1659,13 @@ async function runSyncWithUpstream(options?: {
         terminalId,
         vectorClock: currentStatus.localVectorClock,
       },
+    });
+    updateSyncProgress({
+      running: true,
+      phase: 'pushing',
+      label: 'Sending pending POS events',
+      detail: `${currentStatus.pendingEvents.toLocaleString()} local event(s) are queued for playback.`,
+      percent: 25,
     });
 
     const pendingEvents = await prisma.syncEvent.findMany({
@@ -1587,9 +1683,25 @@ async function runSyncWithUpstream(options?: {
       } satisfies SyncPlaybackRequest,
     });
 
+    updateSyncProgress({
+      running: true,
+      phase: 'pulling',
+      label: 'Applying server events',
+      detail: `Accepted ${playback.acceptedEventIds.length.toLocaleString()} local event(s); applying ${playback.remoteEvents.length.toLocaleString()} remote event(s).`,
+      percent: 55,
+      accepted: playback.acceptedEventIds.length,
+      remoteApplied: playback.remoteEvents.length,
+    });
     const remoteConflicts = await appendRemoteEventsFromServer(playback.remoteEvents);
     await markLocalEventsConfirmed(playback.acceptedEventIds, playback.serverVectorClock, deviceId, terminalId);
 
+    updateSyncProgress({
+      running: true,
+      phase: 'confirming',
+      label: 'Confirming vector clocks',
+      detail: 'Transactional playback is complete; confirming the workstation checkpoint.',
+      percent: 72,
+    });
     const updatedStatus = await getLocalSyncStatus(deviceId, terminalId);
     await fetchUpstreamJson('/api/pos/sync/confirm', {
       method: 'POST',
@@ -1601,10 +1713,24 @@ async function runSyncWithUpstream(options?: {
     });
 
     try {
+      updateSyncProgress({
+        running: true,
+        phase: 'catalog',
+        label: 'Refreshing product catalog',
+        detail: 'Downloading current products, prices, branches, and users from cloud.',
+        percent: 82,
+      });
       await refreshLocalCatalogFromUpstream();
       queueLegacyPosRecordRefresh();
     } catch (catalogError: any) {
       await recordLocalSyncFailure(`Projection refresh failed: ${catalogError.message}`, deviceId, terminalId);
+      updateSyncProgress({
+        running: false,
+        phase: 'failed',
+        label: 'Transactions synced; catalog refresh failed',
+        detail: catalogError.message,
+        percent: 100,
+      });
     }
 
     return {
@@ -1618,14 +1744,27 @@ async function runSyncWithUpstream(options?: {
     // rejected sale/shift event must not leave the workstation on a stale SKU
     // list or stale inventory quantities indefinitely.
     let failureMessage = error.message;
+    updateSyncProgress({
+      running: true,
+      phase: 'catalog',
+      label: 'Recovering the local catalog',
+      detail: `Transactional playback failed: ${failureMessage}. Refreshing catalog before the next retry.`,
+      percent: 82,
+    });
     try {
       await refreshLocalCatalogFromUpstream();
-      queueLegacyPosRecordRefresh();
     } catch (catalogError: any) {
       failureMessage = `${failureMessage}; Projection refresh failed: ${catalogError.message}`;
     }
 
     await recordLocalSyncFailure(failureMessage, deviceId, terminalId);
+    updateSyncProgress({
+      running: false,
+      phase: 'failed',
+      label: 'Sync needs attention',
+      detail: failureMessage,
+      percent: 100,
+    });
     return {
       accepted: 0,
       remoteApplied: 0,
