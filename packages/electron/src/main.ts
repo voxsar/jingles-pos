@@ -1,7 +1,7 @@
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { app, BrowserWindow, dialog, ipcMain, type OpenDialogOptions } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, Menu, type OpenDialogOptions } from 'electron';
 import { getDesktopLocalApiUrl, startLocalApiServer, type LocalApiServer } from './backend/localApi';
 import {
   copyDatabaseSnapshotIfNeeded,
@@ -12,6 +12,7 @@ import {
 import { JinglesMdnsService, type DiscoveredJinglesDevice } from './network/mdns';
 import { writeLanSyncTarget } from './network/lanSyncTarget';
 import { DEFAULT_DEVICE_ID, DEFAULT_TERMINAL_ID } from '@jingles/shared';
+import { getUpdateMenu, initializeUpdater } from './updater';
 
 let mainWindow: BrowserWindow | null = null;
 let localApiServer: LocalApiServer | null = null;
@@ -111,6 +112,9 @@ async function createWindow() {
     width: 1440,
     height: 920,
     backgroundColor: '#e6e2f0',
+    icon: app.isPackaged
+      ? path.join(process.resourcesPath, 'icon.ico')
+      : path.resolve(__dirname, '../build/icon.ico'),
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,
@@ -164,6 +168,13 @@ async function restartLocalApiServer() {
 app.whenReady().then(async () => {
   try {
     app.setAppUserModelId('com.jingles.pos');
+    initializeUpdater('JINGLES_POS_UPDATE_URL');
+    Menu.setApplicationMenu(Menu.buildFromTemplate([
+      { role: 'fileMenu' },
+      { role: 'viewMenu' },
+      getUpdateMenu(),
+      { role: 'help' },
+    ]));
     startLanDiscovery();
     localApiServer = await restartLocalApiServer();
     await createWindow();

@@ -45,8 +45,24 @@ export function getPosUpstreamCandidates(options?: { cloudOnly?: boolean }): Pos
   const cloud: PosUpstreamCandidate = { url: getPosUpstreamUrl(), mode: 'cloud' };
   if (options?.cloudOnly) return [cloud];
 
+  const sameComputer: PosUpstreamCandidate = {
+    url: trimTrailingSlash(
+      process.env.JINGLES_INVENTORY_LAN_URL?.trim() || 'http://127.0.0.1:3630',
+    ),
+    mode: 'lan',
+    name: 'Inventory on this computer',
+  };
+  const withCloudFallback = (lan?: PosUpstreamCandidate) => {
+    const candidates = [sameComputer, lan, cloud].filter(
+      (candidate): candidate is PosUpstreamCandidate => Boolean(candidate),
+    );
+    return candidates.filter(
+      (candidate, index) => candidates.findIndex((entry) => entry.url === candidate.url) === index,
+    );
+  };
+
   const targetFile = process.env.JINGLES_POS_LAN_UPSTREAM_FILE?.trim();
-  if (!targetFile || !fs.existsSync(targetFile)) return [cloud];
+  if (!targetFile || !fs.existsSync(targetFile)) return withCloudFallback();
 
   try {
     const target = JSON.parse(fs.readFileSync(targetFile, 'utf8')) as {
@@ -57,19 +73,16 @@ export function getPosUpstreamCandidates(options?: { cloudOnly?: boolean }): Pos
     const url = typeof target.url === 'string' ? target.url.trim().replace(/\/+$/, '') : '';
     const expiresAt = typeof target.expiresAt === 'string' ? Date.parse(target.expiresAt) : 0;
     if (!/^https?:\/\//i.test(url) || !Number.isFinite(expiresAt) || expiresAt <= Date.now()) {
-      return [cloud];
+      return withCloudFallback();
     }
-    if (url === cloud.url) return [cloud];
-    return [
-      {
+    if (url === cloud.url) return withCloudFallback();
+    return withCloudFallback({
         url,
         mode: 'lan',
         name: typeof target.deviceName === 'string' ? target.deviceName : undefined,
-      },
-      cloud,
-    ];
+      });
   } catch {
-    return [cloud];
+    return withCloudFallback();
   }
 }
 

@@ -40,6 +40,17 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.invoke('desktop-settings:backup-now') as Promise<POSDesktopBackupResult>
     ),
   },
+  updates: {
+    getStatus: () => ipcRenderer.invoke('updater:get-status'),
+    check: () => ipcRenderer.invoke('updater:check'),
+    choosePolicy: () => ipcRenderer.invoke('updater:choose-policy'),
+    install: () => ipcRenderer.invoke('updater:install'),
+    onStatus: (callback: (status: unknown) => void) => {
+      const listener = (_event: Electron.IpcRendererEvent, status: unknown) => callback(status);
+      ipcRenderer.on('updater:status', listener);
+      return () => ipcRenderer.removeListener('updater:status', listener);
+    },
+  },
 });
 
 declare global {
@@ -54,6 +65,13 @@ declare global {
         pickDatabasePath: (currentPath?: string) => Promise<string | null>;
         pickBackupDirectory: (currentPath?: string) => Promise<string | null>;
         backupNow: () => Promise<POSDesktopBackupResult>;
+      };
+      updates?: {
+        getStatus: () => Promise<unknown>;
+        check: () => Promise<unknown>;
+        choosePolicy: () => Promise<unknown>;
+        install: () => Promise<boolean>;
+        onStatus: (callback: (status: unknown) => void) => () => void;
       };
     };
   }
