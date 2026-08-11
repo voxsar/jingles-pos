@@ -13,6 +13,12 @@ let seedReady = false;
 let seedPromise: Promise<void> | null = null;
 
 async function ensureSeedDataInternal(): Promise<void> {
+  // Sample records are test fixtures only. Production and installed desktop
+  // workstations must populate their catalog from the inventory upstream.
+  if (process.env.NODE_ENV !== 'test') {
+    return;
+  }
+
   const [branchCount, userCount, customerCount, terminalCount, categoryCount, productCount] = await Promise.all([
     prisma.branch.count(),
     prisma.pOSUser.count(),

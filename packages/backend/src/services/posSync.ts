@@ -61,6 +61,7 @@ type SyncRunResult = {
   status: SyncStatusSummary;
 };
 const inFlightSyncRuns = new Map<string, Promise<SyncRunResult>>();
+let legacyRefreshInFlight: Promise<number> | null = null;
 
 function parseJson<T>(value: unknown, fallback: T): T {
   if (value == null) {
@@ -1538,6 +1539,21 @@ export async function refreshLegacyPosRecordsFromUpstream(): Promise<number> {
   return imported;
 }
 
+function queueLegacyPosRecordRefresh() {
+  if (legacyRefreshInFlight) {
+    return;
+  }
+
+  legacyRefreshInFlight = refreshLegacyPosRecordsFromUpstream()
+    .catch((error) => {
+      console.error('Background legacy POS record refresh failed', error);
+      return 0;
+    })
+    .finally(() => {
+      legacyRefreshInFlight = null;
+    });
+}
+
 async function runSyncWithUpstream(options?: {
   deviceId?: string;
   terminalId?: string;
@@ -1586,7 +1602,7 @@ async function runSyncWithUpstream(options?: {
 
     try {
       await refreshLocalCatalogFromUpstream();
-      await refreshLegacyPosRecordsFromUpstream();
+      queueLegacyPosRecordRefresh();
     } catch (catalogError: any) {
       await recordLocalSyncFailure(`Projection refresh failed: ${catalogError.message}`, deviceId, terminalId);
     }
@@ -1604,7 +1620,7 @@ async function runSyncWithUpstream(options?: {
     let failureMessage = error.message;
     try {
       await refreshLocalCatalogFromUpstream();
-      await refreshLegacyPosRecordsFromUpstream();
+      queueLegacyPosRecordRefresh();
     } catch (catalogError: any) {
       failureMessage = `${failureMessage}; Projection refresh failed: ${catalogError.message}`;
     }
