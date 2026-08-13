@@ -6,10 +6,13 @@
   "main": "dist/main.js",
   "scripts": {
     "build": "tsc",
+    "prestart": "node scripts/native-abi.cjs electron",
     "start": "node scripts/start-electron.cjs",
+    "predev": "node scripts/native-abi.cjs electron",
     "dev": "node scripts/start-electron.cjs",
+    "pretest": "node scripts/native-abi.cjs node",
     "test": "jest --forceExit",
-    "native:rebuild": "electron-rebuild -f -w better-sqlite3 -m .",
+    "native:rebuild": "node scripts/native-abi.cjs electron",
     "electron:pack": "electron-builder --win nsis",
     "build:update": "node scripts/build-update.cjs JINGLES_POS_UPDATE_URL"
   },

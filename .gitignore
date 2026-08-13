@@ -12,3 +12,4 @@ release/
 *.sqlite3
 *.log
 *.blockmap
+.native-abi-cache/
