@@ -611,12 +611,13 @@ export async function replaceLocalCatalogSnapshot(snapshot: SharedCatalogSnapsho
   await rebuildLocalCatalogSearchIndex();
 }
 
-function buildFtsQuery(query: string) {
+export function buildFtsQuery(query: string) {
   const tokens = query
     .trim()
+    .replace(/[^\p{L}\p{N}_]+/gu, ' ')
     .split(/\s+/)
     .filter(Boolean)
-    .map((token) => token.replace(/["*()\[\]{}^~?:\\]/g, '').trim())
+    .map((token) => token.trim())
     .filter(Boolean);
 
   if (tokens.length === 0) {

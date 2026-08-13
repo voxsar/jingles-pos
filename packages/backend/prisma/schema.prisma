@@ -53,7 +53,6 @@ model Category {
   sortOrder Int       @default(0)
   createdAt DateTime  @default(now())
   updatedAt DateTime  @updatedAt
-  products  Product[]
 }
 
 model Product {
@@ -61,7 +60,7 @@ model Product {
   sku             String      @unique
   name            String
   barcode         String?     @unique
-  price           Float       @default(0)
+  price           Float
   categoryId      String?
   subcategory     String      @default("")
   packSize        Int         @default(1)
@@ -74,7 +73,6 @@ model Product {
   lastVectorClock String?
   createdAt       DateTime    @default(now())
   updatedAt       DateTime    @updatedAt
-  category        Category?   @relation(fields: [categoryId], references: [id])
   batchPrices     BatchPrice[]
   saleLines       SaleLine[]
   returnLines     ReturnLine[]
@@ -84,7 +82,7 @@ model BatchPrice {
   id        String   @id
   productId String
   label     String?
-  minQty    Int      @default(0)
+  minQty    Int
   price     Float
   priority  Int      @default(0)
   isDefault Boolean  @default(false)
@@ -203,6 +201,7 @@ model Payment {
   saleId         String
   method         String
   amount         Float
+  cashReceived   Float?
   tenderedAmount Float?
   changeDue      Float?
   reference      String?
@@ -305,8 +304,8 @@ model SyncDeviceState {
   deviceId            String   @unique
   terminalId          String?
   lastSequenceNum     Int      @default(0)
-  vectorClock         String   @default("{}")
-  confirmedVectorClock String  @default("{}")
+  vectorClock         String
+  confirmedVectorClock String
   online              Boolean  @default(false)
   lastError           String?
   lastSeenAt          DateTime @default(now())

@@ -6,7 +6,7 @@
   "scripts": {
     "prepare": "tsc",
     "build": "tsc",
-    "test": "echo 'no tests in shared'"
+    "test": "tsc --noEmit"
   },
   "devDependencies": {
     "typescript": "^5.3.3"

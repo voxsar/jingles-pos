@@ -11,6 +11,9 @@ UPDATE_DIR="/var/www/federation-inventory/desktop-updates/pos"
 
 echo "=== Jingles POS Deployment ==="
 
+: "${JINGLES_POS_SYNC_APP_TOKEN:?Set JINGLES_POS_SYNC_APP_TOKEN in the shell or service environment before deploying.}"
+JINGLES_POS_UPSTREAM_URL="${JINGLES_POS_UPSTREAM_URL:-https://inv.theredsun.org}"
+
 # ── 1. Dependencies ──────────────────────────────────────────────────────────
 echo "[1/7] Installing system packages..."
 apt-get update -qq
@@ -40,13 +43,16 @@ if [ ! -f "${APP_DIR}/packages/backend/.env" ]; then
 DATABASE_URL="file:${DATA_DIR}/jingles.db"
 PORT=3001
 NODE_ENV=production
+JINGLES_POS_UPSTREAM_URL="${JINGLES_POS_UPSTREAM_URL}"
+JINGLES_POS_SYNC_APP_TOKEN="${JINGLES_POS_SYNC_APP_TOKEN}"
 EOF
 fi
 
-# Sync DATABASE_URL in ecosystem.config.js to match .env
 DB_URL=$(grep DATABASE_URL "${APP_DIR}/packages/backend/.env" | cut -d'"' -f2)
-sed -i "s|file:/var/www/federation-inventory/jingles-pos/data/jingles.db|${DB_URL#file:}|g" \
-  "${APP_DIR}/ecosystem.config.js" 2>/dev/null || true
+if [ -z "${DB_URL}" ]; then
+  echo "DATABASE_URL is missing from ${APP_DIR}/packages/backend/.env" >&2
+  exit 1
+fi
 
 # Run Prisma migrations against the existing database (safe, additive only)
 cd "${APP_DIR}/packages/backend"
@@ -96,7 +102,10 @@ nginx -t && systemctl reload nginx
 echo "[7/7] Starting backend with PM2..."
 cd "${APP_DIR}"
 pm2 delete jingles-pos-backend 2>/dev/null || true
-pm2 start ecosystem.config.js
+DATABASE_URL="${DB_URL}" \
+JINGLES_POS_UPSTREAM_URL="${JINGLES_POS_UPSTREAM_URL}" \
+JINGLES_POS_SYNC_APP_TOKEN="${JINGLES_POS_SYNC_APP_TOKEN}" \
+  pm2 start ecosystem.config.js
 pm2 save
 pm2 startup | tail -1 | bash   # enable PM2 on boot
 
@@ -110,5 +119,4 @@ echo "  DB:      ${DB_URL}"
 echo ""
 echo "  To update the database path, edit:"
 echo "    ${APP_DIR}/packages/backend/.env"
-echo "    ${APP_DIR}/ecosystem.config.js"
-echo "  Then run: pm2 restart jingles-pos-backend"
+echo "  Then restart with DATABASE_URL and JINGLES_POS_SYNC_APP_TOKEN in the environment."

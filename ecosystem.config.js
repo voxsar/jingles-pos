@@ -1,3 +1,11 @@
+const requiredEnv = (name) => {
+	const value = process.env[name]?.trim();
+	if (!value) {
+		throw new Error(`${name} must be set in the process environment before starting POS`);
+	}
+	return value;
+};
+
 module.exports = {
 	apps: [
 		{
@@ -11,10 +19,10 @@ module.exports = {
 			env: {
 				NODE_ENV: 'production',
 				PORT: 3050,
-				DATABASE_URL: 'file:/var/www/federation-inventory/jingles-pos/data/jingles.db',
+				DATABASE_URL: process.env.DATABASE_URL || 'file:/var/www/federation-inventory/jingles-pos/data/jingles.db',
 				JINGLES_POS_LOCAL_MODE: 'true',
-				JINGLES_POS_UPSTREAM_URL: 'https://inv.theredsun.org',
-				JINGLES_POS_SYNC_APP_TOKEN: 'uxo2F4ZOUgM08520vBo0hTPtTS09I50CIQbOAuZ',
+				JINGLES_POS_UPSTREAM_URL: process.env.JINGLES_POS_UPSTREAM_URL || 'https://inv.theredsun.org',
+				JINGLES_POS_SYNC_APP_TOKEN: requiredEnv('JINGLES_POS_SYNC_APP_TOKEN'),
 			},
 		},
 	],

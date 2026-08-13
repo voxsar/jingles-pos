@@ -1,6 +1,6 @@
 {
   "name": "@jingles/electron",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Offline-capable Federation Commerce point-of-sale desktop application",
   "author": "The Red Sun",
   "main": "dist/main.js",
@@ -11,7 +11,7 @@
     "predev": "node scripts/native-abi.cjs electron",
     "dev": "node scripts/start-electron.cjs",
     "pretest": "node scripts/native-abi.cjs node",
-    "test": "jest --forceExit",
+    "test": "jest",
     "native:rebuild": "node scripts/native-abi.cjs electron",
     "electron:pack": "electron-builder --win nsis",
     "build:update": "node scripts/build-update.cjs JINGLES_POS_UPDATE_URL"
@@ -59,7 +59,9 @@
       {
         "from": "../../node_modules/.prisma",
         "to": "node_modules/.prisma",
-        "filter": ["**/*"]
+        "filter": [
+          "**/*"
+        ]
       }
     ],
     "asarUnpack": [

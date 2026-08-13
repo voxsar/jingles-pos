@@ -3,6 +3,7 @@ import express from 'express';
 import authRouter from './routes/auth';
 import { getLocalPosDeviceId, getLocalPosTerminalId, isLocalPosBackendMode } from './localMode';
 import posRouter from './routes/pos';
+import prisma from './prisma';
 import { ensureSeedData } from './seed';
 import { ensureLocalCatalogSearchIndex } from './services/localCatalog';
 import { ensureLocalSchemaCompat } from './services/schemaCompat';
@@ -17,7 +18,7 @@ app.use(express.json({ limit: '2mb' }));
 
 app.get('/health', async (_req, res) => {
   try {
-    await ensureSeedData();
+    await prisma.$queryRaw`SELECT 1`;
     return res.json({ status: 'ok' });
   } catch (error) {
     console.error(error);

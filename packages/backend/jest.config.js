@@ -8,5 +8,4 @@ module.exports = {
     '^@jingles/shared$': '<rootDir>/../shared/src/index.ts',
   },
   setupFilesAfterEnv: [],
-  forceExit: true,
 };

@@ -34,6 +34,7 @@ jest.mock('../prisma', () => ({
 
 const { buildZReport, confirmPlayback, getLocalSyncStatus, getServerVectorClock } = require('../services/posSync') as typeof import('../services/posSync');
 const { authenticate, resolveUnlockMode } = require('../routes/auth') as typeof import('../routes/auth');
+const { buildFtsQuery } = require('../services/localCatalog') as typeof import('../services/localCatalog');
 const originalPosSyncAppToken = process.env.JINGLES_POS_SYNC_APP_TOKEN;
 const originalLegacyPosSyncAppToken = process.env.POS_SYNC_APP_TOKEN;
 
@@ -188,5 +189,10 @@ describe('event sourced POS backend services', () => {
       lastError: undefined,
     });
     expect(mockTx.configEntry.findUnique).not.toHaveBeenCalled();
+  });
+
+  it('sanitizes dotted local catalog FTS queries', () => {
+    expect(buildFtsQuery('1.5 mm')).toBe('1 5 mm*');
+    expect(buildFtsQuery('...')).toBe('');
   });
 });

@@ -8,5 +8,4 @@ module.exports = {
     '^@jingles/shared$': '<rootDir>/../shared/src/index.ts',
     '^electron$': '<rootDir>/src/__mocks__/electron.ts',
   },
-  forceExit: true,
 };

@@ -6,7 +6,7 @@
 		"build": "npm run prisma:generate && tsc",
 		"dev": "ts-node src/server.ts",
 		"start": "node dist/server.js",
-		"test": "jest --forceExit",
+		"test": "jest",
 		"prisma:generate": "prisma generate",
 		"prisma:migrate": "prisma migrate dev",
 		"prisma:studio": "prisma studio",
