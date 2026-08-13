@@ -164,12 +164,33 @@ export interface PaymentInput {
   metadata?: Record<string, unknown>;
 }
 
+/**
+ * How much non-cash tender the cashier is asked to declare when opening or
+ * closing a shift.
+ *
+ * - `off`       cash only, the historical behaviour.
+ * - `total`     one lump figure covering every non-cash tender.
+ * - `category`  a separate figure per payment method, so a card terminal
+ *               settlement report can be reconciled line by line.
+ */
+export type POSTenderDeclarationMode = 'off' | 'total' | 'category';
+
 export interface CashDeclaration {
   mode: CashCountMode;
   total: number;
   denominations: Record<string, number>;
   variance?: number;
+  /**
+   * Declared non-cash tender, keyed by `PaymentMethod` when the terminal
+   * declares by category, or by the single key `TOTAL` when it declares a lump
+   * sum. Absent when tender declaration is switched off.
+   */
+  tenders?: Record<string, number>;
+  tenderMode?: POSTenderDeclarationMode;
 }
+
+/** The single bucket key used when non-cash tender is declared as one figure. */
+export const TENDER_TOTAL_KEY = 'TOTAL';
 
 export interface ShiftSummary {
   id: string;
@@ -288,6 +309,9 @@ export interface ZReportSummary {
   paymentCounts: Record<string, number>;
   discountedLineCount: number;
   productCount: number;
+  /** Non-cash tender the cashier declared at close, keyed as in `CashDeclaration.tenders`. */
+  declaredTenders?: Record<string, number>;
+  declaredTenderMode?: POSTenderDeclarationMode;
 }
 
 export interface ZReportSlot {
@@ -551,6 +575,58 @@ export interface POSPrintResult {
   message?: string;
 }
 
+/** Every workstation action a terminal may bind to a key. */
+export type POSActionShortcutId =
+  | 'help'
+  | 'orders'
+  | 'search'
+  | 'hold'
+  | 'recall'
+  | 'discount'
+  | 'customer'
+  | 'pay'
+  | 'quote'
+  | 'refund'
+  | 'void'
+  | 'cashDrawer';
+
+/**
+ * A key binding, serialised as ordered modifiers followed by a `KeyboardEvent.code`,
+ * e.g. `F7`, `Escape`, `Ctrl+Digit1`, `Alt+Numpad4`. `code` rather than `key` keeps
+ * bindings stable across keyboard layouts and distinguishes the numpad, which is
+ * the row a till operator actually reaches for.
+ */
+export type POSKeyBinding = string;
+
+export type POSActionShortcuts = Record<POSActionShortcutId, POSKeyBinding>;
+
+/** A product bound to a key so it can be rung up without searching for it. */
+export interface POSQuickKey {
+  id: string;
+  binding: POSKeyBinding;
+  productId: string;
+  /** Denormalised so the settings list stays readable when the catalog is offline. */
+  sku: string;
+  label: string;
+  variantId?: string;
+}
+
+export interface POSShortcutSettings {
+  actions: POSActionShortcuts;
+  quickKeysEnabled: boolean;
+  quickKeys: POSQuickKey[];
+}
+
+export interface POSShiftReconciliationSettings {
+  tenderDeclarationMode: POSTenderDeclarationMode;
+  /** Absolute variance, in currency units, that counts as a large discrepancy. */
+  alertThresholdAmount: number;
+  /** Variance as a percentage of the expected figure that counts as a large discrepancy. */
+  alertThresholdPercent: number;
+  /** Require a manager-visible confirmation before a flagged shift can be closed. */
+  requireConfirmationOnAlert: boolean;
+}
+
 export interface POSDesktopSettings {
   syncUrl: string;
   databasePath: string;
@@ -561,7 +637,37 @@ export interface POSDesktopSettings {
   allowShortPayments: boolean;
   printers: POSPrinterConfig[];
   scanner: POSScannerSettings;
+  shortcuts: POSShortcutSettings;
+  shiftReconciliation: POSShiftReconciliationSettings;
 }
+
+export const DEFAULT_POS_ACTION_SHORTCUTS: POSActionShortcuts = {
+  help: 'F1',
+  orders: 'F2',
+  search: 'F3',
+  hold: 'F4',
+  recall: 'F5',
+  discount: 'F6',
+  customer: 'F7',
+  pay: 'F8',
+  quote: 'F9',
+  refund: 'F10',
+  void: 'Escape',
+  cashDrawer: 'F11',
+};
+
+export const DEFAULT_POS_SHORTCUT_SETTINGS: POSShortcutSettings = {
+  actions: { ...DEFAULT_POS_ACTION_SHORTCUTS },
+  quickKeysEnabled: true,
+  quickKeys: [],
+};
+
+export const DEFAULT_POS_SHIFT_RECONCILIATION: POSShiftReconciliationSettings = {
+  tenderDeclarationMode: 'off',
+  alertThresholdAmount: 500,
+  alertThresholdPercent: 2,
+  requireConfirmationOnAlert: true,
+};
 
 export const DEFAULT_POS_SCANNER_SETTINGS: POSScannerSettings = {
   enabled: true,

@@ -113,9 +113,18 @@ button {
   color: var(--ink-2);
 }
 
+/*
+ * Portalled to document.body and sized in JS. The z-index has to clear every
+ * fixed layer it can be opened over — header and action bar (12), modal
+ * overlays (20), the help lightbox (40) — so it sits below only the session
+ * lock (9999). Flex column plus min-height:0 lets the inline max-height set by
+ * the positioner squeeze the option list instead of overflowing the panel.
+ */
 .searchable-select-menu {
   position: fixed;
-  z-index: 200;
+  z-index: 900;
+  display: flex;
+  flex-direction: column;
   padding: 8px;
   border: 1px solid var(--line);
   border-radius: 12px;
@@ -124,6 +133,7 @@ button {
 }
 
 .searchable-select-search {
+  flex: 0 0 auto;
   width: 100%;
   min-height: 38px;
   padding: 8px 10px;
@@ -140,6 +150,8 @@ button {
 }
 
 .searchable-select-options {
+  flex: 1 1 auto;
+  min-height: 0;
   max-height: 260px;
   margin-top: 7px;
   overflow-y: auto;
@@ -157,8 +169,13 @@ button {
 }
 
 .searchable-select-option:hover,
+.searchable-select-option.active,
 .searchable-select-option.selected {
   background: var(--surface-control-hover);
+}
+
+.searchable-select-option.active {
+  box-shadow: inset 0 0 0 1px var(--accent);
 }
 
 .searchable-select-option.selected {
@@ -565,6 +582,36 @@ button {
 .toast-banner.success {
   background: rgba(13, 122, 91, 0.12);
   color: var(--accent);
+}
+
+.inline-alert.warning {
+  background: rgba(183, 114, 23, 0.14);
+  color: var(--warning);
+}
+
+.inline-alert.danger {
+  background: rgba(166, 65, 45, 0.14);
+  border: 1px solid rgba(166, 65, 45, 0.3);
+  color: var(--danger);
+}
+
+.inline-alert.danger b {
+  display: block;
+  margin-bottom: 6px;
+}
+
+.inline-alert.danger small {
+  display: block;
+  margin-top: 6px;
+  opacity: 0.85;
+}
+
+.discrepancy-list {
+  margin: 0;
+  padding-left: 18px;
+  font-family: var(--mono);
+  font-size: 12.5px;
+  line-height: 1.6;
 }
 
 .toast-banner {
@@ -2746,6 +2793,184 @@ button {
 
 .variance-alert {
   color: var(--danger);
+  font-weight: 700;
+}
+
+.variance-warn {
+  color: var(--warning);
+}
+
+/* Close-shift non-cash tender declaration. */
+.tender-declare {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: var(--surface-card);
+}
+
+.tender-declare-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.tender-declare-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) minmax(120px, 0.8fr) minmax(0, 1fr) minmax(90px, auto);
+  align-items: center;
+  gap: 10px;
+}
+
+.tender-declare-label {
+  font-weight: 600;
+}
+
+.tender-declare-expected,
+.tender-declare-variance {
+  font-family: var(--mono);
+  font-size: 12.5px;
+  color: var(--ink-2);
+}
+
+.tender-declare-variance {
+  text-align: right;
+}
+
+@media (max-width: 900px) {
+  .tender-declare-row {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  }
+}
+
+/* Configurable shortcuts and product quick keys. */
+.settings-card-wide {
+  grid-column: 1 / -1;
+}
+
+.settings-field-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.settings-field-row > * {
+  flex: 1;
+  min-width: 160px;
+}
+
+.theme-option-row.wrap {
+  flex-wrap: wrap;
+}
+
+.shortcut-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 10px;
+}
+
+.shortcut-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--surface-soft);
+}
+
+.shortcut-row-label {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.shortcut-row-label small {
+  color: var(--ink-2);
+  font-size: 11.5px;
+  line-height: 1.4;
+}
+
+.shortcut-conflict {
+  grid-column: 1 / -1;
+  color: var(--warning);
+  font-size: 11.5px;
+}
+
+.key-binding-input {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 4px;
+}
+
+.key-binding-button {
+  min-width: 108px;
+  padding: 7px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface-keycap);
+  color: var(--ink-0);
+  font-family: var(--mono);
+  font-size: 12.5px;
+  white-space: nowrap;
+}
+
+.key-binding-button.recording {
+  border-color: var(--accent);
+  background: rgba(13, 122, 91, 0.12);
+  color: var(--accent);
+}
+
+.key-binding-error {
+  max-width: 220px;
+  color: var(--warning);
+  font-size: 11px;
+  line-height: 1.4;
+  white-space: normal;
+}
+
+.quick-key-add {
+  display: flex;
+  align-items: flex-end;
+  gap: 10px;
+}
+
+.quick-key-add .searchable-select {
+  flex: 1;
+}
+
+.quick-key-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.quick-key-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--surface-soft);
+}
+
+.quick-key-product {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.quick-key-product small {
+  color: var(--ink-2);
+  font-family: var(--mono);
+  font-size: 11.5px;
 }
 
 .report-stat-grid {

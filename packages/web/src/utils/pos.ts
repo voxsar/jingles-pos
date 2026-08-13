@@ -2,13 +2,19 @@ import {
   CashCountMode,
   CartLine,
   CashDeclaration,
+  Customer,
+  DEFAULT_CUSTOMER_ID,
   PaymentMethod,
+  POSShiftReconciliationSettings,
+  POSTenderDeclarationMode,
   POSUser,
   Product,
   ProductPriceTier,
   ProductVariant,
   SaleSummary,
   ShiftSummary,
+  TENDER_TOTAL_KEY,
+  ZReportSummary,
 } from '@jingles/shared';
 
 export interface DenominationDefinition {
@@ -43,8 +49,153 @@ export const DENOMINATIONS: DenominationDefinition[] = [
   { value: 1, label: 'Rs 1', kind: 'coin' },
 ];
 
+/** Tender types a cashier can be asked to declare alongside the cash count. */
+export const NON_CASH_PAYMENT_METHODS: PaymentMethod[] = [
+  PaymentMethod.VISA,
+  PaymentMethod.MASTER,
+  PaymentMethod.AMEX,
+  PaymentMethod.CREDIT,
+  PaymentMethod.GIFT,
+  PaymentMethod.INSTALLMENT,
+];
+
+export const PAYMENT_METHOD_LABELS: Record<string, string> = {
+  CASH: 'Cash',
+  VISA: 'Visa',
+  MASTER: 'Master',
+  AMEX: 'Amex',
+  CREDIT: 'Credit',
+  GIFT: 'Gift voucher',
+  INSTALLMENT: 'Installment plan',
+  [TENDER_TOTAL_KEY]: 'All non-cash tender',
+};
+
 export function saleIncludesCash(sale: Pick<SaleSummary, 'payments'>): boolean {
   return sale.payments.some((payment) => payment.method === PaymentMethod.CASH);
+}
+
+/**
+ * Picks the customer a fresh bill starts on. Customers arrive sorted by name,
+ * so falling back to the first row silently opens every sale against whichever
+ * account sorts first alphabetically — a real wholesale account, with its own
+ * price tier. The seeded walk-in account is the correct default; matching on
+ * name covers installations whose walk-in row came from an upstream import and
+ * carries a different id.
+ */
+export function resolveDefaultCustomerId(customers: Customer[]): string {
+  const byId = customers.find((customer) => customer.id === DEFAULT_CUSTOMER_ID);
+  if (byId) return byId.id;
+
+  const byName = customers.find((customer) => /^walk[\s-]?in/i.test(customer.name.trim()));
+  if (byName) return byName.id;
+
+  return customers[0]?.id ?? '';
+}
+
+export interface TenderReconciliationRow {
+  key: string;
+  label: string;
+  declared: number;
+  expected: number;
+  variance: number;
+  /** True when the variance clears either configured alert threshold. */
+  flagged: boolean;
+}
+
+export interface ShiftReconciliation {
+  cash: TenderReconciliationRow;
+  tenders: TenderReconciliationRow[];
+  /** Cash plus every declared non-cash bucket. */
+  overall: TenderReconciliationRow;
+  flaggedRows: TenderReconciliationRow[];
+  hasAlert: boolean;
+}
+
+function buildReconciliationRow(
+  key: string,
+  label: string,
+  declared: number,
+  expected: number,
+  settings: POSShiftReconciliationSettings,
+): TenderReconciliationRow {
+  const variance = roundCurrency(declared - expected);
+  const magnitude = Math.abs(variance);
+  const overAmount = settings.alertThresholdAmount > 0 && magnitude >= settings.alertThresholdAmount;
+  // A percentage threshold is meaningless against a zero expectation; any money
+  // declared where none was expected is caught by the amount threshold instead.
+  const overPercent = settings.alertThresholdPercent > 0
+    && Math.abs(expected) > 0
+    && (magnitude / Math.abs(expected)) * 100 >= settings.alertThresholdPercent;
+
+  return {
+    key,
+    label,
+    declared: roundCurrency(declared),
+    expected: roundCurrency(expected),
+    variance,
+    flagged: overAmount || overPercent,
+  };
+}
+
+/**
+ * Compares what the cashier declared at close against what the transaction log
+ * says should be there. `report` is the shift's own Z-report, so "expected" is
+ * derived from recorded sales, refunds and the opening float rather than from
+ * anything the cashier typed.
+ */
+export function summarizeShiftReconciliation(
+  report: Pick<ZReportSummary, 'expectedDrawer' | 'paymentBreakdown'>,
+  declaration: Pick<CashDeclaration, 'total' | 'tenders' | 'tenderMode'>,
+  settings: POSShiftReconciliationSettings,
+): ShiftReconciliation {
+  const mode: POSTenderDeclarationMode = declaration.tenderMode ?? settings.tenderDeclarationMode;
+  const declaredTenders = declaration.tenders ?? {};
+  const expectedNonCashTotal = Object.entries(report.paymentBreakdown)
+    .filter(([method]) => method !== PaymentMethod.CASH)
+    .reduce((sum, [, amount]) => sum + amount, 0);
+
+  const cash = buildReconciliationRow(
+    PaymentMethod.CASH,
+    PAYMENT_METHOD_LABELS.CASH,
+    declaration.total,
+    report.expectedDrawer,
+    settings,
+  );
+
+  let tenders: TenderReconciliationRow[] = [];
+  if (mode === 'total') {
+    tenders = [buildReconciliationRow(
+      TENDER_TOTAL_KEY,
+      PAYMENT_METHOD_LABELS[TENDER_TOTAL_KEY],
+      declaredTenders[TENDER_TOTAL_KEY] ?? 0,
+      expectedNonCashTotal,
+      settings,
+    )];
+  } else if (mode === 'category') {
+    tenders = NON_CASH_PAYMENT_METHODS
+      .map((method) => buildReconciliationRow(
+        method,
+        PAYMENT_METHOD_LABELS[method] ?? method,
+        declaredTenders[method] ?? 0,
+        report.paymentBreakdown[method] ?? 0,
+        settings,
+      ))
+      // A tender with nothing expected and nothing declared is noise on a close screen.
+      .filter((row) => row.declared !== 0 || row.expected !== 0);
+  }
+
+  const declaredTotal = cash.declared + tenders.reduce((sum, row) => sum + row.declared, 0);
+  const expectedTotal = cash.expected + tenders.reduce((sum, row) => sum + row.expected, 0);
+  const overall = buildReconciliationRow('OVERALL', 'All declared tender', declaredTotal, expectedTotal, settings);
+  const flaggedRows = [cash, ...tenders].filter((row) => row.flagged);
+
+  return {
+    cash,
+    tenders,
+    overall,
+    flaggedRows,
+    hasAlert: flaggedRows.length > 0,
+  };
 }
 
 export function sortPriceTiers(tiers: ProductPriceTier[]): ProductPriceTier[] {
@@ -213,6 +364,7 @@ export function createEmptyDenominationCounts(): Record<string, number> {
 export function buildCashDeclaration(
   mode: CashCountMode,
   counts: Record<string, number>,
+  options: { tenders?: Record<string, number>; tenderMode?: POSTenderDeclarationMode; variance?: number } = {},
 ): CashDeclaration {
   const total = roundCurrency(
     DENOMINATIONS.reduce((sum, denomination) => {
@@ -221,10 +373,21 @@ export function buildCashDeclaration(
     }, 0),
   );
 
+  const tenderMode = options.tenderMode ?? 'off';
+  const tenders = tenderMode === 'off'
+    ? undefined
+    : Object.fromEntries(
+      Object.entries(options.tenders ?? {})
+        .map(([key, amount]) => [key, roundCurrency(Number(amount) || 0)]),
+    );
+
   return {
     mode,
     total,
     denominations: counts,
+    variance: options.variance,
+    tenders,
+    tenderMode: tenderMode === 'off' ? undefined : tenderMode,
   };
 }
 

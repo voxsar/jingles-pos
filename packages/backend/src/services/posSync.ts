@@ -330,6 +330,28 @@ async function updateDeviceState(
   });
 }
 
+/**
+ * Declared non-cash tender is optional and only present on terminals configured
+ * to collect it, so it is stored as a nullable JSON blob rather than a column
+ * per payment method. Returning null for an empty map keeps a cash-only close
+ * indistinguishable from one recorded before the feature existed.
+ */
+function serializeDeclaredTenders(
+  declaration: NonNullable<ShiftCloseInput['declaration']>,
+): { tenders: string | null; tenderMode: string | null } {
+  const entries = Object.entries(declaration.tenders ?? {})
+    .filter(([, amount]) => Number.isFinite(amount));
+
+  if (!declaration.tenderMode || entries.length === 0) {
+    return { tenders: null, tenderMode: null };
+  }
+
+  return {
+    tenders: json(Object.fromEntries(entries)),
+    tenderMode: declaration.tenderMode,
+  };
+}
+
 async function saveCashCount(
   tx: Tx,
   shiftId: string,
@@ -342,6 +364,7 @@ async function saveCashCount(
 
   const mode = declaration.mode
     ?? (idPrefix.endsWith('-closing') ? CashCountMode.CLOSING : CashCountMode.OPENING);
+  const declaredTenders = serializeDeclaredTenders(declaration);
 
   await tx.shiftCashCount.upsert({
     where: { id: `${idPrefix}-${mode}` },
@@ -352,11 +375,13 @@ async function saveCashCount(
       total: declaration.total,
       denominations: json(declaration.denominations),
       variance: declaration.variance ?? null,
+      ...declaredTenders,
     },
     update: {
       total: declaration.total,
       denominations: json(declaration.denominations),
       variance: declaration.variance ?? null,
+      ...declaredTenders,
     },
   });
 }
@@ -431,6 +456,7 @@ async function applyCashDeclaredEvent(
       total: declaration.total,
       denominations: json(declaration.denominations),
       variance: declaration.variance ?? null,
+      ...serializeDeclaredTenders(declaration),
     },
   });
 }
@@ -1800,6 +1826,26 @@ export async function syncWithUpstream(options?: {
 const zReportInclude = { cashCounts: true, sales: { include: { payments: true, returns: true, lines: true } } } as const;
 type ZReportShift = Prisma.POSShiftGetPayload<{ include: typeof zReportInclude }>;
 
+/** Reads the declared-tender blob defensively; a malformed row must not break a Z-report. */
+function parseDeclaredTenders(raw: string | null | undefined): Record<string, number> | undefined {
+  if (!raw) return undefined;
+
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return undefined;
+
+    const entries = Object.entries(parsed as Record<string, unknown>)
+      .flatMap(([key, value]): Array<[string, number]> => {
+        const amount = typeof value === 'number' ? value : Number.parseFloat(String(value));
+        return Number.isFinite(amount) ? [[key, amount]] : [];
+      });
+
+    return entries.length > 0 ? Object.fromEntries(entries) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function summarizeZShift(shift: ZReportShift): ZReportSummary {
     const shiftId = shift.id;
     const grossSales = shift.sales.reduce((sum, sale) => sum + sale.subtotal, 0);
@@ -1829,10 +1875,12 @@ function summarizeZShift(shift: ZReportShift): ZReportSummary {
       (count, sale) => count + (sale.lines ?? []).reduce((lineCount, line) => lineCount + line.quantity, 0),
       0,
     );
-    const countedDrawer = shift.cashCounts
+    const closingCount = shift.cashCounts
       .filter((item) => item.mode === CashCountMode.CLOSING)
-      .sort((left, right) => right.createdAt.getTime() - left.createdAt.getTime())[0]?.total;
+      .sort((left, right) => right.createdAt.getTime() - left.createdAt.getTime())[0];
+    const countedDrawer = closingCount?.total;
     const expectedDrawer = shift.openingFloat + (paymentBreakdown.CASH ?? 0) - refunds;
+    const declaredTenders = parseDeclaredTenders(closingCount?.tenders);
 
     return {
       shiftId,
@@ -1849,6 +1897,8 @@ function summarizeZShift(shift: ZReportShift): ZReportSummary {
       paymentCounts,
       discountedLineCount,
       productCount,
+      declaredTenders,
+      declaredTenderMode: (closingCount?.tenderMode as ZReportSummary['declaredTenderMode']) ?? undefined,
     };
 }
 

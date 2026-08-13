@@ -6,6 +6,7 @@
  * desktop app there is no bridge, so callers fall back to `window.print()`.
  */
 import type {
+  CartLine,
   POSLabelDocument,
   POSPrintBlock,
   POSPrintDocument,
@@ -23,6 +24,7 @@ import {
   formatInteger,
   formatShiftReference,
   getLineVariantSummary,
+  type CartTotals,
 } from './utils/pos';
 
 const PAYMENT_LABELS: Record<string, string> = {
@@ -227,6 +229,94 @@ export function buildReceiptDocument(
     blocks,
     // Cash on the bill is the signal to pop the drawer.
     openDrawer: sale.payments.some((payment) => payment.method === 'CASH'),
+    cut: true,
+    copies: 1,
+  };
+}
+
+/**
+ * A price quotation for the cart as it currently stands.
+ *
+ * Deliberately not a receipt: nothing is persisted, no stock moves and no
+ * payment is recorded, so the slip is labelled as a quotation and carries no
+ * receipt barcode that could be mistaken for proof of purchase at the counter.
+ */
+export function buildQuotationDocument(
+  input: {
+    lines: CartLine[];
+    totals: CartTotals;
+    reference: string;
+    cashierName: string;
+    customerName?: string;
+    validUntil?: string;
+  },
+  terminalCode: string,
+  branding: ReceiptBranding = DEFAULT_RECEIPT_BRANDING,
+): POSPrintDocument {
+  const itemCount = input.lines.reduce((sum, line) => sum + line.quantity, 0);
+
+  const blocks: POSPrintBlock[] = [
+    { type: 'text', value: branding.name, align: 'center', bold: true, wide: true },
+    ...branding.addressLines.map((line): POSPrintBlock => ({ type: 'text', value: line, align: 'center' })),
+    { type: 'text', value: 'QUOTATION', align: 'center', bold: true },
+    { type: 'text', value: 'This is not a receipt. No payment has been taken.', align: 'center' },
+    { type: 'divider' },
+    { type: 'columns', left: 'Quotation', right: input.reference },
+    { type: 'columns', left: 'Date', right: formatDateTime(new Date().toISOString()) },
+    { type: 'columns', left: 'Terminal', right: terminalCode },
+    { type: 'columns', left: 'Prepared by', right: input.cashierName },
+    { type: 'columns', left: 'Customer', right: input.customerName ?? 'Walk-in customer' },
+    { type: 'columns', left: 'Items', right: formatInteger(itemCount) },
+    { type: 'divider' },
+  ];
+
+  for (const line of input.lines) {
+    blocks.push({ type: 'text', value: line.name });
+
+    const variantSummary = getLineVariantSummary(line);
+    if (variantSummary != null) {
+      blocks.push({ type: 'text', value: `  ${variantSummary}` });
+    }
+
+    blocks.push({ type: 'text', value: `  SKU ${line.sku} - ${line.tierLabel}` });
+    blocks.push({
+      type: 'columns',
+      left: `${formatInteger(line.quantity)} x ${formatCurrency(line.unitPrice)}`,
+      right: formatCurrency(line.lineTotal),
+      indent: 2,
+    });
+
+    if (line.discountAmount > 0) {
+      blocks.push({
+        type: 'columns',
+        left: 'Discount',
+        right: `-${formatCurrency(line.discountAmount)}`,
+        indent: 2,
+      });
+    }
+  }
+
+  blocks.push(
+    { type: 'divider' },
+    { type: 'columns', left: 'Subtotal', right: formatCurrency(input.totals.rawSubtotal) },
+    { type: 'columns', left: 'Discount', right: `-${formatCurrency(input.totals.discountTotal)}` },
+    { type: 'columns', left: 'QUOTED TOTAL', right: formatCurrency(input.totals.total), bold: true },
+    { type: 'divider' },
+  );
+
+  if (input.validUntil) {
+    blocks.push({ type: 'columns', left: 'Valid until', right: input.validUntil });
+  }
+
+  blocks.push(
+    { type: 'text', value: 'Prices are subject to stock availability.', align: 'center' },
+    { type: 'feed', lines: 1 },
+  );
+
+  return {
+    title: `Quotation ${input.reference}`,
+    blocks,
+    openDrawer: false,
     cut: true,
     copies: 1,
   };

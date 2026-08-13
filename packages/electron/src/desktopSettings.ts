@@ -5,6 +5,8 @@ import { app } from 'electron';
 import {
   DEFAULT_POS_PRINTER_CONFIG,
   DEFAULT_POS_SCANNER_SETTINGS,
+  normalizeShiftReconciliation,
+  normalizeShortcutSettings,
   type POSDesktopBackupResult,
   type POSDesktopSettings,
   type POSPrinterConfig,
@@ -179,6 +181,8 @@ function toSnapshot(value: StoredDesktopSettings | null | undefined): POSDesktop
     allowShortPayments: value?.allowShortPayments === true,
     printers: normalizePrinters(value?.printers),
     scanner: normalizeScanner(value?.scanner),
+    shortcuts: normalizeShortcutSettings(value?.shortcuts),
+    shiftReconciliation: normalizeShiftReconciliation(value?.shiftReconciliation),
   };
 }
 

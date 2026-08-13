@@ -1,6 +1,8 @@
 import {
   DEFAULT_POS_PRINTER_CONFIG,
   DEFAULT_POS_SCANNER_SETTINGS,
+  DEFAULT_POS_SHIFT_RECONCILIATION,
+  DEFAULT_POS_SHORTCUT_SETTINGS,
   type POSDesktopBackupResult,
   type POSDesktopSettings,
   type POSDesktopSettingsSaveResult,
@@ -51,6 +53,12 @@ export function buildFallbackDesktopSettings(themeMode: POSThemeMode): POSDeskto
     allowShortPayments: false,
     printers: [],
     scanner: { ...DEFAULT_POS_SCANNER_SETTINGS },
+    shortcuts: {
+      ...DEFAULT_POS_SHORTCUT_SETTINGS,
+      actions: { ...DEFAULT_POS_SHORTCUT_SETTINGS.actions },
+      quickKeys: [],
+    },
+    shiftReconciliation: { ...DEFAULT_POS_SHIFT_RECONCILIATION },
   };
 }
 

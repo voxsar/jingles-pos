@@ -137,6 +137,10 @@ model ShiftCashCount {
   total          Float
   denominations  String
   variance       Float?
+  /// JSON map of declared non-cash tender, keyed by payment method or by TOTAL.
+  tenders        String?
+  /// 'total' or 'category'; null when the terminal declares cash only.
+  tenderMode     String?
   createdAt      DateTime @default(now())
   shift          POSShift @relation(fields: [shiftId], references: [id])
 }

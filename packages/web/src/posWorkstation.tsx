@@ -28,7 +28,27 @@ import {
   UserRole,
   ZReportSummary,
   ZReportSlot,
+  POSActionShortcutId,
+  POSActionShortcuts,
+  POSQuickKey,
+  POSShiftReconciliationSettings,
+  POSShortcutSettings,
+  POSTenderDeclarationMode,
+  ACTION_SHORTCUT_IDS,
+  bindingFromEvent,
+  bindingMatchesEvent,
+  createQuickKeyId,
+  formatBinding,
+  isValidQuickKeyBinding,
+  normalizeBinding,
+  normalizeShiftReconciliation,
+  normalizeShortcutSettings,
+  QUICK_KEY_BINDING_HINT,
+  TENDER_TOTAL_KEY,
+  DEFAULT_POS_ACTION_SHORTCUTS,
   DEFAULT_POS_SCANNER_SETTINGS,
+  DEFAULT_POS_SHIFT_RECONCILIATION,
+  DEFAULT_POS_SHORTCUT_SETTINGS,
   DEFAULT_TERMINAL_ID,
 } from '@jingles/shared';
 import {
@@ -50,7 +70,7 @@ import {
 } from './api';
 import { useAuth } from './auth/AuthContext';
 import HelpGuide from './help/HelpGuide';
-import SearchableSelect from './components/SearchableSelect';
+import SearchableSelect, { type SearchableSelectHandle } from './components/SearchableSelect';
 import {
   buildFallbackDesktopSettings,
   createDesktopBackup,
@@ -66,6 +86,7 @@ import {
 } from './desktopSettings';
 import {
   buildProductLabelDocument,
+  buildQuotationDocument,
   buildReceiptDocument,
   buildZReportDocument,
   discoverPrinters,
@@ -91,10 +112,16 @@ import {
   getLineVariantSummary,
   getProductVariantLabel,
   getNameInitials,
+  NON_CASH_PAYMENT_METHODS,
+  PAYMENT_METHOD_LABELS,
   pickPriceTier,
   recalculateCartLine,
+  resolveDefaultCustomerId,
   saleIncludesCash,
+  summarizeShiftReconciliation,
+  type ShiftReconciliation,
 } from './utils/pos';
+import { ACTION_SHORTCUT_HINTS, ACTION_SHORTCUT_LABELS, findShortcutConflicts } from './utils/shortcuts';
 import { useNavigate } from 'react-router-dom';
 
 type Notice = {
@@ -207,6 +234,8 @@ export default function PosWorkstation() {
   const [moneyMode, setMoneyMode] = useState<MoneyModalMode | null>(null);
   const [isZOpen, setIsZOpen] = useState(false);
   const [zReport, setZReport] = useState<ZReportSummary | null>(null);
+  const [isZReportLoading, setIsZReportLoading] = useState(false);
+  const [zReportError, setZReportError] = useState('');
   const [isReturnOpen, setIsReturnOpen] = useState(false);
   const [isOrdersOpen, setIsOrdersOpen] = useState(false);
   const [isVoidOpen, setIsVoidOpen] = useState(false);
@@ -228,12 +257,16 @@ export default function PosWorkstation() {
   const [chromeOffsets, setChromeOffsets] = useState({ top: 136, bottom: 140 });
 
   const discountInputRef = useRef<HTMLInputElement>(null);
-  const customerSelectRef = useRef<HTMLButtonElement>(null);
+  const customerSelectRef = useRef<SearchableSelectHandle>(null);
   const headerBarRef = useRef<HTMLElement>(null);
   const actionBarRef = useRef<HTMLDivElement>(null);
   const workstationGridRef = useRef<HTMLDivElement>(null);
   const controlPressCountRef = useRef(0);
   const controlPressTimerRef = useRef<number | null>(null);
+  // The window listener is installed once; shortcut dispatch is read through a
+  // ref so every keystroke sees the current cart, shift and settings without
+  // tearing down and re-adding the listener on each render.
+  const dispatchShortcutRef = useRef<(event: KeyboardEvent) => void>(() => {});
 
   const showNotice = useCallback((type: 'success' | 'error', text: string) => {
     setNotice({ type, text });
@@ -502,7 +535,10 @@ export default function PosWorkstation() {
     [activeCategoryId, categoryTiles],
   );
 
-  const selectedCustomer = customers.find((customer) => customer.id === customerId) ?? customers[0] ?? null;
+  const defaultCustomerId = useMemo(() => resolveDefaultCustomerId(customers), [customers]);
+  const selectedCustomer = customers.find((customer) => customer.id === customerId)
+    ?? customers.find((customer) => customer.id === defaultCustomerId)
+    ?? null;
 
   const defaultTierOptions = useMemo(() => {
     const labels = new Set<string>();
@@ -547,8 +583,10 @@ export default function PosWorkstation() {
         setLoadedTerminalId(resolvedTerminal?.id ?? terminalId);
         setSelectedTerminalId((previous) => previous || resolvedTerminal?.id || terminalId);
         setSelectedBranchId((previous) => previous || resolvedBranchId);
-        setCustomerId((previous) => previous || data.customers[0]?.id || '');
-        setDefaultTierLabel((previous) => previous || data.customers[0]?.tier || 'Retail');
+        const walkInId = resolveDefaultCustomerId(data.customers);
+        const walkIn = data.customers.find((customer) => customer.id === walkInId);
+        setCustomerId((previous) => previous || walkInId);
+        setDefaultTierLabel((previous) => previous || walkIn?.tier || 'Retail');
         setActiveShift(data.activeShift ?? null);
         setSyncStatus(data.syncStatus);
       } catch (error) {
@@ -617,9 +655,18 @@ export default function PosWorkstation() {
 
     setIsSettingsSaving(true);
 
+    // Half-finished quick keys — a product picked but no key recorded yet — and
+    // any binding the recorder could not validate are dropped here rather than
+    // written out, so what is stored is always what the key handler can dispatch.
+    const normalizedDraft: POSDesktopSettings = {
+      ...settingsDraft,
+      shortcuts: normalizeShortcutSettings(settingsDraft.shortcuts),
+      shiftReconciliation: normalizeShiftReconciliation(settingsDraft.shiftReconciliation),
+    };
+
     try {
       if (hasDesktopSettingsBridge()) {
-        const result = await saveDesktopSettingsToBridge(settingsDraft);
+        const result = await saveDesktopSettingsToBridge(normalizedDraft);
         setDesktopSettings(result.settings);
         setSettingsDraft(result.settings);
         setAppliedThemeMode(result.settings.themeMode);
@@ -631,10 +678,11 @@ export default function PosWorkstation() {
             : 'Settings saved.',
         );
       } else {
-        setDesktopSettings(settingsDraft);
-        setAppliedThemeMode(settingsDraft.themeMode);
+        setDesktopSettings(normalizedDraft);
+        setSettingsDraft(normalizedDraft);
+        setAppliedThemeMode(normalizedDraft.themeMode);
         // Without the desktop bridge there is nowhere to persist to, but the
-        // theme and scanner behaviour still apply for the rest of the session.
+        // theme, shortcut and scanner behaviour still apply for the rest of the session.
         showNotice('success', 'Settings applied for this browser session.');
       }
 
@@ -794,65 +842,7 @@ export default function PosWorkstation() {
         }
       }
 
-      if (event.key === 'F1') {
-        event.preventDefault();
-        setIsHelpOpen(true);
-        return;
-      }
-
-      if (session == null) {
-        return;
-      }
-
-      if (event.key === 'Escape') {
-        closeOverlayStack();
-        return;
-      }
-
-      if (event.key === 'F3') {
-        event.preventDefault();
-        setIsSearchOpen(true);
-        return;
-      }
-
-      if (event.key === 'F4') {
-        event.preventDefault();
-        setHoldMode('hold');
-        setIsHoldOpen(true);
-        return;
-      }
-
-      if (event.key === 'F5') {
-        event.preventDefault();
-        setHoldMode('recall');
-        setIsHoldOpen(true);
-        return;
-      }
-
-      if (event.key === 'F6') {
-        event.preventDefault();
-        discountInputRef.current?.focus();
-        return;
-      }
-
-      if (event.key === 'F7') {
-        event.preventDefault();
-        customerSelectRef.current?.focus();
-        return;
-      }
-
-      if (event.key === 'F8') {
-        event.preventDefault();
-        if (cart.length > 0) {
-          setIsPaymentOpen(true);
-        }
-        return;
-      }
-
-      if (event.key === 'F10') {
-        event.preventDefault();
-        setIsReturnOpen(true);
-      }
+      dispatchShortcutRef.current(event);
     };
 
     window.addEventListener('keydown', handler);
@@ -863,7 +853,7 @@ export default function PosWorkstation() {
         controlPressTimerRef.current = null;
       }
     };
-  }, [cart.length, session, showNotice]);
+  }, [session, showNotice]);
 
   const closeOverlayStack = useCallback(() => {
     setIsSearchOpen(false);
@@ -967,6 +957,12 @@ export default function PosWorkstation() {
       setDefaultTierLabel(nextCustomer.tier);
     }
   }, [customerMap]);
+
+  /** Returns a finished or abandoned bill to the walk-in account and its tier. */
+  const resetCustomerToDefault = useCallback(() => {
+    setCustomerId(defaultCustomerId);
+    setDefaultTierLabel(customerMap.get(defaultCustomerId)?.tier ?? 'Retail');
+  }, [customerMap, defaultCustomerId]);
 
   const preferredTierLabels = useMemo(() => ([
     defaultTierLabel,
@@ -1109,16 +1105,23 @@ export default function PosWorkstation() {
   }, [addProductToCart, handleProductPick, productsByScanCode, showNotice]);
 
   const scannerSettings = desktopSettings?.scanner ?? DEFAULT_POS_SCANNER_SETTINGS;
+  const shortcutSettings: POSShortcutSettings = desktopSettings?.shortcuts ?? DEFAULT_POS_SHORTCUT_SETTINGS;
+  const actionShortcuts = shortcutSettings.actions;
+  const shiftReconciliationSettings: POSShiftReconciliationSettings =
+    desktopSettings?.shiftReconciliation ?? DEFAULT_POS_SHIFT_RECONCILIATION;
 
   const hasLabelPrinter = useMemo(() => (
     (desktopSettings?.printers ?? []).some((printer) => printer.enabled && printer.role === 'label')
   ), [desktopSettings]);
 
+  const hasReceiptPrinter = useMemo(() => (
+    (desktopSettings?.printers ?? []).some((printer) => printer.enabled && printer.role === 'receipt')
+  ), [desktopSettings]);
+
   // Read inside the sale callback, so adding a printer takes effect on the next
   // sale without rebuilding the checkout handler.
   const hasReceiptPrinterRef = useRef(false);
-  hasReceiptPrinterRef.current = (desktopSettings?.printers ?? [])
-    .some((printer) => printer.enabled && printer.role === 'receipt');
+  hasReceiptPrinterRef.current = hasReceiptPrinter;
 
   useBarcodeScanner({
     // Modals with their own text entry keep the scanner out of the way; the
@@ -1185,18 +1188,19 @@ export default function PosWorkstation() {
     setVariantSelection(null);
   }, [addProductToCart, applyVariantToCartLine, variantSelection]);
 
-  const handleOpenShift = useCallback(async (counts: Record<string, number>) => {
+  const handleOpenShift = useCallback(async (submission: MoneyDeclareSubmission) => {
     if (session == null) {
       return;
     }
 
     try {
+      const declaration = buildCashDeclaration(CashCountMode.OPENING, submission.counts);
       const shift = await openShift({
         terminalId: session.terminalId,
         branchId: session.branchId,
         cashierId: session.user.id,
-        openingFloat: buildCashDeclaration(CashCountMode.OPENING, counts).total,
-        declaration: buildCashDeclaration(CashCountMode.OPENING, counts),
+        openingFloat: declaration.total,
+        declaration,
       });
 
       setActiveShift(shift);
@@ -1209,17 +1213,47 @@ export default function PosWorkstation() {
     }
   }, [refreshWorkspace, session, showNotice]);
 
-  const handleCloseShift = useCallback(async (counts: Record<string, number>) => {
+  const handleCloseShift = useCallback(async (submission: MoneyDeclareSubmission) => {
     if (session == null || activeShift == null) {
       return;
     }
 
+    const declaration = buildCashDeclaration(CashCountMode.CLOSING, submission.counts, {
+      tenders: submission.tenders,
+      tenderMode: submission.tenderMode,
+      variance: submission.variance,
+    });
+
+    // A flagged shift is still allowed to close — the cashier may genuinely be
+    // short — but the discrepancy has to be acknowledged rather than clicked past,
+    // and it is written into the shift notes so the close is auditable.
+    const reconciliation = zReport == null
+      ? null
+      : summarizeShiftReconciliation(zReport, declaration, shiftReconciliationSettings);
+    let notes: string | undefined;
+
+    if (reconciliation?.hasAlert) {
+      const detail = reconciliation.flaggedRows
+        .map((row) => `${row.label}: declared ${formatCurrency(row.declared)} vs ${formatCurrency(row.expected)} expected (${formatCurrency(row.variance)})`)
+        .join('\n');
+      notes = `Closed with a flagged discrepancy:\n${detail}`;
+
+      if (shiftReconciliationSettings.requireConfirmationOnAlert) {
+        const confirmed = window.confirm(
+          `This declaration does not match the transaction log:\n\n${detail}\n\nClose the shift anyway? The discrepancy will be recorded against it.`,
+        );
+        if (!confirmed) {
+          return;
+        }
+      }
+    }
+
     try {
-      const declaration = buildCashDeclaration(CashCountMode.CLOSING, counts);
       await closeShift({
         shiftId: activeShift.id,
         terminalId: session.terminalId,
         closingFloat: declaration.total,
+        notes,
         declaration,
       });
 
@@ -1235,7 +1269,7 @@ export default function PosWorkstation() {
       const message = error instanceof Error ? error.message : 'Failed to close shift';
       showNotice('error', message);
     }
-  }, [activeShift, refreshWorkspace, session, showNotice]);
+  }, [activeShift, refreshWorkspace, session, shiftReconciliationSettings, showNotice, zReport]);
 
   const handleOpenHoldModal = useCallback((mode: HoldMode) => {
     setHoldMode(mode);
@@ -1267,6 +1301,7 @@ export default function PosWorkstation() {
       setCart([]);
       setBillDiscount(0);
       setActiveHeldSaleId(null);
+      resetCustomerToDefault();
       setBootstrapData((previous) => previous
         ? { ...previous, heldSales: [heldSale, ...previous.heldSales.filter((sale) => sale.id !== heldSale.id)] }
         : previous);
@@ -1276,7 +1311,7 @@ export default function PosWorkstation() {
       const message = error instanceof Error ? error.message : 'Failed to hold bill';
       showNotice('error', message);
     }
-  }, [billDiscount, cart, refreshWorkspace, selectedCustomer?.id, session, showNotice, terminals, totals.rawSubtotal, totals.total]);
+  }, [billDiscount, cart, refreshWorkspace, resetCustomerToDefault, selectedCustomer?.id, session, showNotice, terminals, totals.rawSubtotal, totals.total]);
 
   const handleRecallHeldSale = useCallback(async (heldSale: HeldSaleSummary) => {
     const fallbackSalesperson = salespeople[0] ?? users[0];
@@ -1325,7 +1360,7 @@ export default function PosWorkstation() {
       });
 
       setCart(restoredCart);
-      setCustomerId(recalled.customerId ?? customers[0]?.id ?? '');
+      setCustomerId(recalled.customerId ?? defaultCustomerId);
       setBillDiscount(recalled.discountTotal);
       setActiveHeldSaleId(recalled.id);
       setIsHoldOpen(false);
@@ -1376,6 +1411,9 @@ export default function PosWorkstation() {
       setCart([]);
       setBillDiscount(0);
       setActiveHeldSaleId(null);
+      // Leaving the last customer selected would quietly bill the next walk-in
+      // against their account, and price the next bill at their tier.
+      resetCustomerToDefault();
       showNotice('success', `Sale ${sale.receiptNumber} completed.`);
 
       // Push the receipt at a configured printer without stealing the screen
@@ -1401,6 +1439,7 @@ export default function PosWorkstation() {
     activeShift,
     cart,
     refreshWorkspace,
+    resetCustomerToDefault,
     selectedCustomer?.id,
     session,
     showNotice,
@@ -1471,21 +1510,238 @@ export default function PosWorkstation() {
     }
   }, [refreshWorkspace, showNotice]);
 
-  const handleOpenZReport = useCallback(async () => {
-    setIsZOpen(true);
-    if (activeShift == null) return;
+  /**
+   * Rebuilds the active shift's Z-report, which is the authority on what the
+   * drawer and each tender should hold. Both the Z-report window and the close
+   * declaration need it: without it the close screen has nothing to reconcile a
+   * cash count against, which is how a short drawer used to close unnoticed.
+   */
+  const refreshZReport = useCallback(async () => {
+    if (activeShift == null) {
+      setZReport(null);
+      setZReportError('');
+      return null;
+    }
+
+    setIsZReportLoading(true);
+    setZReportError('');
     try {
-      setZReport(await getZReport(activeShift.id));
+      const report = await getZReport(activeShift.id);
+      setZReport(report);
+      return report;
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to build the current Z-report';
-      showNotice('error', message);
+      setZReport(null);
+      setZReportError(message);
+      return null;
+    } finally {
+      setIsZReportLoading(false);
     }
-  }, [activeShift, showNotice]);
+  }, [activeShift]);
+
+  const handleOpenZReport = useCallback(async () => {
+    setIsZOpen(true);
+    const report = await refreshZReport();
+    if (report == null && activeShift != null) {
+      showNotice('error', 'Failed to build the current Z-report.');
+    }
+  }, [activeShift, refreshZReport, showNotice]);
+
+  const handleOpenMoneyModal = useCallback(() => {
+    const nextMode: MoneyModalMode = activeShift == null ? 'open' : 'close';
+    setMoneyMode(nextMode);
+    if (nextMode === 'close') {
+      void refreshZReport();
+    }
+  }, [activeShift, refreshZReport]);
 
   const terminalCode = resolveTerminalCode(terminals, currentTerminalId);
   const terminalName = terminals.find((terminal) => terminal.id === currentTerminalId)?.name ?? 'POS Terminal';
   const sessionUser = session ? userMap.get(session.user.id) ?? session.user : null;
   const canTakePayment = cart.length > 0 && activeShift != null;
+
+  const handlePrintQuotation = useCallback(async () => {
+    if (cart.length === 0) {
+      showNotice('error', 'Add items to the cart before printing a quotation.');
+      return;
+    }
+
+    const reference = `Q-${generateHoldNumber(terminalCode).replace(/^H-/, '')}`;
+    const result = await printReceiptDocument(
+      buildQuotationDocument(
+        {
+          lines: cart,
+          totals,
+          reference,
+          cashierName: sessionUser?.name ?? session?.user.name ?? 'Cashier',
+          customerName: selectedCustomer?.name,
+        },
+        terminalCode,
+      ),
+    );
+
+    if (result.ok) {
+      showNotice('success', `Quotation ${reference} printed.`);
+    } else {
+      showNotice('error', result.message ?? 'Failed to print the quotation.');
+    }
+  }, [cart, selectedCustomer?.name, session?.user.name, sessionUser?.name, showNotice, terminalCode, totals]);
+
+  /**
+   * True when anything is layered over the workstation. Escape must dismiss the
+   * overlay stack before it is allowed to reach the action bound to it, so the
+   * default Escape/Void binding cannot void a bill from behind a payment window.
+   */
+  const isOverlayOpen = isSearchOpen
+    || isHelpOpen
+    || isPaymentOpen
+    || isHoldOpen
+    || isZOpen
+    || isReturnOpen
+    || isOrdersOpen
+    || isVoidOpen
+    || isSettingsOpen
+    || moneyMode != null
+    || variantSelection != null
+    || receiptSale != null;
+
+  /** Single entry point for every action bar button and its key binding. */
+  const runAction = useCallback((action: POSActionShortcutId) => {
+    switch (action) {
+      case 'help':
+        setIsHelpOpen(true);
+        return;
+      case 'orders':
+        setIsOrdersOpen(true);
+        return;
+      case 'search':
+        setIsSearchOpen(true);
+        return;
+      case 'hold':
+        if (cart.length === 0) {
+          showNotice('error', 'Add items to the cart before holding the bill.');
+          return;
+        }
+        handleOpenHoldModal('hold');
+        return;
+      case 'recall':
+        handleOpenHoldModal('recall');
+        return;
+      case 'discount':
+        discountInputRef.current?.focus();
+        discountInputRef.current?.select();
+        return;
+      case 'customer':
+        // Focusing the trigger alone reads as a dead button; the operator
+        // pressed this to pick a customer, so open the list on the search box.
+        customerSelectRef.current?.open();
+        return;
+      case 'pay':
+        if (cart.length === 0) {
+          showNotice('error', 'Cart is empty.');
+          return;
+        }
+        if (activeShift == null) {
+          showNotice('error', 'Open a shift before taking payment.');
+          return;
+        }
+        setIsPaymentOpen(true);
+        return;
+      case 'quote':
+        void handlePrintQuotation();
+        return;
+      case 'refund':
+        setIsReturnOpen(true);
+        return;
+      case 'void':
+        if (cart.length === 0) {
+          showNotice('error', 'There is nothing to void.');
+          return;
+        }
+        setVoidLineId(null);
+        setIsVoidOpen(true);
+        return;
+      case 'cashDrawer':
+        handleOpenMoneyModal();
+        return;
+      default:
+        return;
+    }
+  }, [activeShift, cart.length, handleOpenHoldModal, handleOpenMoneyModal, handlePrintQuotation, showNotice]);
+
+  const quickKeyProducts = useMemo(() => {
+    const byId = new Map(products.map((product) => [product.id, product]));
+    return shortcutSettings.quickKeys.map((quickKey) => ({
+      quickKey,
+      product: byId.get(quickKey.productId) ?? null,
+    }));
+  }, [products, shortcutSettings.quickKeys]);
+
+  const dispatchShortcut = useCallback((event: KeyboardEvent) => {
+    const binding = bindingFromEvent(event);
+    if (binding == null) return;
+
+    const isPlainKey = !event.ctrlKey && !event.altKey && !event.metaKey && !/^F\d{1,2}$/.test(event.code);
+    const target = event.target as HTMLElement | null;
+    const isTyping = target instanceof HTMLInputElement
+      || target instanceof HTMLTextAreaElement
+      || target?.isContentEditable === true;
+
+    if (event.key === 'Escape') {
+      // Let a picker or modal close itself first; only a bare workstation
+      // Escape falls through to whatever action is bound to the key.
+      if (isOverlayOpen) {
+        event.preventDefault();
+        closeOverlayStack();
+        return;
+      }
+    } else if (isPlainKey && isTyping) {
+      // An unmodified key rebound onto an action must not hijack typing.
+      return;
+    }
+
+    if (bindingMatchesEvent(actionShortcuts.help, event)) {
+      event.preventDefault();
+      runAction('help');
+      return;
+    }
+
+    if (session == null) return;
+
+    for (const action of ACTION_SHORTCUT_IDS) {
+      if (action === 'help') continue;
+      if (!bindingMatchesEvent(actionShortcuts[action], event)) continue;
+      event.preventDefault();
+      runAction(action);
+      return;
+    }
+
+    if (!shortcutSettings.quickKeysEnabled || isOverlayOpen) return;
+
+    const match = quickKeyProducts.find(({ quickKey }) => bindingMatchesEvent(quickKey.binding, event));
+    if (match == null) return;
+
+    event.preventDefault();
+    if (match.product == null) {
+      showNotice('error', `Quick key ${formatBinding(match.quickKey.binding)} points at a product that is no longer in the catalog.`);
+      return;
+    }
+
+    handleProductPick(match.product);
+  }, [
+    actionShortcuts,
+    closeOverlayStack,
+    handleProductPick,
+    isOverlayOpen,
+    quickKeyProducts,
+    runAction,
+    session,
+    shortcutSettings.quickKeysEnabled,
+    showNotice,
+  ]);
+
+  dispatchShortcutRef.current = dispatchShortcut;
+
   const workstationLayoutStyle = useMemo(
     () => ({
       '--catalog-pane-width': String(catalogPaneWidth),
@@ -1562,7 +1818,7 @@ export default function PosWorkstation() {
         conflictCount={syncStatus?.conflictCount ?? 0}
         elementRef={headerBarRef}
         isSyncing={isSyncing}
-        onCashAction={() => setMoneyMode(activeShift == null ? 'open' : 'close')}
+        onCashAction={handleOpenMoneyModal}
         onOpenHelp={() => setIsHelpOpen(true)}
         onOpenOrders={() => setIsOrdersOpen(true)}
         onOpenSettings={() => void handleOpenSettings()}
@@ -1691,20 +1947,11 @@ export default function PosWorkstation() {
 
       <ActionBar
         canTakePayment={canTakePayment}
+        cartItemCount={cart.length}
         elementRef={actionBarRef}
-        onCashAction={() => setMoneyMode(activeShift == null ? 'open' : 'close')}
-        onCustomer={() => customerSelectRef.current?.focus()}
-        onDiscount={() => discountInputRef.current?.focus()}
-        onHold={() => handleOpenHoldModal('hold')}
-        onPay={() => setIsPaymentOpen(true)}
-        onQuote={() => handleOpenHoldModal('hold')}
-        onRecall={() => handleOpenHoldModal('recall')}
-        onRefund={() => setIsReturnOpen(true)}
-        onSearch={() => setIsSearchOpen(true)}
-        onVoid={() => {
-          setVoidLineId(null);
-          setIsVoidOpen(true);
-        }}
+        hasReceiptPrinter={hasReceiptPrinter}
+        onAction={runAction}
+        shortcuts={actionShortcuts}
         total={totals.total}
       />
 
@@ -1750,6 +1997,7 @@ export default function PosWorkstation() {
           }}
           onDraftChange={setSettingsDraft}
           onSave={() => void handleSaveSettings()}
+          products={products}
         />
       )}
 
@@ -1777,14 +2025,18 @@ export default function PosWorkstation() {
 
       {moneyMode != null && (
         <MoneyDeclareModal
-          expectedDrawer={moneyMode === 'close' && !hideCashSales ? zReport?.expectedDrawer : undefined}
+          cashSalesHidden={hideCashSales}
+          isReportLoading={isZReportLoading}
           mode={moneyMode}
+          report={moneyMode === 'close' ? zReport : null}
+          reportError={moneyMode === 'close' ? zReportError : ''}
+          settings={shiftReconciliationSettings}
           onClose={() => setMoneyMode(null)}
-          onSubmit={(counts) => {
+          onSubmit={(submission) => {
             if (moneyMode === 'open') {
-              void handleOpenShift(counts);
+              void handleOpenShift(submission);
             } else {
-              void handleCloseShift(counts);
+              void handleCloseShift(submission);
             }
           }}
         />
@@ -1844,6 +2096,7 @@ export default function PosWorkstation() {
               setCart([]);
               setBillDiscount(0);
               setActiveHeldSaleId(null);
+              resetCustomerToDefault();
               showNotice('success', 'Current sale cleared.');
             } else {
               setCart((previous) => previous.filter((line) => line.uid !== voidLineId));
@@ -2352,7 +2605,7 @@ type CartPanelProps = {
   billDiscount: number;
   cart: CartLine[];
   customerId: string;
-  customerSelectRef: React.RefObject<HTMLButtonElement>;
+  customerSelectRef: React.RefObject<SearchableSelectHandle>;
   customers: Customer[];
   defaultTierLabel: string;
   defaultTierOptions: string[];
@@ -2551,33 +2804,53 @@ function CartPanel(props: CartPanelProps) {
 
 type ActionBarProps = {
   canTakePayment: boolean;
+  cartItemCount: number;
   elementRef?: React.Ref<HTMLDivElement>;
-  onCashAction: () => void;
-  onCustomer: () => void;
-  onDiscount: () => void;
-  onHold: () => void;
-  onPay: () => void;
-  onQuote: () => void;
-  onRecall: () => void;
-  onRefund: () => void;
-  onSearch: () => void;
-  onVoid: () => void;
+  hasReceiptPrinter: boolean;
+  shortcuts: POSActionShortcuts;
+  onAction: (action: POSActionShortcutId) => void;
   total: number;
 };
 
+/**
+ * Every button here dispatches through the same `onAction` the key bindings use,
+ * so a button and its shortcut can never drift apart, and the key cap always
+ * shows the binding actually in force rather than a hard-coded default.
+ */
 function ActionBar(props: ActionBarProps) {
+  const button = (
+    action: POSActionShortcutId,
+    label: string,
+    options: { primary?: boolean; danger?: boolean; disabled?: boolean; title?: string } = {},
+  ) => (
+    <ActionButton
+      shortcut={formatBinding(props.shortcuts[action])}
+      label={label}
+      onClick={() => props.onAction(action)}
+      title={options.title ?? ACTION_SHORTCUT_HINTS[action]}
+      primary={options.primary}
+      danger={options.danger}
+      disabled={options.disabled}
+    />
+  );
+
   return (
     <div ref={props.elementRef} className="glass-bar action-bar">
-      <ActionButton shortcut="F3" label="Search" onClick={props.onSearch} />
-      <ActionButton shortcut="F4" label="Hold" onClick={props.onHold} />
-      <ActionButton shortcut="F5" label="Recall" onClick={props.onRecall} />
-      <ActionButton shortcut="F6" label="Discount" onClick={props.onDiscount} />
-      <ActionButton shortcut="F7" label="Customer" onClick={props.onCustomer} />
-      <ActionButton shortcut="F8" label={`Pay - ${formatCurrency(props.total)}`} onClick={props.onPay} primary disabled={!props.canTakePayment} />
-      <ActionButton shortcut="F9" label="Quote" onClick={props.onQuote} />
-      <ActionButton shortcut="F10" label="Refund" onClick={props.onRefund} />
-      <ActionButton shortcut="Esc" label="Void" onClick={props.onVoid} danger />
-      <ActionButton shortcut="CA" label="Cash drawer" onClick={props.onCashAction} />
+      {button('search', 'Search')}
+      {button('hold', 'Hold', { disabled: props.cartItemCount === 0 })}
+      {button('recall', 'Recall')}
+      {button('discount', 'Discount')}
+      {button('customer', 'Customer')}
+      {button('pay', `Pay - ${formatCurrency(props.total)}`, { primary: true, disabled: !props.canTakePayment })}
+      {button('quote', 'Quote', {
+        disabled: props.cartItemCount === 0,
+        title: props.hasReceiptPrinter
+          ? ACTION_SHORTCUT_HINTS.quote
+          : `${ACTION_SHORTCUT_HINTS.quote} No receipt printer is configured, so this opens the system print dialog.`,
+      })}
+      {button('refund', 'Refund')}
+      {button('void', 'Void', { danger: true, disabled: props.cartItemCount === 0 })}
+      {button('cashDrawer', 'Cash drawer')}
     </div>
   );
 }
@@ -2590,6 +2863,7 @@ function ActionButton(
     disabled?: boolean;
     primary?: boolean;
     danger?: boolean;
+    title?: string;
   },
 ) {
   return (
@@ -2597,6 +2871,7 @@ function ActionButton(
       className={`action-button ${props.primary ? 'primary' : ''} ${props.danger ? 'danger' : ''}`}
       disabled={props.disabled}
       onClick={props.onClick}
+      title={props.title}
     >
       <span className="action-button-line">
         <b>{props.shortcut}</b>
@@ -2662,6 +2937,7 @@ function SettingsModal(
     onDraftChange: React.Dispatch<React.SetStateAction<POSDesktopSettings | null>>;
     onSave: () => void;
     hasPrintingBridge: boolean;
+    products: Product[];
   },
 ) {
   const settings = props.draft;
@@ -2857,12 +3133,25 @@ function SettingsModal(
                 </label>
               </section>
 
+              <ShiftReconciliationCard
+                disabled={props.isSaving}
+                settings={settings.shiftReconciliation}
+                onChange={(shiftReconciliation) => updateDraft('shiftReconciliation', shiftReconciliation)}
+              />
+
               <ScannerSettingsCard
                 disabled={props.isSaving}
                 scanner={settings.scanner}
                 onChange={(scanner) => updateDraft('scanner', scanner)}
               />
             </div>
+
+            <ShortcutSettingsCard
+              disabled={props.isSaving}
+              products={props.products}
+              shortcuts={settings.shortcuts}
+              onChange={(shortcuts) => updateDraft('shortcuts', shortcuts)}
+            />
 
             <PrinterSettingsCard
               disabled={props.isSaving}
@@ -2883,6 +3172,367 @@ function SettingsModal(
         )}
       </div>
     </ModalShell>
+  );
+}
+
+/**
+ * Records the next keystroke as a binding.
+ *
+ * Capture is done on the window during the capture phase so the recorder sees
+ * keys the workstation would otherwise swallow — F-keys, Escape, and the
+ * browser's own Ctrl combinations — and so a shortcut being rebound cannot fire
+ * its action while it is being recorded.
+ */
+function KeyBindingInput(
+  props: {
+    value: string;
+    onChange: (binding: string) => void;
+    disabled?: boolean;
+    ariaLabel: string;
+    /** Rejects bindings a barcode scanner could imitate. */
+    requireModifier?: boolean;
+    onReset?: () => void;
+  },
+) {
+  const [isRecording, setIsRecording] = useState(false);
+  const [rejected, setRejected] = useState('');
+
+  useEffect(() => {
+    if (!isRecording) return undefined;
+
+    const capture = (event: KeyboardEvent) => {
+      const binding = bindingFromEvent(event);
+      if (binding == null) {
+        // Only modifiers held so far; keep waiting for the real key.
+        return;
+      }
+
+      event.preventDefault();
+      event.stopPropagation();
+
+      if (event.code === 'Backspace' || event.code === 'Delete') {
+        setIsRecording(false);
+        setRejected('');
+        props.onReset?.();
+        return;
+      }
+
+      if (props.requireModifier && !isValidQuickKeyBinding(binding)) {
+        setRejected(QUICK_KEY_BINDING_HINT);
+        return;
+      }
+
+      setIsRecording(false);
+      setRejected('');
+      props.onChange(binding);
+    };
+
+    window.addEventListener('keydown', capture, true);
+    return () => window.removeEventListener('keydown', capture, true);
+  }, [isRecording, props]);
+
+  return (
+    <span className="key-binding-input">
+      <button
+        type="button"
+        className={`key-binding-button ${isRecording ? 'recording' : ''}`}
+        disabled={props.disabled}
+        aria-label={props.ariaLabel}
+        onClick={() => {
+          setRejected('');
+          setIsRecording((current) => !current);
+        }}
+        onBlur={() => setIsRecording(false)}
+      >
+        {isRecording ? 'Press a key...' : formatBinding(props.value)}
+      </button>
+      {rejected !== '' && <small className="key-binding-error">{rejected}</small>}
+    </span>
+  );
+}
+
+function ShiftReconciliationCard(
+  props: {
+    disabled: boolean;
+    settings: POSShiftReconciliationSettings;
+    onChange: (settings: POSShiftReconciliationSettings) => void;
+  },
+) {
+  const update = <K extends keyof POSShiftReconciliationSettings>(
+    key: K,
+    value: POSShiftReconciliationSettings[K],
+  ) => {
+    props.onChange({ ...props.settings, [key]: value });
+  };
+
+  const modes: Array<{ value: POSTenderDeclarationMode; title: string; copy: string }> = [
+    { value: 'off', title: 'Cash only', copy: 'Count the drawer and nothing else.' },
+    { value: 'total', title: 'One non-cash total', copy: 'Declare all card and other tender as a single figure.' },
+    { value: 'category', title: 'By payment type', copy: 'Declare Visa, Master, Amex, credit, vouchers and installments separately.' },
+  ];
+
+  return (
+    <section className="settings-card">
+      <div className="settings-card-head">
+        <div>
+          <div className="section-kicker">Shift</div>
+          <div className="section-title">Close-out reconciliation</div>
+        </div>
+        <div className="report-chip mono">Checked against the transaction log</div>
+      </div>
+
+      <div className="meta-label">Tender declared at close</div>
+      <div className="theme-option-row wrap">
+        {modes.map((mode) => (
+          <button
+            key={mode.value}
+            className={`theme-option ${props.settings.tenderDeclarationMode === mode.value ? 'active' : ''}`}
+            disabled={props.disabled}
+            onClick={() => update('tenderDeclarationMode', mode.value)}
+          >
+            <span className="theme-option-title">{mode.title}</span>
+            <span className="theme-option-copy">{mode.copy}</span>
+          </button>
+        ))}
+      </div>
+
+      <div className="settings-field-row">
+        <LabelBlock label="Alert above variance of">
+          <input
+            className="glass-input compact"
+            type="number"
+            min={0}
+            step={1}
+            disabled={props.disabled}
+            value={props.settings.alertThresholdAmount}
+            onChange={(event) => update('alertThresholdAmount', Math.max(0, Number(event.target.value) || 0))}
+          />
+        </LabelBlock>
+        <LabelBlock label="Or above percentage of">
+          <input
+            className="glass-input compact"
+            type="number"
+            min={0}
+            max={100}
+            step={0.5}
+            disabled={props.disabled}
+            value={props.settings.alertThresholdPercent}
+            onChange={(event) => update('alertThresholdPercent', Math.min(100, Math.max(0, Number(event.target.value) || 0)))}
+          />
+        </LabelBlock>
+      </div>
+
+      <div className="field-hint">
+        A declaration is flagged when it differs from the expected figure by either threshold. Set a
+        threshold to 0 to switch that check off.
+      </div>
+
+      <label className="settings-checkbox-row admin-setting-row">
+        <input
+          type="checkbox"
+          disabled={props.disabled}
+          checked={props.settings.requireConfirmationOnAlert}
+          onChange={(event) => update('requireConfirmationOnAlert', event.target.checked)}
+        />
+        <span>
+          <b>Confirm before closing a flagged shift</b>
+          <small>The cashier must acknowledge the discrepancy, and it is recorded against the shift either way.</small>
+        </span>
+      </label>
+    </section>
+  );
+}
+
+function ShortcutSettingsCard(
+  props: {
+    disabled: boolean;
+    products: Product[];
+    shortcuts: POSShortcutSettings;
+    onChange: (shortcuts: POSShortcutSettings) => void;
+  },
+) {
+  const [quickKeyProductId, setQuickKeyProductId] = useState('');
+  const conflicts = useMemo(
+    () => findShortcutConflicts(props.shortcuts.actions, props.shortcuts.quickKeys),
+    [props.shortcuts.actions, props.shortcuts.quickKeys],
+  );
+
+  const productOptions = useMemo(
+    () => props.products.slice(0, 500).map((product) => ({
+      value: product.id,
+      label: `${product.sku} - ${product.name}`,
+    })),
+    [props.products],
+  );
+
+  const setAction = (action: POSActionShortcutId, binding: string) => {
+    props.onChange({
+      ...props.shortcuts,
+      actions: { ...props.shortcuts.actions, [action]: binding },
+    });
+  };
+
+  const addQuickKey = () => {
+    const product = props.products.find((candidate) => candidate.id === quickKeyProductId);
+    if (product == null) return;
+
+    props.onChange({
+      ...props.shortcuts,
+      quickKeys: [
+        ...props.shortcuts.quickKeys,
+        {
+          id: createQuickKeyId(),
+          binding: '',
+          productId: product.id,
+          sku: product.sku,
+          label: product.name,
+        },
+      ],
+    });
+    setQuickKeyProductId('');
+  };
+
+  const updateQuickKey = (id: string, changes: Partial<POSQuickKey>) => {
+    props.onChange({
+      ...props.shortcuts,
+      quickKeys: props.shortcuts.quickKeys.map((quickKey) => (
+        quickKey.id === id ? { ...quickKey, ...changes } : quickKey
+      )),
+    });
+  };
+
+  const removeQuickKey = (id: string) => {
+    props.onChange({
+      ...props.shortcuts,
+      quickKeys: props.shortcuts.quickKeys.filter((quickKey) => quickKey.id !== id),
+    });
+  };
+
+  const conflictNote = (binding: string) => {
+    const normalized = normalizeBinding(binding);
+    const claimants = normalized == null ? undefined : conflicts.get(normalized);
+    return claimants == null ? null : `Also used by ${claimants.join(', ')}`;
+  };
+
+  return (
+    <section className="settings-card settings-card-wide">
+      <div className="settings-card-head">
+        <div>
+          <div className="section-kicker">Keyboard</div>
+          <div className="section-title">Shortcuts and product quick keys</div>
+        </div>
+        <div className="report-chip mono">Per workstation</div>
+      </div>
+
+      <div className="meta-label">Action bar</div>
+      <div className="shortcut-grid">
+        {ACTION_SHORTCUT_IDS.map((action) => {
+          const note = conflictNote(props.shortcuts.actions[action]);
+          return (
+            <div className="shortcut-row" key={action}>
+              <span className="shortcut-row-label">
+                <b>{ACTION_SHORTCUT_LABELS[action]}</b>
+                <small>{ACTION_SHORTCUT_HINTS[action]}</small>
+              </span>
+              <KeyBindingInput
+                ariaLabel={`Shortcut for ${ACTION_SHORTCUT_LABELS[action]}`}
+                disabled={props.disabled}
+                value={props.shortcuts.actions[action]}
+                onChange={(binding) => setAction(action, binding)}
+                onReset={() => setAction(action, DEFAULT_POS_ACTION_SHORTCUTS[action])}
+              />
+              {note != null && <small className="shortcut-conflict">{note}</small>}
+            </div>
+          );
+        })}
+      </div>
+
+      <div className="settings-inline-actions">
+        <button
+          className="ghost-button"
+          disabled={props.disabled}
+          onClick={() => props.onChange({ ...props.shortcuts, actions: { ...DEFAULT_POS_ACTION_SHORTCUTS } })}
+        >
+          Restore default shortcuts
+        </button>
+      </div>
+
+      <div className="field-hint">
+        While recording, press Backspace to restore the default. Escape stays bound to closing whatever
+        window is open before it reaches the action assigned to it.
+      </div>
+
+      <label className="settings-checkbox-row">
+        <input
+          type="checkbox"
+          disabled={props.disabled}
+          checked={props.shortcuts.quickKeysEnabled}
+          onChange={(event) => props.onChange({ ...props.shortcuts, quickKeysEnabled: event.target.checked })}
+        />
+        <span>
+          <b>Enable product quick keys</b>
+          <small>Ring up a bound product straight into the cart without searching for it.</small>
+        </span>
+      </label>
+
+      <div className="quick-key-add">
+        <SearchableSelect
+          className="glass-input compact"
+          value={quickKeyProductId}
+          onChange={setQuickKeyProductId}
+          options={productOptions}
+          disabled={props.disabled || !props.shortcuts.quickKeysEnabled}
+          placeholder="Choose a product..."
+          ariaLabel="Quick key product"
+        />
+        <button
+          className="ghost-button"
+          disabled={props.disabled || !props.shortcuts.quickKeysEnabled || quickKeyProductId === ''}
+          onClick={addQuickKey}
+        >
+          Add quick key
+        </button>
+      </div>
+
+      {props.shortcuts.quickKeys.length === 0 ? (
+        <div className="field-hint">No quick keys are bound on this workstation yet.</div>
+      ) : (
+        <div className="quick-key-list">
+          {props.shortcuts.quickKeys.map((quickKey) => {
+            const note = conflictNote(quickKey.binding);
+            const isUnbound = !isValidQuickKeyBinding(quickKey.binding);
+            return (
+              <div className="quick-key-row" key={quickKey.id}>
+                <KeyBindingInput
+                  ariaLabel={`Quick key for ${quickKey.label || quickKey.sku}`}
+                  disabled={props.disabled || !props.shortcuts.quickKeysEnabled}
+                  requireModifier
+                  value={quickKey.binding}
+                  onChange={(binding) => updateQuickKey(quickKey.id, { binding })}
+                  onReset={() => updateQuickKey(quickKey.id, { binding: '' })}
+                />
+                <span className="quick-key-product">
+                  <b>{quickKey.label || quickKey.sku}</b>
+                  <small>{quickKey.sku}</small>
+                </span>
+                {isUnbound && <small className="shortcut-conflict">Not saved until a key is assigned</small>}
+                {note != null && <small className="shortcut-conflict">{note}</small>}
+                <button
+                  className="line-remove"
+                  aria-label={`Remove quick key for ${quickKey.label || quickKey.sku}`}
+                  disabled={props.disabled}
+                  onClick={() => removeQuickKey(quickKey.id)}
+                >
+                  x
+                </button>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      <div className="field-hint">{QUICK_KEY_BINDING_HINT}</div>
+    </section>
   );
 }
 
@@ -4209,27 +4859,75 @@ function HoldRecallModal(
   );
 }
 
+type MoneyDeclareSubmission = {
+  counts: Record<string, number>;
+  tenders: Record<string, number>;
+  tenderMode: POSTenderDeclarationMode;
+  /** Cash variance against the transaction log, recorded with the declaration. */
+  variance?: number;
+};
+
 function MoneyDeclareModal(
   props: {
-    expectedDrawer?: number;
+    cashSalesHidden: boolean;
     mode: MoneyModalMode;
+    report: ZReportSummary | null;
+    reportError: string;
+    isReportLoading: boolean;
+    settings: POSShiftReconciliationSettings;
     onClose: () => void;
-    onSubmit: (counts: Record<string, number>) => void;
+    onSubmit: (submission: MoneyDeclareSubmission) => void;
   },
 ) {
   const [counts, setCounts] = useState<Record<string, number>>(() => createEmptyDenominationCounts());
-  const total = useMemo(
+  const [tenders, setTenders] = useState<Record<string, number>>({});
+  const isClosing = props.mode === 'close';
+  // Non-cash tender is reconciled against completed sales, which only exist at
+  // close; asking for it when opening a shift would have nothing to compare to.
+  const tenderMode: POSTenderDeclarationMode = isClosing ? props.settings.tenderDeclarationMode : 'off';
+
+  const declaration = useMemo(
     () => buildCashDeclaration(
-      props.mode === 'open' ? CashCountMode.OPENING : CashCountMode.CLOSING,
+      isClosing ? CashCountMode.CLOSING : CashCountMode.OPENING,
       counts,
-    ).total,
-    [counts, props.mode],
+      { tenders, tenderMode },
+    ),
+    [counts, isClosing, tenderMode, tenders],
   );
+
+  const reconciliation: ShiftReconciliation | null = useMemo(() => {
+    if (!isClosing || props.report == null) return null;
+    return summarizeShiftReconciliation(props.report, declaration, props.settings);
+  }, [declaration, isClosing, props.report, props.settings]);
+
+  const tenderRows = tenderMode === 'category'
+    ? NON_CASH_PAYMENT_METHODS.map((method) => ({ key: method as string, label: PAYMENT_METHOD_LABELS[method] ?? method }))
+    : tenderMode === 'total'
+      ? [{ key: TENDER_TOTAL_KEY, label: PAYMENT_METHOD_LABELS[TENDER_TOTAL_KEY] }]
+      : [];
+
+  const updateTender = (key: string, value: number) => {
+    setTenders((previous) => ({ ...previous, [key]: Math.max(0, value) }));
+  };
+
+  const handleSubmit = () => {
+    props.onSubmit({
+      counts,
+      tenders,
+      tenderMode,
+      variance: reconciliation?.cash.variance,
+    });
+  };
+
+  const varianceClass = (variance: number, flagged: boolean) => {
+    if (flagged) return 'variance-alert';
+    return variance === 0 ? 'variance-ok' : 'variance-warn';
+  };
 
   return (
     <ModalShell
       onClose={props.onClose}
-      title={props.mode === 'open' ? 'Open shift - money declare' : 'Close shift - cash count'}
+      title={isClosing ? 'Close shift - declaration' : 'Open shift - money declare'}
       width="wide"
     >
       <div className="modal-stack">
@@ -4260,24 +4958,98 @@ function MoneyDeclareModal(
 
         <div className="cash-total-bar">
           <div>
-            <div className="meta-label">{props.mode === 'open' ? 'Declared float' : 'Counted drawer'}</div>
-            <div className="payment-total">{formatCurrency(total)}</div>
+            <div className="meta-label">{isClosing ? 'Counted drawer' : 'Declared float'}</div>
+            <div className="payment-total">{formatCurrency(declaration.total)}</div>
           </div>
-          {props.expectedDrawer != null && (
+          {isClosing && !props.cashSalesHidden && reconciliation != null && (
             <div className="variance-card">
               <div className="meta-label">Expected drawer</div>
-              <div>{formatCurrency(props.expectedDrawer)}</div>
-              <div className={total === props.expectedDrawer ? 'variance-ok' : 'variance-alert'}>
-                Variance {formatCurrency(total - props.expectedDrawer)}
+              <div>{formatCurrency(reconciliation.cash.expected)}</div>
+              <div className={varianceClass(reconciliation.cash.variance, reconciliation.cash.flagged)}>
+                Variance {formatCurrency(reconciliation.cash.variance)}
               </div>
             </div>
           )}
         </div>
 
+        {isClosing && props.isReportLoading && (
+          <div className="inline-alert info">Loading this shift's transaction log to reconcile the declaration...</div>
+        )}
+
+        {isClosing && props.reportError !== '' && (
+          <div className="inline-alert warning">
+            {props.reportError} The declaration will still be recorded, but it cannot be checked against the transaction log.
+          </div>
+        )}
+
+        {tenderRows.length > 0 && (
+          <section className="tender-declare">
+            <div className="settings-card-head">
+              <div>
+                <div className="section-kicker">Non-cash tender</div>
+                <div className="section-title">
+                  {tenderMode === 'category' ? 'Declare each payment type' : 'Declare the non-cash total'}
+                </div>
+              </div>
+              <div className="report-chip mono">Checked against the transaction log</div>
+            </div>
+
+            <div className="tender-declare-list">
+              {tenderRows.map((row) => {
+                const summary = reconciliation?.tenders.find((entry) => entry.key === row.key);
+                const expected = summary?.expected
+                  ?? (row.key === TENDER_TOTAL_KEY
+                    ? Object.entries(props.report?.paymentBreakdown ?? {})
+                      .filter(([method]) => method !== PaymentMethod.CASH)
+                      .reduce((sum, [, amount]) => sum + amount, 0)
+                    : props.report?.paymentBreakdown[row.key] ?? 0);
+
+                return (
+                  <div className="tender-declare-row" key={row.key}>
+                    <span className="tender-declare-label">{row.label}</span>
+                    <input
+                      className="glass-input compact"
+                      type="number"
+                      min={0}
+                      step={0.01}
+                      value={tenders[row.key] ?? 0}
+                      onChange={(event) => updateTender(row.key, Number(event.target.value) || 0)}
+                      aria-label={`Declared ${row.label}`}
+                    />
+                    <span className="tender-declare-expected">
+                      Expected {formatCurrency(expected)}
+                    </span>
+                    <span className={`tender-declare-variance ${summary ? varianceClass(summary.variance, summary.flagged) : ''}`}>
+                      {summary ? formatCurrency(summary.variance) : '--'}
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+          </section>
+        )}
+
+        {reconciliation?.hasAlert && (
+          <div className="inline-alert danger">
+            <b>Large discrepancy against the transaction log.</b>
+            <ul className="discrepancy-list">
+              {reconciliation.flaggedRows.map((row) => (
+                <li key={row.key}>
+                  {row.label}: declared {formatCurrency(row.declared)} against {formatCurrency(row.expected)} expected
+                  {' '}({row.variance > 0 ? 'over' : 'short'} by {formatCurrency(Math.abs(row.variance))}).
+                </li>
+              ))}
+            </ul>
+            <small>
+              Threshold: {formatCurrency(props.settings.alertThresholdAmount)} or {props.settings.alertThresholdPercent}% of the expected figure.
+            </small>
+          </div>
+        )}
+
         <div className="modal-actions">
           <button className="ghost-button" onClick={props.onClose}>Cancel</button>
-          <button className="btn-primary" onClick={() => props.onSubmit(counts)}>
-            {props.mode === 'open' ? 'Confirm and open shift' : 'Submit and close shift'}
+          <button className="btn-primary" onClick={handleSubmit}>
+            {isClosing ? 'Submit and close shift' : 'Confirm and open shift'}
           </button>
         </div>
       </div>
@@ -4521,6 +5293,24 @@ function ZReportModal(props: {
             ))}
             <ReportRow label="Non cash total" value={formatCurrency(zReading.nonCashSales)} strong />
           </section>
+
+          {visibleReport.declaredTenders != null && (
+            <section className="z-reading-noncash">
+              <h3>Declared at close</h3>
+              {Object.entries(visibleReport.declaredTenders).map(([key, declared]) => {
+                const expected = key === TENDER_TOTAL_KEY
+                  ? zReading.nonCashSales
+                  : visibleReport.paymentBreakdown[key] ?? 0;
+                return (
+                  <ReportRow
+                    key={key}
+                    label={PAYMENT_METHOD_LABELS[key] ?? key}
+                    value={`${formatCurrency(declared)}    (${formatCurrency(declared - expected)})`}
+                  />
+                );
+              })}
+            </section>
+          )}
 
           <footer className="z-reading-footer">
 			{!props.cashSalesHidden && <>
