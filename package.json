@@ -28,6 +28,7 @@
 		"typescript": "^5.3.3"
 	},
 	"allowScripts": {
-		"electron@41.4.0": true
+		"electron@41.4.0": true,
+		"better-sqlite3@12.10.0": true
 	}
 }
