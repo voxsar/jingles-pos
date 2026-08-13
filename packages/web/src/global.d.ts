@@ -2,6 +2,11 @@ import type {
   POSDesktopBackupResult,
   POSDesktopSettings,
   POSDesktopSettingsSaveResult,
+  POSLabelDocument,
+  POSPrintDocument,
+  POSPrintResult,
+  POSPrinterConfig,
+  POSPrinterDiscoveryResult,
 } from '@jingles/shared';
 
 declare global {
@@ -16,6 +21,14 @@ declare global {
         pickDatabasePath: (currentPath?: string) => Promise<string | null>;
         pickBackupDirectory: (currentPath?: string) => Promise<string | null>;
         backupNow: () => Promise<POSDesktopBackupResult>;
+      };
+      printing?: {
+        list: () => Promise<POSPrinterConfig[]>;
+        discover: (options?: { includeNetwork?: boolean }) => Promise<POSPrinterDiscoveryResult>;
+        test: (printer: POSPrinterConfig) => Promise<POSPrintResult>;
+        printReceipt: (document: POSPrintDocument, options?: { printerId?: string }) => Promise<POSPrintResult>;
+        printLabel: (document: POSLabelDocument, options?: { printerId?: string }) => Promise<POSPrintResult>;
+        openCashDrawer: (printerId?: string) => Promise<POSPrintResult>;
       };
     };
   }

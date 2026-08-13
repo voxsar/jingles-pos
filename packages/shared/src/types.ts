@@ -435,6 +435,122 @@ export interface POSSyncTokenResult {
 
 export type POSThemeMode = 'light' | 'dark';
 
+/**
+ * How the desktop app reaches a printer.
+ *
+ * - `network`  raw TCP socket, almost always port 9100 (Epson TM-i, Zebra ZT/ZD).
+ * - `system`   a printer installed in the OS spooler, driven with a RAW datatype
+ *              job so the vendor driver never rasterizes our ESC/POS or ZPL bytes.
+ * - `device`   a character device or port written to directly, e.g. `/dev/usb/lp0`
+ *              on Linux or `COM3` for serial-attached printers.
+ */
+export type POSPrinterTransport = 'network' | 'system' | 'device';
+
+/** Command language spoken on the wire. */
+export type POSPrinterLanguage = 'escpos' | 'zpl';
+
+/** What the printer is used for. A terminal may have one of each. */
+export type POSPrinterRole = 'receipt' | 'label';
+
+export type POSBarcodeSymbology = 'CODE128' | 'CODE39' | 'EAN13';
+
+export interface POSPrinterConfig {
+  id: string;
+  name: string;
+  role: POSPrinterRole;
+  language: POSPrinterLanguage;
+  transport: POSPrinterTransport;
+  /** Host or IP for `network`, spooler printer name for `system`, path for `device`. */
+  address: string;
+  port: number;
+  enabled: boolean;
+  isDefault: boolean;
+  copies: number;
+  /** Receipt printers: printable columns at font A. 42 at 80mm, 32 at 58mm. */
+  columns: number;
+  /** Receipt printers: send the partial-cut command after each job. */
+  cutPaper: boolean;
+  /** Receipt printers: pulse the cash drawer on pin 2 before cutting. */
+  openDrawer: boolean;
+  /** Label printers: media size and head resolution used to compute ZPL dots. */
+  labelWidthMm: number;
+  labelHeightMm: number;
+  dpi: number;
+  /** Label printers: darkness (^MD), -30..30. */
+  darkness: number;
+}
+
+export interface POSScannerSettings {
+  /** Capture scans globally, regardless of which element has focus. */
+  enabled: boolean;
+  /** Shortest run of characters that may be treated as a scan. */
+  minLength: number;
+  /** Longest gap between characters still considered part of one scan, in ms. */
+  maxInterKeyMs: number;
+  /** Only accept a buffer that ended with Enter or Tab. Rejects fast typists. */
+  requireTerminator: boolean;
+  /** Optional fixed prefix the scanner is programmed to emit; stripped on match. */
+  prefix: string;
+  /** Play a short tone when a scan resolves to a product. */
+  beepOnScan: boolean;
+}
+
+/** A printer offered to the user by discovery, not yet configured. */
+export interface POSDiscoveredPrinter {
+  name: string;
+  transport: POSPrinterTransport;
+  address: string;
+  port: number;
+  description?: string;
+  /** Best guess from the spooler name or reverse DNS. Users can override. */
+  suggestedLanguage: POSPrinterLanguage;
+  suggestedRole: POSPrinterRole;
+  isSystemDefault: boolean;
+  source: 'system' | 'network';
+}
+
+export interface POSPrinterDiscoveryResult {
+  printers: POSDiscoveredPrinter[];
+  scannedSubnets: string[];
+  warnings: string[];
+}
+
+export type POSPrintBlock =
+  | { type: 'text'; value: string; align?: 'left' | 'center' | 'right'; bold?: boolean; wide?: boolean }
+  | { type: 'columns'; left: string; right: string; bold?: boolean; indent?: number }
+  | { type: 'divider'; char?: string }
+  | { type: 'feed'; lines?: number }
+  | { type: 'barcode'; value: string; symbology?: POSBarcodeSymbology; height?: number; showText?: boolean }
+  | { type: 'qr'; value: string; size?: number };
+
+/** A device-independent receipt built by the renderer and encoded in the main process. */
+export interface POSPrintDocument {
+  title: string;
+  blocks: POSPrintBlock[];
+  openDrawer?: boolean;
+  cut?: boolean;
+  copies?: number;
+}
+
+export interface POSLabelDocument {
+  title: string;
+  sku: string;
+  name: string;
+  price?: string;
+  barcode: string;
+  symbology?: POSBarcodeSymbology;
+  secondaryText?: string;
+  copies?: number;
+}
+
+export interface POSPrintResult {
+  ok: boolean;
+  printerId?: string;
+  printerName?: string;
+  bytesSent?: number;
+  message?: string;
+}
+
 export interface POSDesktopSettings {
   syncUrl: string;
   databasePath: string;
@@ -443,7 +559,36 @@ export interface POSDesktopSettings {
   addDenominationsToPaymentList: boolean;
   showDenominationCombinations: boolean;
   allowShortPayments: boolean;
+  printers: POSPrinterConfig[];
+  scanner: POSScannerSettings;
 }
+
+export const DEFAULT_POS_SCANNER_SETTINGS: POSScannerSettings = {
+  enabled: true,
+  minLength: 4,
+  maxInterKeyMs: 35,
+  requireTerminator: true,
+  prefix: '',
+  beepOnScan: true,
+};
+
+export const DEFAULT_POS_PRINTER_CONFIG: Omit<POSPrinterConfig, 'id' | 'name'> = {
+  role: 'receipt',
+  language: 'escpos',
+  transport: 'network',
+  address: '',
+  port: 9100,
+  enabled: true,
+  isDefault: false,
+  copies: 1,
+  columns: 42,
+  cutPaper: true,
+  openDrawer: false,
+  labelWidthMm: 50,
+  labelHeightMm: 25,
+  dpi: 203,
+  darkness: 0,
+};
 
 export interface POSDesktopSettingsSaveResult {
   settings: POSDesktopSettings;

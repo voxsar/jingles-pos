@@ -3,6 +3,11 @@ import type {
   POSDesktopBackupResult,
   POSDesktopSettings,
   POSDesktopSettingsSaveResult,
+  POSLabelDocument,
+  POSPrintDocument,
+  POSPrintResult,
+  POSPrinterConfig,
+  POSPrinterDiscoveryResult,
 } from '@jingles/shared';
 
 const FALLBACK_DESKTOP_LOCAL_API_URL = 'http://127.0.0.1:3631';
@@ -40,6 +45,24 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.invoke('desktop-settings:backup-now') as Promise<POSDesktopBackupResult>
     ),
   },
+  printing: {
+    list: () => ipcRenderer.invoke('printing:list') as Promise<POSPrinterConfig[]>,
+    discover: (options?: { includeNetwork?: boolean }) => (
+      ipcRenderer.invoke('printing:discover', options) as Promise<POSPrinterDiscoveryResult>
+    ),
+    test: (printer: POSPrinterConfig) => (
+      ipcRenderer.invoke('printing:test', printer) as Promise<POSPrintResult>
+    ),
+    printReceipt: (document: POSPrintDocument, options?: { printerId?: string }) => (
+      ipcRenderer.invoke('printing:print-receipt', document, options) as Promise<POSPrintResult>
+    ),
+    printLabel: (document: POSLabelDocument, options?: { printerId?: string }) => (
+      ipcRenderer.invoke('printing:print-label', document, options) as Promise<POSPrintResult>
+    ),
+    openCashDrawer: (printerId?: string) => (
+      ipcRenderer.invoke('printing:open-drawer', printerId) as Promise<POSPrintResult>
+    ),
+  },
   updates: {
     getStatus: () => ipcRenderer.invoke('updater:get-status'),
     check: () => ipcRenderer.invoke('updater:check'),
@@ -65,6 +88,14 @@ declare global {
         pickDatabasePath: (currentPath?: string) => Promise<string | null>;
         pickBackupDirectory: (currentPath?: string) => Promise<string | null>;
         backupNow: () => Promise<POSDesktopBackupResult>;
+      };
+      printing?: {
+        list: () => Promise<POSPrinterConfig[]>;
+        discover: (options?: { includeNetwork?: boolean }) => Promise<POSPrinterDiscoveryResult>;
+        test: (printer: POSPrinterConfig) => Promise<POSPrintResult>;
+        printReceipt: (document: POSPrintDocument, options?: { printerId?: string }) => Promise<POSPrintResult>;
+        printLabel: (document: POSLabelDocument, options?: { printerId?: string }) => Promise<POSPrintResult>;
+        openCashDrawer: (printerId?: string) => Promise<POSPrintResult>;
       };
       updates?: {
         getStatus: () => Promise<unknown>;

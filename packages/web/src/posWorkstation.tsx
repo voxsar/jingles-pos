@@ -6,6 +6,12 @@ import {
   Customer,
   HeldSaleSummary,
   POSDesktopSettings,
+  POSDiscoveredPrinter,
+  POSPrintResult,
+  POSPrinterConfig,
+  POSPrinterRole,
+  POSPrinterTransport,
+  POSScannerSettings,
   POSThemeMode,
   POSSyncRunResult,
   PaymentInput,
@@ -22,6 +28,7 @@ import {
   UserRole,
   ZReportSummary,
   ZReportSlot,
+  DEFAULT_POS_SCANNER_SETTINGS,
   DEFAULT_TERMINAL_ID,
 } from '@jingles/shared';
 import {
@@ -47,6 +54,7 @@ import SearchableSelect from './components/SearchableSelect';
 import {
   buildFallbackDesktopSettings,
   createDesktopBackup,
+  createPrinterDraft,
   hasDesktopSettingsBridge,
   loadDesktopSettings,
   persistThemeMode,
@@ -54,7 +62,19 @@ import {
   pickDesktopDatabasePath,
   readStoredThemeMode,
   saveDesktopSettings as saveDesktopSettingsToBridge,
+  withPrinterUpdate,
 } from './desktopSettings';
+import {
+  buildProductLabelDocument,
+  buildReceiptDocument,
+  buildZReportDocument,
+  discoverPrinters,
+  hasPrintingBridge,
+  printLabelDocument,
+  printReceiptDocument,
+  testPrinter,
+} from './printing';
+import { useBarcodeScanner } from './useBarcodeScanner';
 import {
   buildCashDeclaration,
   calcCartTotals,
@@ -613,7 +633,9 @@ export default function PosWorkstation() {
       } else {
         setDesktopSettings(settingsDraft);
         setAppliedThemeMode(settingsDraft.themeMode);
-        showNotice('success', 'Theme saved for this browser session.');
+        // Without the desktop bridge there is nowhere to persist to, but the
+        // theme and scanner behaviour still apply for the rest of the session.
+        showNotice('success', 'Settings applied for this browser session.');
       }
 
       setIsSettingsOpen(false);
@@ -1043,6 +1065,93 @@ export default function PosWorkstation() {
     addProductToCart(product);
   }, [addProductToCart]);
 
+  /**
+   * Lookup table for scanned codes. Variant codes are registered too, so a
+   * scanner pointed at a variant label drops that exact variant into the cart
+   * without opening the variant picker.
+   */
+  const productsByScanCode = useMemo(() => {
+    const index = new Map<string, { product: Product; variant?: ProductVariant }>();
+
+    const register = (code: string | undefined | null, entry: { product: Product; variant?: ProductVariant }) => {
+      const key = code?.trim().toLowerCase();
+      if (key && !index.has(key)) {
+        index.set(key, entry);
+      }
+    };
+
+    for (const product of products) {
+      register(product.barcode, { product });
+      register(product.sku, { product });
+
+      for (const variant of product.variants ?? []) {
+        register(variant.variantCode, { product, variant });
+      }
+    }
+
+    return index;
+  }, [products]);
+
+  const handleBarcodeScan = useCallback((code: string) => {
+    const match = productsByScanCode.get(code.trim().toLowerCase());
+
+    if (!match) {
+      showNotice('error', `No product matches scanned code ${code}.`);
+      return;
+    }
+
+    if (match.variant) {
+      addProductToCart(match.product, match.variant);
+      return;
+    }
+
+    handleProductPick(match.product);
+  }, [addProductToCart, handleProductPick, productsByScanCode, showNotice]);
+
+  const scannerSettings = desktopSettings?.scanner ?? DEFAULT_POS_SCANNER_SETTINGS;
+
+  const hasLabelPrinter = useMemo(() => (
+    (desktopSettings?.printers ?? []).some((printer) => printer.enabled && printer.role === 'label')
+  ), [desktopSettings]);
+
+  // Read inside the sale callback, so adding a printer takes effect on the next
+  // sale without rebuilding the checkout handler.
+  const hasReceiptPrinterRef = useRef(false);
+  hasReceiptPrinterRef.current = (desktopSettings?.printers ?? [])
+    .some((printer) => printer.enabled && printer.role === 'receipt');
+
+  useBarcodeScanner({
+    // Modals with their own text entry keep the scanner out of the way; the
+    // search overlay opts in separately through data-scanner-passthrough.
+    enabled: session != null && !isSettingsOpen && !isHelpOpen,
+    settings: scannerSettings,
+    onScan: handleBarcodeScan,
+  });
+
+  /** Surfaces the outcome of a print job, including the browser-dialog fallback. */
+  const reportPrintResult = useCallback((result: POSPrintResult) => {
+    if (result.ok) {
+      showNotice('success', result.message ?? `Sent to ${result.printerName ?? 'the printer'}.`);
+      return;
+    }
+
+    showNotice('error', result.message ?? 'Printing failed.');
+  }, [showNotice]);
+
+  const handlePrintProductLabel = useCallback(async (product: Product, variant?: ProductVariant) => {
+    const result = await printLabelDocument(buildProductLabelDocument(product, {
+      variantCode: variant?.variantCode,
+      price: (variant?.priceTiers?.length ? variant.priceTiers : product.priceTiers)[0]?.price,
+    }));
+
+    showNotice(
+      result.ok ? 'success' : 'error',
+      result.ok
+        ? `Label sent to ${result.printerName ?? 'the label printer'}.`
+        : result.message ?? 'Label printing failed.',
+    );
+  }, [showNotice]);
+
   const handleLineVariantChange = useCallback((lineId: string) => {
     const line = cart.find((entry) => entry.uid === lineId);
     if (!line) {
@@ -1268,6 +1377,20 @@ export default function PosWorkstation() {
       setBillDiscount(0);
       setActiveHeldSaleId(null);
       showNotice('success', `Sale ${sale.receiptNumber} completed.`);
+
+      // Push the receipt at a configured printer without stealing the screen
+      // with a print dialog. The modal's Print button covers reprints.
+      if (hasReceiptPrinterRef.current) {
+        const printResult = await printReceiptDocument(
+          buildReceiptDocument(sale, resolveTerminalCode(terminals, session.terminalId)),
+          { allowBrowserFallback: false },
+        );
+
+        if (!printResult.ok) {
+          showNotice('error', `Sale saved, but the receipt did not print: ${printResult.message ?? 'unknown error'}`);
+        }
+      }
+
       await refreshWorkspace({ includeSales: true });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to complete sale';
@@ -1587,12 +1710,16 @@ export default function PosWorkstation() {
 
       {isSearchOpen && (
         <SearchOverlay
+          canPrintLabels={hasLabelPrinter}
           hideOutOfStock={hideOutOfStock}
           products={products}
           onClose={() => setIsSearchOpen(false)}
           onPick={(product) => {
             setIsSearchOpen(false);
             handleProductPick(product);
+          }}
+          onPrintLabel={(product) => {
+            void handlePrintProductLabel(product);
           }}
         />
       )}
@@ -1610,6 +1737,7 @@ export default function PosWorkstation() {
         <SettingsModal
           draft={settingsDraft}
           hasDesktopBridge={hasDesktopSettingsBridge()}
+          hasPrintingBridge={hasPrintingBridge()}
           isBackingUp={isCreatingBackup}
           isLoading={isSettingsLoading}
           isSaving={isSettingsSaving}
@@ -1666,6 +1794,7 @@ export default function PosWorkstation() {
         <ZReportModal
           cashSalesHidden={hideCashSales}
           onClose={() => setIsZOpen(false)}
+          onPrinted={reportPrintResult}
           terminalId={currentTerminalId}
           terminalCode={terminalCode}
         />
@@ -1674,6 +1803,7 @@ export default function PosWorkstation() {
       {receiptSale != null && (
         <ReceiptModal
           onClose={() => setReceiptSale(null)}
+          onPrinted={reportPrintResult}
           sale={receiptSale}
           terminalCode={terminalCode}
         />
@@ -2531,6 +2661,7 @@ function SettingsModal(
     onClose: () => void;
     onDraftChange: React.Dispatch<React.SetStateAction<POSDesktopSettings | null>>;
     onSave: () => void;
+    hasPrintingBridge: boolean;
   },
 ) {
   const settings = props.draft;
@@ -2725,7 +2856,20 @@ function SettingsModal(
                   </span>
                 </label>
               </section>
+
+              <ScannerSettingsCard
+                disabled={props.isSaving}
+                scanner={settings.scanner}
+                onChange={(scanner) => updateDraft('scanner', scanner)}
+              />
             </div>
+
+            <PrinterSettingsCard
+              disabled={props.isSaving}
+              hasPrintingBridge={props.hasPrintingBridge}
+              printers={settings.printers}
+              onChange={(printers) => updateDraft('printers', printers)}
+            />
 
             <div className="modal-actions">
               <button className="ghost-button" onClick={props.onClose}>
@@ -2742,12 +2886,537 @@ function SettingsModal(
   );
 }
 
+function ScannerSettingsCard(
+  props: {
+    disabled: boolean;
+    scanner: POSScannerSettings;
+    onChange: (scanner: POSScannerSettings) => void;
+  },
+) {
+  const update = <K extends keyof POSScannerSettings>(key: K, value: POSScannerSettings[K]) => {
+    props.onChange({ ...props.scanner, [key]: value });
+  };
+
+  return (
+    <section className="settings-card">
+      <div className="settings-card-head">
+        <div>
+          <div className="section-kicker">Hardware</div>
+          <div className="section-title">Barcode scanner</div>
+        </div>
+        <div className="report-chip mono">Keyboard wedge</div>
+      </div>
+
+      <label className="settings-checkbox-row">
+        <input
+          type="checkbox"
+          checked={props.scanner.enabled}
+          onChange={(event) => update('enabled', event.target.checked)}
+        />
+        <span>
+          <b>Capture scans anywhere on the screen</b>
+          <small>
+            Scanned codes go straight to the cart even when the cursor is in another field,
+            instead of being typed into whatever has focus.
+          </small>
+        </span>
+      </label>
+
+      <div className="settings-field-row">
+        <LabelBlock label="Shortest code">
+          <input
+            className="glass-input"
+            type="number"
+            min={2}
+            max={32}
+            disabled={props.disabled || !props.scanner.enabled}
+            value={props.scanner.minLength}
+            onChange={(event) => update('minLength', Number.parseInt(event.target.value, 10) || 4)}
+          />
+        </LabelBlock>
+
+        <LabelBlock label="Max gap between keys (ms)">
+          <input
+            className="glass-input"
+            type="number"
+            min={10}
+            max={200}
+            disabled={props.disabled || !props.scanner.enabled}
+            value={props.scanner.maxInterKeyMs}
+            onChange={(event) => update('maxInterKeyMs', Number.parseInt(event.target.value, 10) || 35)}
+          />
+        </LabelBlock>
+
+        <LabelBlock label="Scanner prefix (optional)">
+          <input
+            className="glass-input"
+            maxLength={8}
+            disabled={props.disabled || !props.scanner.enabled}
+            value={props.scanner.prefix}
+            onChange={(event) => update('prefix', event.target.value)}
+          />
+        </LabelBlock>
+      </div>
+
+      <div className="field-hint">
+        Anything typed faster than the gap above is treated as a scan. Raise it for slow
+        scanners; lower it if fast typing is being mistaken for a scan.
+      </div>
+
+      <label className="settings-checkbox-row">
+        <input
+          type="checkbox"
+          disabled={props.disabled || !props.scanner.enabled}
+          checked={props.scanner.requireTerminator}
+          onChange={(event) => update('requireTerminator', event.target.checked)}
+        />
+        <span>
+          <b>Only accept scans that end with Enter or Tab</b>
+          <small>Leave on unless the scanner is programmed with no suffix.</small>
+        </span>
+      </label>
+
+      <label className="settings-checkbox-row">
+        <input
+          type="checkbox"
+          disabled={props.disabled || !props.scanner.enabled}
+          checked={props.scanner.beepOnScan}
+          onChange={(event) => update('beepOnScan', event.target.checked)}
+        />
+        <span>
+          <b>Beep when a scan is recognised</b>
+          <small>A short tone from the workstation, separate from the scanner's own beep.</small>
+        </span>
+      </label>
+    </section>
+  );
+}
+
+const TRANSPORT_LABELS: Record<POSPrinterTransport, string> = {
+  network: 'Network (TCP 9100)',
+  system: 'Installed printer (USB)',
+  device: 'Device path / serial port',
+};
+
+function PrinterSettingsCard(
+  props: {
+    disabled: boolean;
+    hasPrintingBridge: boolean;
+    printers: POSPrinterConfig[];
+    onChange: (printers: POSPrinterConfig[]) => void;
+  },
+) {
+  const [discovered, setDiscovered] = useState<POSDiscoveredPrinter[]>([]);
+  const [discoveryNote, setDiscoveryNote] = useState('');
+  const [isDiscovering, setIsDiscovering] = useState(false);
+  const [testingPrinterId, setTestingPrinterId] = useState<string | null>(null);
+  const [testResult, setTestResult] = useState<{ ok: boolean; text: string } | null>(null);
+
+  const runDiscovery = async (includeNetwork: boolean) => {
+    setIsDiscovering(true);
+    setDiscoveryNote(includeNetwork ? 'Scanning the local network for printers...' : 'Reading installed printers...');
+    try {
+      const result = await discoverPrinters({ includeNetwork });
+      setDiscovered(result.printers);
+      setDiscoveryNote([
+        `Found ${formatInteger(result.printers.length)} printer(s)`,
+        result.scannedSubnets.length > 0 ? `on ${result.scannedSubnets.join(', ')}` : '',
+        ...result.warnings,
+      ].filter(Boolean).join(' - '));
+    } catch (error) {
+      setDiscoveryNote(error instanceof Error ? error.message : 'Printer discovery failed.');
+    } finally {
+      setIsDiscovering(false);
+    }
+  };
+
+  const addPrinter = (role: POSPrinterRole, overrides: Partial<POSPrinterConfig> = {}) => {
+    const hasRoleDefault = props.printers.some((printer) => printer.role === role && printer.isDefault);
+    props.onChange([
+      ...props.printers,
+      createPrinterDraft(role, { isDefault: !hasRoleDefault, ...overrides }),
+    ]);
+  };
+
+  const adoptDiscovered = (candidate: POSDiscoveredPrinter) => {
+    addPrinter(candidate.suggestedRole, {
+      name: candidate.name,
+      language: candidate.suggestedLanguage,
+      transport: candidate.transport,
+      address: candidate.address,
+      port: candidate.port || 9100,
+      cutPaper: candidate.suggestedRole === 'receipt',
+    });
+  };
+
+  const runTest = async (printer: POSPrinterConfig) => {
+    setTestingPrinterId(printer.id);
+    setTestResult(null);
+    try {
+      const result = await testPrinter(printer);
+      setTestResult({
+        ok: result.ok,
+        text: result.ok
+          ? `Test page sent to ${result.printerName ?? printer.name}.`
+          : result.message ?? 'The test failed.',
+      });
+    } catch (error) {
+      setTestResult({ ok: false, text: error instanceof Error ? error.message : 'The test failed.' });
+    } finally {
+      setTestingPrinterId(null);
+    }
+  };
+
+  return (
+    <section className="settings-card settings-card-wide">
+      <div className="settings-card-head">
+        <div>
+          <div className="section-kicker">Hardware</div>
+          <div className="section-title">Printers</div>
+        </div>
+        <div className="report-chip mono">ESC/POS and ZPL</div>
+      </div>
+
+      {!props.hasPrintingBridge ? (
+        <div className="inline-alert info">
+          Direct printing is only available inside the Electron app. In a browser, Print opens the
+          system print dialog instead.
+        </div>
+      ) : (
+        <>
+          <div className="settings-inline-actions">
+            <button className="ghost-button" disabled={isDiscovering} onClick={() => void runDiscovery(false)}>
+              Find installed printers
+            </button>
+            <button className="ghost-button" disabled={isDiscovering} onClick={() => void runDiscovery(true)}>
+              {isDiscovering ? 'Scanning...' : 'Scan network too'}
+            </button>
+            <button className="ghost-button" disabled={props.disabled} onClick={() => addPrinter('receipt')}>
+              Add receipt printer
+            </button>
+            <button className="ghost-button" disabled={props.disabled} onClick={() => addPrinter('label')}>
+              Add label printer
+            </button>
+          </div>
+
+          {discoveryNote && <div className="field-hint">{discoveryNote}</div>}
+
+          {discovered.length > 0 && (
+            <div className="printer-discovery-list">
+              {discovered.map((candidate) => (
+                <div key={`${candidate.transport}-${candidate.address}`} className="printer-discovery-row">
+                  <div className="printer-discovery-copy">
+                    <div>{candidate.name}{candidate.isSystemDefault ? ' (system default)' : ''}</div>
+                    <div>
+                      {TRANSPORT_LABELS[candidate.transport]} - {candidate.address}
+                      {candidate.transport === 'network' ? `:${candidate.port}` : ''}
+                      {' - looks like '}
+                      {candidate.suggestedLanguage === 'zpl' ? 'a ZPL label printer' : 'an ESC/POS receipt printer'}
+                    </div>
+                  </div>
+                  <button className="ghost-button" disabled={props.disabled} onClick={() => adoptDiscovered(candidate)}>
+                    Add
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+        </>
+      )}
+
+      {testResult && (
+        <div className={`inline-alert ${testResult.ok ? 'success' : 'error'}`}>{testResult.text}</div>
+      )}
+
+      {props.printers.length === 0 ? (
+        <div className="empty-state compact">
+          <div className="empty-title">No printers configured</div>
+          <div className="empty-copy">
+            Receipts and Z readings fall back to the system print dialog until a printer is added here.
+          </div>
+        </div>
+      ) : (
+        <div className="printer-config-list">
+          {props.printers.map((printer) => (
+            <PrinterConfigRow
+              key={printer.id}
+              disabled={props.disabled}
+              isTesting={testingPrinterId === printer.id}
+              printer={printer}
+              onChange={(changes) => props.onChange(withPrinterUpdate(props.printers, printer.id, changes))}
+              onRemove={() => props.onChange(props.printers.filter((entry) => entry.id !== printer.id))}
+              onTest={() => void runTest(printer)}
+            />
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function PrinterConfigRow(
+  props: {
+    disabled: boolean;
+    isTesting: boolean;
+    printer: POSPrinterConfig;
+    onChange: (changes: Partial<POSPrinterConfig>) => void;
+    onRemove: () => void;
+    onTest: () => void;
+  },
+) {
+  const { printer } = props;
+  const isLabelPrinter = printer.role === 'label';
+
+  return (
+    <div className={`printer-config-row ${printer.enabled ? '' : 'disabled'}`}>
+      <div className="printer-config-head">
+        <input
+          className="glass-input printer-name-input"
+          disabled={props.disabled}
+          value={printer.name}
+          onChange={(event) => props.onChange({ name: event.target.value })}
+        />
+        <div className="printer-config-flags">
+          <label className="printer-flag">
+            <input
+              type="checkbox"
+              disabled={props.disabled}
+              checked={printer.enabled}
+              onChange={(event) => props.onChange({ enabled: event.target.checked })}
+            />
+            <span>Enabled</span>
+          </label>
+          <label className="printer-flag">
+            <input
+              type="radio"
+              name={`default-${printer.role}`}
+              disabled={props.disabled || !printer.enabled}
+              checked={printer.isDefault}
+              onChange={() => props.onChange({ isDefault: true })}
+            />
+            <span>Default {printer.role}</span>
+          </label>
+        </div>
+      </div>
+
+      <div className="settings-field-row">
+        <LabelBlock label="Used for">
+          <select
+            className="glass-input"
+            disabled={props.disabled}
+            value={printer.role}
+            onChange={(event) => {
+              const role = event.target.value as POSPrinterRole;
+              props.onChange({
+                role,
+                language: role === 'label' ? 'zpl' : 'escpos',
+                cutPaper: role === 'receipt',
+              });
+            }}
+          >
+            <option value="receipt">Receipts and Z readings</option>
+            <option value="label">Product labels</option>
+          </select>
+        </LabelBlock>
+
+        <LabelBlock label="Language">
+          <select
+            className="glass-input"
+            disabled={props.disabled}
+            value={printer.language}
+            onChange={(event) => props.onChange({ language: event.target.value as POSPrinterConfig['language'] })}
+          >
+            <option value="escpos">ESC/POS (Epson, Star, Bixolon)</option>
+            <option value="zpl">ZPL (Zebra, TSC, Godex)</option>
+          </select>
+        </LabelBlock>
+
+        <LabelBlock label="Connection">
+          <select
+            className="glass-input"
+            disabled={props.disabled}
+            value={printer.transport}
+            onChange={(event) => {
+              const transport = event.target.value as POSPrinterTransport;
+              props.onChange({ transport, port: transport === 'network' ? printer.port || 9100 : 0 });
+            }}
+          >
+            {(Object.keys(TRANSPORT_LABELS) as POSPrinterTransport[]).map((transport) => (
+              <option key={transport} value={transport}>{TRANSPORT_LABELS[transport]}</option>
+            ))}
+          </select>
+        </LabelBlock>
+      </div>
+
+      <div className="settings-field-row">
+        <LabelBlock
+          label={
+            printer.transport === 'network'
+              ? 'Host or IP address'
+              : printer.transport === 'system'
+                ? 'Installed printer name'
+                : 'Device path or port'
+          }
+        >
+          <input
+            className="glass-input"
+            disabled={props.disabled}
+            placeholder={
+              printer.transport === 'network'
+                ? '192.168.1.50'
+                : printer.transport === 'system'
+                  ? 'EPSON TM-T88VI Receipt'
+                  : '/dev/usb/lp0'
+            }
+            value={printer.address}
+            onChange={(event) => props.onChange({ address: event.target.value })}
+          />
+        </LabelBlock>
+
+        {printer.transport === 'network' && (
+          <LabelBlock label="Port">
+            <input
+              className="glass-input"
+              type="number"
+              min={1}
+              max={65535}
+              disabled={props.disabled}
+              value={printer.port}
+              onChange={(event) => props.onChange({ port: Number.parseInt(event.target.value, 10) || 9100 })}
+            />
+          </LabelBlock>
+        )}
+
+        <LabelBlock label="Copies">
+          <input
+            className="glass-input"
+            type="number"
+            min={1}
+            max={5}
+            disabled={props.disabled}
+            value={printer.copies}
+            onChange={(event) => props.onChange({ copies: Number.parseInt(event.target.value, 10) || 1 })}
+          />
+        </LabelBlock>
+      </div>
+
+      {isLabelPrinter ? (
+        <div className="settings-field-row">
+          <LabelBlock label="Label width (mm)">
+            <input
+              className="glass-input"
+              type="number"
+              min={10}
+              max={220}
+              disabled={props.disabled}
+              value={printer.labelWidthMm}
+              onChange={(event) => props.onChange({ labelWidthMm: Number.parseFloat(event.target.value) || 50 })}
+            />
+          </LabelBlock>
+
+          <LabelBlock label="Label height (mm)">
+            <input
+              className="glass-input"
+              type="number"
+              min={10}
+              max={300}
+              disabled={props.disabled}
+              value={printer.labelHeightMm}
+              onChange={(event) => props.onChange({ labelHeightMm: Number.parseFloat(event.target.value) || 25 })}
+            />
+          </LabelBlock>
+
+          <LabelBlock label="Head resolution">
+            <select
+              className="glass-input"
+              disabled={props.disabled}
+              value={printer.dpi}
+              onChange={(event) => props.onChange({ dpi: Number.parseInt(event.target.value, 10) })}
+            >
+              <option value={152}>152 dpi</option>
+              <option value={203}>203 dpi</option>
+              <option value={300}>300 dpi</option>
+              <option value={600}>600 dpi</option>
+            </select>
+          </LabelBlock>
+
+          <LabelBlock label="Darkness">
+            <input
+              className="glass-input"
+              type="number"
+              min={-30}
+              max={30}
+              disabled={props.disabled}
+              value={printer.darkness}
+              onChange={(event) => props.onChange({ darkness: Number.parseInt(event.target.value, 10) || 0 })}
+            />
+          </LabelBlock>
+        </div>
+      ) : (
+        <div className="settings-field-row">
+          <LabelBlock label="Paper width">
+            <select
+              className="glass-input"
+              disabled={props.disabled}
+              value={printer.columns}
+              onChange={(event) => props.onChange({ columns: Number.parseInt(event.target.value, 10) })}
+            >
+              <option value={32}>58mm paper (32 columns)</option>
+              <option value={42}>80mm paper (42 columns)</option>
+              <option value={48}>80mm paper, small font (48 columns)</option>
+            </select>
+          </LabelBlock>
+
+          <label className="printer-flag standalone">
+            <input
+              type="checkbox"
+              disabled={props.disabled}
+              checked={printer.cutPaper}
+              onChange={(event) => props.onChange({ cutPaper: event.target.checked })}
+            />
+            <span>Cut paper after each receipt</span>
+          </label>
+
+          <label className="printer-flag standalone">
+            <input
+              type="checkbox"
+              disabled={props.disabled}
+              checked={printer.openDrawer}
+              onChange={(event) => props.onChange({ openDrawer: event.target.checked })}
+            />
+            <span>Cash drawer attached to this printer</span>
+          </label>
+        </div>
+      )}
+
+      <div className="settings-inline-actions">
+        <button className="ghost-button" disabled={props.disabled || props.isTesting} onClick={props.onTest}>
+          {props.isTesting ? 'Testing...' : 'Print test page'}
+        </button>
+        <button className="ghost-button danger" disabled={props.disabled} onClick={props.onRemove}>
+          Remove
+        </button>
+      </div>
+
+      <div className="field-hint">
+        {printer.transport === 'system'
+          ? 'Sent through the Windows spooler as a RAW job, so the vendor driver does not re-render the bytes.'
+          : printer.transport === 'network'
+            ? 'Sent as raw bytes over a TCP socket, the standard port for Epson and Zebra network printers.'
+            : 'Written directly to the device. Serial printers must already be configured at the right baud rate.'}
+      </div>
+    </div>
+  );
+}
+
 function SearchOverlay(
   props: {
+    canPrintLabels: boolean;
     hideOutOfStock: boolean;
     products: Product[];
     onClose: () => void;
     onPick: (product: Product) => void;
+    onPrintLabel: (product: Product) => void;
   },
 ) {
   const [query, setQuery] = useState('');
@@ -2838,6 +3507,9 @@ function SearchOverlay(
           <input
             ref={inputRef}
             className="glass-input search-box"
+            // Scans typed here should populate the box instead of jumping
+            // straight into the cart, so the global capture stands down.
+            data-scanner-passthrough="true"
             placeholder="Search by SKU, barcode, name, or subcategory"
             value={query}
             onChange={(event) => setQuery(event.target.value)}
@@ -2869,17 +3541,28 @@ function SearchOverlay(
             </div>
           )}
           {results.map((product) => (
-            <button key={product.id} className="search-result-row" onClick={() => props.onPick(product)}>
-              <div className="product-thumb compact">{getCategoryToken(product.subcategory || product.name)}</div>
-              <div className="search-result-copy">
-                <div>{product.name}</div>
-                <div>
-                  {product.sku} - {product.subcategory} - stock {formatInteger(product.stockOnHand)}
-                  {(product.variants?.length ?? 0) > 0 ? ` - ${formatInteger(product.variants?.length ?? 0)} variants` : ''}
+            <div key={product.id} className="search-result-row">
+              <button className="search-result-main" onClick={() => props.onPick(product)}>
+                <div className="product-thumb compact">{getCategoryToken(product.subcategory || product.name)}</div>
+                <div className="search-result-copy">
+                  <div>{product.name}</div>
+                  <div>
+                    {product.sku} - {product.subcategory} - stock {formatInteger(product.stockOnHand)}
+                    {(product.variants?.length ?? 0) > 0 ? ` - ${formatInteger(product.variants?.length ?? 0)} variants` : ''}
+                  </div>
                 </div>
-              </div>
-              <div className="search-result-price">{formatCurrency(product.priceTiers[0]?.price ?? 0)}</div>
-            </button>
+                <div className="search-result-price">{formatCurrency(product.priceTiers[0]?.price ?? 0)}</div>
+              </button>
+              {props.canPrintLabels && (
+                <button
+                  className="search-result-label-action"
+                  title={`Print a shelf label for ${product.name}`}
+                  onClick={() => props.onPrintLabel(product)}
+                >
+                  Label
+                </button>
+              )}
+            </div>
           ))}
           {results.length === 0 && (
             <div className="empty-state compact">
@@ -3664,7 +4347,14 @@ function moveReportPeriod(period: ReportPeriod, anchor: Date, direction: number)
   return next;
 }
 
-function ZReportModal(props: { cashSalesHidden: boolean; onClose: () => void; terminalId: string; terminalCode: string }) {
+function ZReportModal(props: {
+  cashSalesHidden: boolean;
+  onClose: () => void;
+  onPrinted: (result: POSPrintResult) => void;
+  terminalId: string;
+  terminalCode: string;
+}) {
+  const [isPrinting, setIsPrinting] = useState(false);
   const [period, setPeriod] = useState<ReportPeriod>('week');
   const [anchor, setAnchor] = useState(() => new Date());
   const [slots, setSlots] = useState<ZReportSlot[]>([]);
@@ -3697,6 +4387,24 @@ function ZReportModal(props: { cashSalesHidden: boolean; onClose: () => void; te
     cashSales: visibleReport.paymentBreakdown.CASH ?? 0,
     nonCashSales: Object.entries(visibleReport.paymentBreakdown).filter(([method]) => method !== 'CASH').reduce((sum, [, amount]) => sum + amount, 0),
   } : null;
+
+  const handlePrint = async () => {
+    if (!selectedSlot || !visibleReport) {
+      return;
+    }
+
+    setIsPrinting(true);
+    try {
+      props.onPrinted(await printReceiptDocument(buildZReportDocument(
+        visibleReport,
+        selectedSlot.shift,
+        props.terminalCode,
+        { cashSalesHidden: props.cashSalesHidden },
+      )));
+    } finally {
+      setIsPrinting(false);
+    }
+  };
 
   const downloadSheet = () => {
     if (!selectedSlot || !visibleReport || !zReading) return;
@@ -3825,7 +4533,9 @@ function ZReportModal(props: { cashSalesHidden: boolean; onClose: () => void; te
         </div>
 
         <div className="modal-actions">
-          <button className="ghost-button" onClick={() => window.print()}>Print</button>
+          <button className="ghost-button" disabled={isPrinting || !selectedSlot} onClick={() => void handlePrint()}>
+            {isPrinting ? 'Printing...' : 'Print'}
+          </button>
           <button className="ghost-button" onClick={downloadSheet} disabled={!selectedSlot}>Download Excel</button>
           <button className="ghost-button" onClick={props.onClose}>Close</button>
         </div>
@@ -4050,10 +4760,22 @@ function OrderSummaryCard(props: { rows: OrderSummaryRow[]; title: string }) {
 function ReceiptModal(
   props: {
     onClose: () => void;
+    onPrinted: (result: POSPrintResult) => void;
     sale: SaleSummary;
     terminalCode: string;
   },
 ) {
+  const [isPrinting, setIsPrinting] = useState(false);
+
+  const handlePrint = async () => {
+    setIsPrinting(true);
+    try {
+      props.onPrinted(await printReceiptDocument(buildReceiptDocument(props.sale, props.terminalCode)));
+    } finally {
+      setIsPrinting(false);
+    }
+  };
+
   const paidAmount = roundToMoney(props.sale.payments.reduce((sum, payment) => sum + payment.amount, 0));
   const tenderedAmount = roundToMoney(props.sale.payments.reduce(
     (sum, payment) => sum + (payment.tenderedAmount ?? payment.amount),
@@ -4176,8 +4898,8 @@ function ReceiptModal(
       </div>
 
       <div className="modal-actions">
-        <button className="ghost-button" onClick={() => window.print()}>
-          Print
+        <button className="ghost-button" disabled={isPrinting} onClick={() => void handlePrint()}>
+          {isPrinting ? 'Printing...' : 'Print'}
         </button>
         <button className="btn-primary" onClick={props.onClose}>
           Finish

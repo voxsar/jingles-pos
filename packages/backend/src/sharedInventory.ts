@@ -722,14 +722,14 @@ async function recordSharedInventoryChanges(
 
   const values: Array<string | number> = [];
   const placeholders = input.changes.map((change, index) => {
-    const offset = index * 4;
-    values.push(seq, change.tableName, change.rowId, change.action);
-    return `($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4})`;
+    const offset = index * 5;
+    values.push(randomUUID(), seq, change.tableName, change.rowId, change.action);
+    return `($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, $${offset + 5})`;
   });
 
   await client.query(
     `
-      INSERT INTO sync_server_changes (seq, table_name, row_id, action)
+      INSERT INTO sync_server_changes (id, seq, table_name, row_id, action)
       VALUES ${placeholders.join(', ')}
     `,
     values,

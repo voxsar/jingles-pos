@@ -343,6 +343,75 @@ export const HELP_TOPICS: HelpTopic[] = [
     tips: ['When you choose a new, empty database path the current database is copied there first — nothing is lost in the move.'],
   },
   {
+    id: 'printers',
+    kicker: 'Hardware',
+    title: 'Receipt & label printers',
+    summary: 'Connect Epson-style receipt printers and Zebra label printers over USB or the network.',
+    keywords: [
+      'printer', 'print', 'receipt', 'label', 'epson', 'zebra', 'escpos', 'esc/pos', 'zpl',
+      'thermal', 'usb', 'network', 'drawer', 'cash drawer', 'cut', '80mm', '58mm',
+    ],
+    intro:
+      'The desktop app talks to printers directly rather than through the print dialog, so a receipt prints instantly, the paper is cut, and the cash drawer pops. Settings > Printers is where terminals are paired with their hardware.',
+    steps: [
+      {
+        title: 'Find the printer',
+        body:
+          'Find installed printers lists everything already set up in Windows, which covers USB printers with a vendor driver. Scan network too also sweeps the local network for printers listening on port 9100, which is how network Epson and Zebra units are reached. Press Add on a result to configure it.',
+      },
+      {
+        title: 'Confirm the language and paper',
+        body:
+          'Receipt printers speak ESC/POS (Epson, Star, Bixolon and most 58/80mm clones); label printers speak ZPL (Zebra, and TSC or Godex in ZPL mode). Set the paper width to 42 columns for 80mm rolls or 32 for 58mm, and set the label size in millimetres along with the print head resolution.',
+      },
+      {
+        title: 'Print a test page',
+        body:
+          'Print test page checks the printer answers and puts a sample on the paper. If the test prints readable text and a scannable barcode the printer is ready; garbled output usually means the wrong language is selected.',
+      },
+      {
+        title: 'Print labels',
+        body:
+          'Once a label printer is configured, each row in the F3 search overlay gains a Label button that prints a shelf label with the product name, barcode and price.',
+      },
+    ],
+    tips: [
+      'Every completed sale prints automatically once a receipt printer is set as the default. The Print button on the receipt window is for reprints.',
+      'Tick "Cash drawer attached to this printer" to pulse the drawer on cash sales.',
+      'Without a configured printer, Print falls back to the system print dialog, so a terminal is never blocked while its hardware is being set up.',
+    ],
+  },
+  {
+    id: 'scanner',
+    kicker: 'Hardware',
+    title: 'Barcode scanners',
+    summary: 'Scans go to the cart no matter where the cursor is.',
+    keywords: ['scanner', 'scan', 'barcode', 'usb', 'bluetooth', 'wedge', 'ean', 'code128'],
+    intro:
+      'USB and Bluetooth scanners present themselves as keyboards, so they need no driver or pairing step inside the POS — plug the scanner in, or pair it with the operating system, and it works. The workstation watches the whole screen for scans instead of only the field that has focus.',
+    steps: [
+      {
+        title: 'Scan anywhere',
+        body:
+          'A scanned code is recognised by how fast the characters arrive and is sent straight to the cart, even when the cursor is sitting in the discount box or the customer picker. Those fields keep whatever was typed in them — the scan never lands in the wrong place.',
+      },
+      {
+        title: 'Scan into search',
+        body:
+          'The F3 search box is the one exception: scanning while it is open fills the search box so you can see the match before adding it.',
+      },
+      {
+        title: 'Tune it if needed',
+        body:
+          'Settings > Barcode scanner controls the shortest code accepted and the maximum gap between keystrokes. Raise the gap if a slow scanner is being missed; lower it if very fast typing is being mistaken for a scan. If the scanner is programmed with a prefix character, enter it so it is stripped from the code.',
+      },
+    ],
+    tips: [
+      'Variant codes are matched as well as product barcodes, so scanning a variant label adds that exact variant without opening the picker.',
+      'A code that matches nothing shows a message naming the code that was scanned, which makes mis-programmed scanners easy to spot.',
+    ],
+  },
+  {
     id: 'shortcuts',
     kicker: 'Reference',
     title: 'Keyboard shortcuts',

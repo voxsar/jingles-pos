@@ -9,6 +9,15 @@ import {
   readDesktopSettings,
   saveDesktopSettings,
 } from './desktopSettings';
+import { discoverPrinters } from './printing/discovery';
+import {
+  listConfiguredPrinters,
+  openCashDrawer,
+  printDocument,
+  printLabel,
+  testPrinter,
+} from './printing/printerService';
+import { cleanPrintingWorkDirectory } from './printing/transport';
 import { JinglesMdnsService, type DiscoveredJinglesDevice } from './network/mdns';
 import { writeLanSyncTarget } from './network/lanSyncTarget';
 import { DEFAULT_DEVICE_ID, DEFAULT_TERMINAL_ID } from '@jingles/shared';
@@ -176,6 +185,7 @@ app.whenReady().then(async () => {
       { role: 'help' },
     ]));
     startLanDiscovery();
+    cleanPrintingWorkDirectory();
     localApiServer = await restartLocalApiServer();
     await createWindow();
   } catch (error) {
@@ -240,6 +250,30 @@ ipcMain.handle('desktop-settings:pick-backup-directory', async (_event, currentP
 
 ipcMain.handle('desktop-settings:backup-now', async () => {
   return createDesktopBackup();
+});
+
+ipcMain.handle('printing:list', () => {
+  return listConfiguredPrinters();
+});
+
+ipcMain.handle('printing:discover', async (_event, options?: { includeNetwork?: boolean }) => {
+  return discoverPrinters(mainWindow?.webContents ?? null, options ?? {});
+});
+
+ipcMain.handle('printing:test', async (_event, printer) => {
+  return testPrinter(printer);
+});
+
+ipcMain.handle('printing:print-receipt', async (_event, document, options?: { printerId?: string }) => {
+  return printDocument(document, { ...options, role: 'receipt' });
+});
+
+ipcMain.handle('printing:print-label', async (_event, document, options?: { printerId?: string }) => {
+  return printLabel(document, options ?? {});
+});
+
+ipcMain.handle('printing:open-drawer', async (_event, printerId?: string) => {
+  return openCashDrawer(printerId);
 });
 
 ipcMain.handle('desktop-settings:save', async (_event, nextSettings) => {

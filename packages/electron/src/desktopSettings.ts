@@ -2,10 +2,17 @@ import fs from 'fs';
 import path from 'path';
 import Database from 'better-sqlite3';
 import { app } from 'electron';
-import type {
-  POSDesktopBackupResult,
-  POSDesktopSettings,
-  POSThemeMode,
+import {
+  DEFAULT_POS_PRINTER_CONFIG,
+  DEFAULT_POS_SCANNER_SETTINGS,
+  type POSDesktopBackupResult,
+  type POSDesktopSettings,
+  type POSPrinterConfig,
+  type POSPrinterLanguage,
+  type POSPrinterRole,
+  type POSPrinterTransport,
+  type POSScannerSettings,
+  type POSThemeMode,
 } from '@jingles/shared';
 
 const DEFAULT_SYNC_URL = 'https://inv.theredsun.org';
@@ -67,6 +74,100 @@ function normalizeAbsolutePath(value: string | null | undefined, fallback: strin
   return path.normalize(path.resolve(normalized));
 }
 
+function clampNumber(value: unknown, fallback: number, min: number, max: number) {
+  const parsed = typeof value === 'number' ? value : Number.parseFloat(String(value ?? ''));
+  if (!Number.isFinite(parsed)) {
+    return fallback;
+  }
+
+  return Math.min(max, Math.max(min, Math.round(parsed)));
+}
+
+function normalizeTransport(value: unknown): POSPrinterTransport {
+  return value === 'system' || value === 'device' ? value : 'network';
+}
+
+function normalizeLanguage(value: unknown): POSPrinterLanguage {
+  return value === 'zpl' ? 'zpl' : 'escpos';
+}
+
+function normalizeRole(value: unknown): POSPrinterRole {
+  return value === 'label' ? 'label' : 'receipt';
+}
+
+/**
+ * Printer entries come straight from a hand-editable JSON file, so every field is
+ * clamped to a range the encoders and transports can actually honour.
+ */
+function normalizePrinters(value: unknown): POSPrinterConfig[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  const seenIds = new Set<string>();
+  const printers = value.flatMap((entry): POSPrinterConfig[] => {
+    if (!entry || typeof entry !== 'object') {
+      return [];
+    }
+
+    const source = entry as Partial<POSPrinterConfig>;
+    const id = typeof source.id === 'string' && source.id.trim() ? source.id.trim() : null;
+    if (!id || seenIds.has(id)) {
+      return [];
+    }
+    seenIds.add(id);
+
+    const transport = normalizeTransport(source.transport);
+
+    return [{
+      id,
+      name: typeof source.name === 'string' && source.name.trim() ? source.name.trim() : id,
+      role: normalizeRole(source.role),
+      language: normalizeLanguage(source.language),
+      transport,
+      address: typeof source.address === 'string' ? source.address.trim() : '',
+      port: transport === 'network' ? clampNumber(source.port, 9100, 1, 65535) : 0,
+      enabled: source.enabled !== false,
+      isDefault: source.isDefault === true,
+      copies: clampNumber(source.copies, DEFAULT_POS_PRINTER_CONFIG.copies, 1, 5),
+      columns: clampNumber(source.columns, DEFAULT_POS_PRINTER_CONFIG.columns, 24, 96),
+      cutPaper: source.cutPaper !== false,
+      openDrawer: source.openDrawer === true,
+      labelWidthMm: clampNumber(source.labelWidthMm, DEFAULT_POS_PRINTER_CONFIG.labelWidthMm, 10, 220),
+      labelHeightMm: clampNumber(source.labelHeightMm, DEFAULT_POS_PRINTER_CONFIG.labelHeightMm, 10, 300),
+      dpi: clampNumber(source.dpi, DEFAULT_POS_PRINTER_CONFIG.dpi, 152, 600),
+      darkness: clampNumber(source.darkness, DEFAULT_POS_PRINTER_CONFIG.darkness, -30, 30),
+    }];
+  });
+
+  // Exactly one default per role keeps job routing unambiguous.
+  for (const role of ['receipt', 'label'] as const) {
+    const forRole = printers.filter((printer) => printer.role === role);
+    const firstDefault = forRole.find((printer) => printer.isDefault && printer.enabled)
+      ?? forRole.find((printer) => printer.enabled)
+      ?? forRole[0];
+
+    for (const printer of forRole) {
+      printer.isDefault = printer === firstDefault;
+    }
+  }
+
+  return printers;
+}
+
+function normalizeScanner(value: unknown): POSScannerSettings {
+  const source = (value && typeof value === 'object' ? value : {}) as Partial<POSScannerSettings>;
+
+  return {
+    enabled: source.enabled !== false,
+    minLength: clampNumber(source.minLength, DEFAULT_POS_SCANNER_SETTINGS.minLength, 2, 32),
+    maxInterKeyMs: clampNumber(source.maxInterKeyMs, DEFAULT_POS_SCANNER_SETTINGS.maxInterKeyMs, 10, 200),
+    requireTerminator: source.requireTerminator !== false,
+    prefix: typeof source.prefix === 'string' ? source.prefix.slice(0, 8) : '',
+    beepOnScan: source.beepOnScan !== false,
+  };
+}
+
 function toSnapshot(value: StoredDesktopSettings | null | undefined): POSDesktopSettings {
   return {
     syncUrl: normalizeSyncUrl(value?.syncUrl),
@@ -76,6 +177,8 @@ function toSnapshot(value: StoredDesktopSettings | null | undefined): POSDesktop
     addDenominationsToPaymentList: value?.addDenominationsToPaymentList !== false,
     showDenominationCombinations: value?.showDenominationCombinations !== false,
     allowShortPayments: value?.allowShortPayments === true,
+    printers: normalizePrinters(value?.printers),
+    scanner: normalizeScanner(value?.scanner),
   };
 }
 
