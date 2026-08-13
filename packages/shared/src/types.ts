@@ -751,7 +751,16 @@ export interface POSCustomerDisplayStatus {
 }
 
 export interface POSShiftReconciliationSettings {
-  tenderDeclarationMode: POSTenderDeclarationMode;
+  /**
+   * Which tender buckets the cashier declares at close, as `PaymentMethod`
+   * values and/or `TENDER_TOTAL_KEY`. Any combination may be selected — a shop
+   * that only reconciles its two card machines picks just those.
+   *
+   * Empty means cash only. `TENDER_TOTAL_KEY` cannot be combined with specific
+   * methods, because declaring both would count the same money twice; the
+   * normaliser drops the individual methods if both are present.
+   */
+  declaredTenders: string[];
   /** Absolute variance, in currency units, that counts as a large discrepancy. */
   alertThresholdAmount: number;
   /** Variance as a percentage of the expected figure that counts as a large discrepancy. */
@@ -798,11 +807,21 @@ export const DEFAULT_POS_SHORTCUT_SETTINGS: POSShortcutSettings = {
 };
 
 export const DEFAULT_POS_SHIFT_RECONCILIATION: POSShiftReconciliationSettings = {
-  tenderDeclarationMode: 'off',
+  declaredTenders: [],
   alertThresholdAmount: 500,
   alertThresholdPercent: 2,
   requireConfirmationOnAlert: true,
 };
+
+/** Tender types a cashier can be asked to declare alongside the cash count. */
+export const DECLARABLE_TENDER_METHODS: PaymentMethod[] = [
+  PaymentMethod.VISA,
+  PaymentMethod.MASTER,
+  PaymentMethod.AMEX,
+  PaymentMethod.CREDIT,
+  PaymentMethod.GIFT,
+  PaymentMethod.INSTALLMENT,
+];
 
 export const DEFAULT_POS_CUSTOMER_DISPLAY: POSCustomerDisplaySettings = {
   enabled: false,

@@ -212,7 +212,7 @@ const SearchableSelect = forwardRef<SearchableSelectHandle, SearchableSelectProp
       </button>
       {isOpen && createPortal(
         <div
-          className="searchable-select-menu glass-panel"
+          className="searchable-select-menu"
           ref={menuRef}
           style={menuPosition}
           onKeyDown={handleMenuKeyDown}

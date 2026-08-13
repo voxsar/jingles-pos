@@ -119,6 +119,11 @@ button {
  * overlays (20), the help lightbox (40) — so it sits below only the session
  * lock (9999). Flex column plus min-height:0 lets the inline max-height set by
  * the positioner squeeze the option list instead of overflowing the panel.
+ *
+ * The glass look is inlined here rather than borrowed from `.glass-panel`:
+ * that rule is declared further down the file and would win on source order,
+ * replacing `position: fixed` with `relative` and dropping the menu to the
+ * bottom of the document instead of anchoring it to its trigger.
  */
 .searchable-select-menu {
   position: fixed;
@@ -130,6 +135,8 @@ button {
   border-radius: 12px;
   box-shadow: var(--shadow-lg);
   background: var(--panel-strong);
+  backdrop-filter: blur(18px);
+  -webkit-backdrop-filter: blur(18px);
 }
 
 .searchable-select-search {

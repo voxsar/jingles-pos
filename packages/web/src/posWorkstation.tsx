@@ -48,6 +48,7 @@ import {
   normalizeShortcutSettings,
   QUICK_KEY_BINDING_HINT,
   TENDER_TOTAL_KEY,
+  DECLARABLE_TENDER_METHODS,
   DEFAULT_POS_ACTION_SHORTCUTS,
   DEFAULT_POS_CUSTOMER_DISPLAY,
   DEFAULT_POS_SCANNER_SETTINGS,
@@ -1375,7 +1376,7 @@ export default function PosWorkstation() {
 
     const declaration = buildCashDeclaration(CashCountMode.CLOSING, submission.counts, {
       tenders: submission.tenders,
-      tenderMode: submission.tenderMode,
+      declaredTenders: submission.declaredTenders,
       variance: submission.variance,
     });
 
@@ -3524,11 +3525,28 @@ function ShiftReconciliationCard(
     props.onChange({ ...props.settings, [key]: value });
   };
 
-  const modes: Array<{ value: POSTenderDeclarationMode; title: string; copy: string }> = [
-    { value: 'off', title: 'Cash only', copy: 'Count the drawer and nothing else.' },
-    { value: 'total', title: 'One non-cash total', copy: 'Declare all card and other tender as a single figure.' },
-    { value: 'category', title: 'By payment type', copy: 'Declare Visa, Master, Amex, credit, vouchers and installments separately.' },
-  ];
+  const selected = props.settings.declaredTenders;
+  const usesLumpTotal = selected.includes(TENDER_TOTAL_KEY);
+
+  /**
+   * A lump total already covers every method, so the two cannot be mixed
+   * without reconciling the same money twice. Picking one clears the other
+   * rather than silently producing a double-counted overall figure.
+   */
+  const toggleTender = (key: string) => {
+    if (key === TENDER_TOTAL_KEY) {
+      update('declaredTenders', usesLumpTotal ? [] : [TENDER_TOTAL_KEY]);
+      return;
+    }
+
+    const withoutTotal = selected.filter((entry) => entry !== TENDER_TOTAL_KEY);
+    update(
+      'declaredTenders',
+      withoutTotal.includes(key)
+        ? withoutTotal.filter((entry) => entry !== key)
+        : DECLARABLE_TENDER_METHODS.filter((method) => method === key || withoutTotal.includes(method)),
+    );
+  };
 
   return (
     <section className="settings-card">
@@ -3541,19 +3559,67 @@ function ShiftReconciliationCard(
       </div>
 
       <div className="meta-label">Tender declared at close</div>
-      <div className="theme-option-row wrap">
-        {modes.map((mode) => (
-          <button
-            key={mode.value}
-            className={`theme-option ${props.settings.tenderDeclarationMode === mode.value ? 'active' : ''}`}
+      <div className="field-hint">
+        Cash is always counted by denomination. Tick any non-cash tender you also want reconciled —
+        pick as many as you like, or none for a cash-only close.
+      </div>
+
+      <div className="tender-select-grid">
+        <label className={`tender-select ${usesLumpTotal ? 'active' : ''}`}>
+          <input
+            type="checkbox"
             disabled={props.disabled}
-            onClick={() => update('tenderDeclarationMode', mode.value)}
+            checked={usesLumpTotal}
+            onChange={() => toggleTender(TENDER_TOTAL_KEY)}
+          />
+          <span>
+            <b>All non-cash as one total</b>
+            <small>A single figure covering every card, voucher and credit payment.</small>
+          </span>
+        </label>
+
+        {DECLARABLE_TENDER_METHODS.map((method) => (
+          <label
+            key={method}
+            className={`tender-select ${selected.includes(method) ? 'active' : ''} ${usesLumpTotal ? 'muted' : ''}`}
           >
-            <span className="theme-option-title">{mode.title}</span>
-            <span className="theme-option-copy">{mode.copy}</span>
-          </button>
+            <input
+              type="checkbox"
+              disabled={props.disabled}
+              checked={selected.includes(method)}
+              onChange={() => toggleTender(method)}
+            />
+            <span>
+              <b>{PAYMENT_METHOD_LABELS[method] ?? method}</b>
+              <small>Declared and checked on its own line.</small>
+            </span>
+          </label>
         ))}
       </div>
+
+      <div className="settings-inline-actions">
+        <button
+          className="ghost-button"
+          disabled={props.disabled}
+          onClick={() => update('declaredTenders', [...DECLARABLE_TENDER_METHODS])}
+        >
+          Select every payment type
+        </button>
+        <button
+          className="ghost-button"
+          disabled={props.disabled || selected.length === 0}
+          onClick={() => update('declaredTenders', [])}
+        >
+          Cash only
+        </button>
+      </div>
+
+      {usesLumpTotal && (
+        <div className="field-hint">
+          Individual payment types are switched off while the lump total is selected, so the same
+          money is never counted twice.
+        </div>
+      )}
 
       <div className="settings-field-row">
         <LabelBlock label="Alert above variance of">
@@ -5338,7 +5404,8 @@ function HoldRecallModal(
 type MoneyDeclareSubmission = {
   counts: Record<string, number>;
   tenders: Record<string, number>;
-  tenderMode: POSTenderDeclarationMode;
+  /** Which tender buckets were asked for on this close. */
+  declaredTenders: string[];
   /** Cash variance against the transaction log, recorded with the declaration. */
   variance?: number;
 };
@@ -5360,15 +5427,15 @@ function MoneyDeclareModal(
   const isClosing = props.mode === 'close';
   // Non-cash tender is reconciled against completed sales, which only exist at
   // close; asking for it when opening a shift would have nothing to compare to.
-  const tenderMode: POSTenderDeclarationMode = isClosing ? props.settings.tenderDeclarationMode : 'off';
+  const declaredTenderKeys = isClosing ? props.settings.declaredTenders : [];
 
   const declaration = useMemo(
     () => buildCashDeclaration(
       isClosing ? CashCountMode.CLOSING : CashCountMode.OPENING,
       counts,
-      { tenders, tenderMode },
+      { tenders, declaredTenders: declaredTenderKeys },
     ),
-    [counts, isClosing, tenderMode, tenders],
+    [counts, declaredTenderKeys, isClosing, tenders],
   );
 
   const reconciliation: ShiftReconciliation | null = useMemo(() => {
@@ -5376,11 +5443,14 @@ function MoneyDeclareModal(
     return summarizeShiftReconciliation(props.report, declaration, props.settings);
   }, [declaration, isClosing, props.report, props.settings]);
 
-  const tenderRows = tenderMode === 'category'
-    ? NON_CASH_PAYMENT_METHODS.map((method) => ({ key: method as string, label: PAYMENT_METHOD_LABELS[method] ?? method }))
-    : tenderMode === 'total'
-      ? [{ key: TENDER_TOTAL_KEY, label: PAYMENT_METHOD_LABELS[TENDER_TOTAL_KEY] }]
-      : [];
+  // A host running a build from before drawer movements existed answers the
+  // Z-report without this list at all, and a close screen must not die on it.
+  const cashMovements = props.report?.cashMovements ?? [];
+
+  const tenderRows = declaredTenderKeys.map((key) => ({
+    key,
+    label: PAYMENT_METHOD_LABELS[key] ?? key,
+  }));
 
   const updateTender = (key: string, value: number) => {
     setTenders((previous) => ({ ...previous, [key]: Math.max(0, value) }));
@@ -5390,7 +5460,7 @@ function MoneyDeclareModal(
     props.onSubmit({
       counts,
       tenders,
-      tenderMode,
+      declaredTenders: declaredTenderKeys,
       variance: reconciliation?.cash.variance,
     });
   };
@@ -5448,7 +5518,7 @@ function MoneyDeclareModal(
           )}
         </div>
 
-        {isClosing && !props.cashSalesHidden && (props.report?.cashMovements.length ?? 0) > 0 && (
+        {isClosing && !props.cashSalesHidden && cashMovements.length > 0 && (
           <section className="tender-declare">
             <div className="settings-card-head">
               <div>
@@ -5458,7 +5528,7 @@ function MoneyDeclareModal(
               <div className="report-chip mono">Already in the expected drawer</div>
             </div>
             <div className="tender-declare-list">
-              {props.report!.cashMovements.map((movement) => (
+              {cashMovements.map((movement) => (
                 <div className="tender-declare-row" key={movement.id}>
                   <span className="tender-declare-label">
                     {movement.direction === 'in' ? 'Cash in' : 'Cash out'}

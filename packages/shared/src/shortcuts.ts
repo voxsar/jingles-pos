@@ -13,8 +13,10 @@
  * a till operator actually reaches for — from the number row.
  */
 import {
+  DECLARABLE_TENDER_METHODS,
   DEFAULT_POS_ACTION_SHORTCUTS,
   DEFAULT_POS_SHIFT_RECONCILIATION,
+  TENDER_TOTAL_KEY,
   type POSActionShortcutId,
   type POSActionShortcuts,
   type POSKeyBinding,
@@ -200,8 +202,38 @@ export function normalizeShortcutSettings(value: unknown): POSShortcutSettings {
   };
 }
 
-function normalizeTenderDeclarationMode(value: unknown): POSTenderDeclarationMode {
-  return value === 'total' || value === 'category' ? value : 'off';
+/**
+ * Resolves the tender buckets to collect at close.
+ *
+ * Accepts the current multi-select list and also the single `tenderDeclarationMode`
+ * this setting used to be, so a terminal that already had 'total' or 'category'
+ * saved keeps behaving the same after an upgrade instead of silently reverting
+ * to cash only.
+ */
+function normalizeDeclaredTenders(value: unknown, legacyMode: unknown): string[] {
+  const allowed = new Set<string>([TENDER_TOTAL_KEY, ...DECLARABLE_TENDER_METHODS]);
+
+  let selected: string[];
+  if (Array.isArray(value)) {
+    selected = [...new Set(
+      value.filter((entry): entry is string => typeof entry === 'string' && allowed.has(entry)),
+    )];
+  } else if (legacyMode === 'total') {
+    selected = [TENDER_TOTAL_KEY];
+  } else if (legacyMode === 'category') {
+    selected = [...DECLARABLE_TENDER_METHODS];
+  } else {
+    selected = [];
+  }
+
+  // A lump total already covers every method, so keeping both would reconcile
+  // the same money twice in the overall figure.
+  if (selected.includes(TENDER_TOTAL_KEY)) {
+    return [TENDER_TOTAL_KEY];
+  }
+
+  // Stored in a stable order so the settings form does not reshuffle on save.
+  return DECLARABLE_TENDER_METHODS.filter((method) => selected.includes(method));
 }
 
 function clampThreshold(value: unknown, fallback: number, max: number): number {
@@ -211,10 +243,11 @@ function clampThreshold(value: unknown, fallback: number, max: number): number {
 }
 
 export function normalizeShiftReconciliation(value: unknown): POSShiftReconciliationSettings {
-  const source = (value && typeof value === 'object' ? value : {}) as Partial<POSShiftReconciliationSettings>;
+  const source = (value && typeof value === 'object' ? value : {}) as
+    Partial<POSShiftReconciliationSettings> & { tenderDeclarationMode?: unknown };
 
   return {
-    tenderDeclarationMode: normalizeTenderDeclarationMode(source.tenderDeclarationMode),
+    declaredTenders: normalizeDeclaredTenders(source.declaredTenders, source.tenderDeclarationMode),
     alertThresholdAmount: clampThreshold(
       source.alertThresholdAmount,
       DEFAULT_POS_SHIFT_RECONCILIATION.alertThresholdAmount,

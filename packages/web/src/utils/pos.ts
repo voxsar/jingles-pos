@@ -143,16 +143,32 @@ function buildReconciliationRow(
  * derived from recorded sales, refunds and the opening float rather than from
  * anything the cashier typed.
  */
+/** What the transaction log says a declared tender bucket should hold. */
+export function expectedForTenderKey(
+  paymentBreakdown: Record<string, number>,
+  key: string,
+): number {
+  if (key !== TENDER_TOTAL_KEY) {
+    return paymentBreakdown[key] ?? 0;
+  }
+
+  return Object.entries(paymentBreakdown)
+    .filter(([method]) => method !== PaymentMethod.CASH)
+    .reduce((sum, [, amount]) => sum + amount, 0);
+}
+
 export function summarizeShiftReconciliation(
   report: Pick<ZReportSummary, 'expectedDrawer' | 'paymentBreakdown'>,
   declaration: Pick<CashDeclaration, 'total' | 'tenders' | 'tenderMode'>,
   settings: POSShiftReconciliationSettings,
 ): ShiftReconciliation {
-  const mode: POSTenderDeclarationMode = declaration.tenderMode ?? settings.tenderDeclarationMode;
   const declaredTenders = declaration.tenders ?? {};
-  const expectedNonCashTotal = Object.entries(report.paymentBreakdown)
-    .filter(([method]) => method !== PaymentMethod.CASH)
-    .reduce((sum, [, amount]) => sum + amount, 0);
+  // The declaration's own keys win when it carries them, so reopening a closed
+  // shift reconciles against what was actually collected rather than whatever
+  // the terminal is configured to collect today.
+  const selectedKeys = Object.keys(declaredTenders).length > 0
+    ? Object.keys(declaredTenders)
+    : settings.declaredTenders;
 
   const cash = buildReconciliationRow(
     PaymentMethod.CASH,
@@ -162,27 +178,16 @@ export function summarizeShiftReconciliation(
     settings,
   );
 
-  let tenders: TenderReconciliationRow[] = [];
-  if (mode === 'total') {
-    tenders = [buildReconciliationRow(
-      TENDER_TOTAL_KEY,
-      PAYMENT_METHOD_LABELS[TENDER_TOTAL_KEY],
-      declaredTenders[TENDER_TOTAL_KEY] ?? 0,
-      expectedNonCashTotal,
+  const tenders: TenderReconciliationRow[] = selectedKeys
+    .map((key) => buildReconciliationRow(
+      key,
+      PAYMENT_METHOD_LABELS[key] ?? key,
+      declaredTenders[key] ?? 0,
+      expectedForTenderKey(report.paymentBreakdown, key),
       settings,
-    )];
-  } else if (mode === 'category') {
-    tenders = NON_CASH_PAYMENT_METHODS
-      .map((method) => buildReconciliationRow(
-        method,
-        PAYMENT_METHOD_LABELS[method] ?? method,
-        declaredTenders[method] ?? 0,
-        report.paymentBreakdown[method] ?? 0,
-        settings,
-      ))
-      // A tender with nothing expected and nothing declared is noise on a close screen.
-      .filter((row) => row.declared !== 0 || row.expected !== 0);
-  }
+    ))
+    // A tender with nothing expected and nothing declared is noise on a close screen.
+    .filter((row) => row.declared !== 0 || row.expected !== 0);
 
   const declaredTotal = cash.declared + tenders.reduce((sum, row) => sum + row.declared, 0);
   const expectedTotal = cash.expected + tenders.reduce((sum, row) => sum + row.expected, 0);
@@ -555,7 +560,13 @@ export function createEmptyDenominationCounts(): Record<string, number> {
 export function buildCashDeclaration(
   mode: CashCountMode,
   counts: Record<string, number>,
-  options: { tenders?: Record<string, number>; tenderMode?: POSTenderDeclarationMode; variance?: number } = {},
+  options: {
+    /** Declared non-cash tender, keyed by payment method or `TENDER_TOTAL_KEY`. */
+    tenders?: Record<string, number>;
+    /** Which buckets were asked for; an empty list records no tender at all. */
+    declaredTenders?: string[];
+    variance?: number;
+  } = {},
 ): CashDeclaration {
   const total = roundCurrency(
     DENOMINATIONS.reduce((sum, denomination) => {
@@ -564,13 +575,19 @@ export function buildCashDeclaration(
     }, 0),
   );
 
-  const tenderMode = options.tenderMode ?? 'off';
-  const tenders = tenderMode === 'off'
+  const selectedKeys = options.declaredTenders ?? [];
+  // Only the buckets actually asked for are recorded, so a later reconciliation
+  // reads back exactly what this cashier was asked to count.
+  const tenders = selectedKeys.length === 0
     ? undefined
-    : Object.fromEntries(
-      Object.entries(options.tenders ?? {})
-        .map(([key, amount]) => [key, roundCurrency(Number(amount) || 0)]),
-    );
+    : Object.fromEntries(selectedKeys.map((key) => [
+      key,
+      roundCurrency(Number(options.tenders?.[key]) || 0),
+    ]));
+
+  const tenderMode: POSTenderDeclarationMode | undefined = tenders == null
+    ? undefined
+    : selectedKeys.includes(TENDER_TOTAL_KEY) ? 'total' : 'category';
 
   return {
     mode,
@@ -578,7 +595,7 @@ export function buildCashDeclaration(
     denominations: counts,
     variance: options.variance,
     tenders,
-    tenderMode: tenderMode === 'off' ? undefined : tenderMode,
+    tenderMode,
   };
 }
 

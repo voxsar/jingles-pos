@@ -164,9 +164,41 @@ describe('findShortcutConflicts', () => {
 });
 
 describe('normalizeShiftReconciliation', () => {
-  it('defaults an unknown declaration mode to cash only', () => {
-    expect(normalizeShiftReconciliation({ tenderDeclarationMode: 'nonsense' }).tenderDeclarationMode).toBe('off');
-    expect(normalizeShiftReconciliation({ tenderDeclarationMode: 'category' }).tenderDeclarationMode).toBe('category');
+  it('keeps any combination of tenders the operator selected', () => {
+    expect(normalizeShiftReconciliation({ declaredTenders: ['VISA', 'MASTER'] }).declaredTenders)
+      .toEqual(['VISA', 'MASTER']);
+    expect(normalizeShiftReconciliation({ declaredTenders: [] }).declaredTenders).toEqual([]);
+  });
+
+  it('stores the selection in a stable order regardless of how it was picked', () => {
+    expect(normalizeShiftReconciliation({ declaredTenders: ['GIFT', 'VISA', 'AMEX'] }).declaredTenders)
+      .toEqual(['VISA', 'AMEX', 'GIFT']);
+  });
+
+  it('drops unknown tender keys and duplicates', () => {
+    expect(normalizeShiftReconciliation({ declaredTenders: ['VISA', 'VISA', 'BITCOIN'] }).declaredTenders)
+      .toEqual(['VISA']);
+  });
+
+  it('collapses to the lump total when it is combined with individual methods', () => {
+    // Declaring both would reconcile the same money twice in the overall figure.
+    expect(normalizeShiftReconciliation({ declaredTenders: ['TOTAL', 'VISA'] }).declaredTenders)
+      .toEqual(['TOTAL']);
+  });
+
+  it('migrates the older single-mode setting so an upgrade keeps behaving the same', () => {
+    expect(normalizeShiftReconciliation({ tenderDeclarationMode: 'total' }).declaredTenders).toEqual(['TOTAL']);
+    expect(normalizeShiftReconciliation({ tenderDeclarationMode: 'category' }).declaredTenders)
+      .toEqual(['VISA', 'MASTER', 'AMEX', 'CREDIT', 'GIFT', 'INSTALLMENT']);
+    expect(normalizeShiftReconciliation({ tenderDeclarationMode: 'off' }).declaredTenders).toEqual([]);
+    expect(normalizeShiftReconciliation({ tenderDeclarationMode: 'nonsense' }).declaredTenders).toEqual([]);
+  });
+
+  it('prefers an explicit selection over the legacy mode', () => {
+    expect(normalizeShiftReconciliation({
+      declaredTenders: ['VISA'],
+      tenderDeclarationMode: 'category',
+    }).declaredTenders).toEqual(['VISA']);
   });
 
   it('rejects negative thresholds and keeps zero as an explicit off switch', () => {

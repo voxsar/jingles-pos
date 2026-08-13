@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   CashCountMode,
   Customer,
+  DECLARABLE_TENDER_METHODS,
   PaymentMethod,
   POSShiftReconciliationSettings,
   TENDER_TOTAL_KEY,
@@ -14,7 +15,7 @@ import {
 } from '../utils/pos';
 
 const settings: POSShiftReconciliationSettings = {
-  tenderDeclarationMode: 'category',
+  declaredTenders: [...DECLARABLE_TENDER_METHODS],
   alertThresholdAmount: 500,
   alertThresholdPercent: 2,
   requireConfirmationOnAlert: true,
@@ -79,7 +80,7 @@ describe('buildCashDeclaration', () => {
     const declaration = buildCashDeclaration(
       CashCountMode.CLOSING,
       { '1000': 1 },
-      { tenders: { VISA: 250 }, tenderMode: 'off' },
+      { tenders: { VISA: 250 }, declaredTenders: [] },
     );
 
     expect(declaration.tenders).toBeUndefined();
@@ -89,11 +90,66 @@ describe('buildCashDeclaration', () => {
     const declaration = buildCashDeclaration(
       CashCountMode.CLOSING,
       { '1000': 1 },
-      { tenders: { VISA: 250.005, MASTER: 99.999 }, tenderMode: 'category' },
+      { tenders: { VISA: 250.005, MASTER: 99.999 }, declaredTenders: [PaymentMethod.VISA, PaymentMethod.MASTER] },
     );
 
     expect(declaration.tenders).toEqual({ VISA: 250.01, MASTER: 100 });
     expect(declaration.tenderMode).toBe('category');
+  });
+});
+
+describe('partial tender selection', () => {
+  it('declares and reconciles only the tenders that were selected', () => {
+    // A shop that only reconciles its two card machines.
+    const declaration = buildCashDeclaration(
+      CashCountMode.CLOSING,
+      { '1000': 12 },
+      { tenders: { VISA: 5_000, MASTER: 3_000 }, declaredTenders: [PaymentMethod.VISA, PaymentMethod.MASTER] },
+    );
+
+    const result = summarizeShiftReconciliation(buildReport(), declaration, {
+      ...settings,
+      declaredTenders: [PaymentMethod.VISA, PaymentMethod.MASTER],
+    });
+
+    expect(Object.keys(declaration.tenders!)).toEqual([PaymentMethod.VISA, PaymentMethod.MASTER]);
+    expect(result.tenders.map((row) => row.key)).toEqual([PaymentMethod.VISA, PaymentMethod.MASTER]);
+    expect(result.hasAlert).toBe(false);
+  });
+
+  it('leaves an unselected tender out of the declaration even if a figure is passed for it', () => {
+    const declaration = buildCashDeclaration(
+      CashCountMode.CLOSING,
+      { '1000': 12 },
+      { tenders: { VISA: 5_000, GIFT: 400 }, declaredTenders: [PaymentMethod.VISA] },
+    );
+
+    expect(declaration.tenders).toEqual({ VISA: 5_000 });
+  });
+
+  it('records a zero for a selected tender the cashier left blank', () => {
+    // The bucket has to exist, or a card machine that settled nothing is
+    // indistinguishable from one nobody counted.
+    const declaration = buildCashDeclaration(
+      CashCountMode.CLOSING,
+      { '1000': 12 },
+      { tenders: {}, declaredTenders: [PaymentMethod.VISA, PaymentMethod.AMEX] },
+    );
+
+    expect(declaration.tenders).toEqual({ VISA: 0, AMEX: 0 });
+  });
+
+  it('reconciles a closed shift against what it collected, not what the terminal collects now', () => {
+    const declaration = buildCashDeclaration(
+      CashCountMode.CLOSING,
+      { '1000': 12 },
+      { tenders: { VISA: 5_000 }, declaredTenders: [PaymentMethod.VISA] },
+    );
+
+    // The terminal has since been reconfigured to collect every payment type.
+    const result = summarizeShiftReconciliation(buildReport(), declaration, settings);
+
+    expect(result.tenders.map((row) => row.key)).toEqual([PaymentMethod.VISA]);
   });
 });
 
@@ -102,7 +158,7 @@ describe('summarizeShiftReconciliation', () => {
     const declaration = buildCashDeclaration(
       CashCountMode.CLOSING,
       { '1000': 12 },
-      { tenders: { VISA: 5_000, MASTER: 3_000 }, tenderMode: 'category' },
+      { tenders: { VISA: 5_000, MASTER: 3_000 }, declaredTenders: [PaymentMethod.VISA, PaymentMethod.MASTER] },
     );
 
     const result = summarizeShiftReconciliation(buildReport(), declaration, settings);
@@ -118,7 +174,7 @@ describe('summarizeShiftReconciliation', () => {
 
     const result = summarizeShiftReconciliation(buildReport(), declaration, {
       ...settings,
-      tenderDeclarationMode: 'off',
+      declaredTenders: [],
     });
 
     expect(result.cash.variance).toBe(-1_000);
@@ -132,7 +188,7 @@ describe('summarizeShiftReconciliation', () => {
 
     const result = summarizeShiftReconciliation(buildReport(), declaration, {
       ...settings,
-      tenderDeclarationMode: 'off',
+      declaredTenders: [],
     });
 
     expect(result.cash.variance).toBe(-100);
@@ -146,7 +202,7 @@ describe('summarizeShiftReconciliation', () => {
     const result = summarizeShiftReconciliation(
       buildReport({ expectedDrawer: 1_000, paymentBreakdown: { [PaymentMethod.CASH]: 1_000 } }),
       declaration,
-      { ...settings, tenderDeclarationMode: 'off' },
+      { ...settings, declaredTenders: [] },
     );
 
     expect(result.cash.variance).toBe(-400);
@@ -157,7 +213,7 @@ describe('summarizeShiftReconciliation', () => {
     const declaration = buildCashDeclaration(
       CashCountMode.CLOSING,
       { '1000': 12 },
-      { tenders: { VISA: 5_000, MASTER: 1_850 }, tenderMode: 'category' },
+      { tenders: { VISA: 5_000, MASTER: 1_850 }, declaredTenders: [PaymentMethod.VISA, PaymentMethod.MASTER] },
     );
 
     const result = summarizeShiftReconciliation(buildReport(), declaration, settings);
@@ -171,12 +227,12 @@ describe('summarizeShiftReconciliation', () => {
     const declaration = buildCashDeclaration(
       CashCountMode.CLOSING,
       { '1000': 12 },
-      { tenders: { [TENDER_TOTAL_KEY]: 7_000 }, tenderMode: 'total' },
+      { tenders: { [TENDER_TOTAL_KEY]: 7_000 }, declaredTenders: [TENDER_TOTAL_KEY] },
     );
 
     const result = summarizeShiftReconciliation(buildReport(), declaration, {
       ...settings,
-      tenderDeclarationMode: 'total',
+      declaredTenders: [TENDER_TOTAL_KEY],
     });
 
     expect(result.tenders).toHaveLength(1);
@@ -189,7 +245,7 @@ describe('summarizeShiftReconciliation', () => {
     const declaration = buildCashDeclaration(
       CashCountMode.CLOSING,
       { '1000': 12 },
-      { tenders: { VISA: 5_000, MASTER: 3_000 }, tenderMode: 'category' },
+      { tenders: { VISA: 5_000, MASTER: 3_000 }, declaredTenders: [PaymentMethod.VISA, PaymentMethod.MASTER] },
     );
 
     const result = summarizeShiftReconciliation(buildReport(), declaration, settings);
@@ -201,7 +257,10 @@ describe('summarizeShiftReconciliation', () => {
     const declaration = buildCashDeclaration(
       CashCountMode.CLOSING,
       { '1000': 12 },
-      { tenders: { VISA: 5_000, MASTER: 3_000, AMEX: 900 }, tenderMode: 'category' },
+      {
+        tenders: { VISA: 5_000, MASTER: 3_000, AMEX: 900 },
+        declaredTenders: [PaymentMethod.VISA, PaymentMethod.MASTER, PaymentMethod.AMEX],
+      },
     );
 
     const result = summarizeShiftReconciliation(buildReport(), declaration, settings);
@@ -215,7 +274,7 @@ describe('summarizeShiftReconciliation', () => {
 
     const result = summarizeShiftReconciliation(buildReport(), declaration, {
       ...settings,
-      tenderDeclarationMode: 'off',
+      declaredTenders: [],
       alertThresholdAmount: 0,
       alertThresholdPercent: 0,
     });
