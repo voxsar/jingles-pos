@@ -27,6 +27,7 @@ import {
   applyServerEvent,
   getLocalSyncDashboard,
   getLocalSyncStatus,
+  buildDrawerContents,
   buildZReport,
   buildZReports,
   confirmPlayback,
@@ -619,6 +620,7 @@ router.post('/shifts/:id/cash-movement', async (req: Request, res: Response) => 
     if (reason === '') {
       return res.status(400).json({ error: 'A reason is required for a cash movement' });
     }
+    let reasonSuffix = '';
 
     const shift = await prisma.pOSShift.findUnique({ where: { id: req.params.id } });
     if (!shift) {
@@ -629,6 +631,43 @@ router.post('/shifts/:id/cash-movement', async (req: Request, res: Response) => 
     }
     if (req.body.terminalId && req.body.terminalId !== shift.terminalId) {
       return res.status(409).json({ error: 'The active shift belongs to a different terminal' });
+    }
+
+    // Money cannot leave a drawer that does not hold it. Enforced here rather
+    // than only in the UI, because a movement that overdraws the till is either
+    // a miscount or a loss, and recording it silently destroys the evidence.
+    const allowOverdraw = req.body.allowOverdraw === true;
+    if (direction === 'out') {
+      const drawer = await buildDrawerContents(shift.id);
+      const shortfalls: string[] = [];
+
+      if (declaration.total > drawer.total) {
+        shortfalls.push(
+          `total ${declaration.total.toFixed(2)} exceeds the ${drawer.total.toFixed(2)} in the drawer`,
+        );
+      }
+
+      for (const [value, raw] of Object.entries(declaration.denominations ?? {})) {
+        const wanted = Number(raw);
+        if (!Number.isFinite(wanted) || wanted <= 0) continue;
+        const held = drawer.counts[value] ?? 0;
+        if (wanted > held) {
+          shortfalls.push(`${wanted}x${value} requested but only ${held} in the drawer`);
+        }
+      }
+
+      if (shortfalls.length > 0 && !allowOverdraw) {
+        return res.status(409).json({
+          error: `The drawer does not hold this: ${shortfalls.join('; ')}.`,
+          drawer,
+        });
+      }
+
+      if (shortfalls.length > 0) {
+        // Permitted by configuration, but never silently: the override is part
+        // of the audit trail for the shift.
+        reasonSuffix = ` [overdraw permitted: ${shortfalls.join('; ')}]`;
+      }
     }
 
     const mode = direction === 'in' ? CashCountMode.PAID_IN : CashCountMode.PAID_OUT;
@@ -643,7 +682,7 @@ router.post('/shifts/:id/cash-movement', async (req: Request, res: Response) => 
         shiftId: shift.id,
         movementId,
         direction,
-        reason,
+        reason: `${reason}${reasonSuffix}`,
         declaration: {
           ...declaration,
           mode,
@@ -659,6 +698,16 @@ router.post('/shifts/:id/cash-movement', async (req: Request, res: Response) => 
   } catch (error) {
     console.error(error);
     return res.status(500).json({ error: 'Failed to record the cash movement' });
+  }
+});
+
+/** What the drawer is believed to hold right now, used to suggest change. */
+router.get('/shifts/:id/drawer', async (req: Request, res: Response) => {
+  try {
+    return res.json(await buildDrawerContents(req.params.id));
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({ error: 'Failed to read the drawer contents' });
   }
 });
 

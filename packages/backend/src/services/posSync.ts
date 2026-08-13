@@ -5,7 +5,9 @@ import {
   CompleteSaleInput,
   DEFAULT_DEVICE_ID,
   DEFAULT_TERMINAL_ID,
+  DrawerContents,
   HoldSaleInput,
+  PaymentMethod,
   POSSyncDashboard,
   ProductVariant,
   ReturnInput,
@@ -1937,6 +1939,118 @@ function summarizeZShift(shift: ZReportShift): ZReportSummary {
       declaredTenderMode: (closingCount?.tenderMode as ZReportSummary['declaredTenderMode']) ?? undefined,
       cashMovements,
     };
+}
+
+function addPieces(target: Map<string, number>, counts: Record<string, unknown> | undefined, sign: 1 | -1) {
+  if (!counts) return;
+  for (const [value, raw] of Object.entries(counts)) {
+    const pieces = typeof raw === 'number' ? raw : Number.parseFloat(String(raw));
+    if (!Number.isFinite(pieces) || pieces <= 0) continue;
+    if (!Number.isFinite(Number(value))) continue;
+    target.set(value, (target.get(value) ?? 0) + (sign * Math.floor(pieces)));
+  }
+}
+
+/**
+ * Reconstructs what the drawer physically holds from the shift's audit trail:
+ * the opening count, every mid-shift movement, the notes taken in on each cash
+ * payment, and the notes handed back as change.
+ *
+ * Any cash payment recorded without a denomination breakdown — the cashier
+ * typed an amount instead of tapping the note buttons — cannot be attributed to
+ * specific notes, so its value is reported separately and the result is marked
+ * inexact rather than being quietly guessed at.
+ */
+export async function buildDrawerContents(shiftId: string): Promise<DrawerContents> {
+  const shift = await prisma.pOSShift.findUnique({
+    where: { id: shiftId },
+    include: { cashCounts: true, sales: { include: { payments: true } } },
+  });
+  if (!shift) throw new Error('Shift not found');
+
+  const pieces = new Map<string, number>();
+  let unaccountedIn = 0;
+  let unaccountedOut = 0;
+  let exact = true;
+
+  for (const count of shift.cashCounts) {
+    const denominations = parseDeclaredTenders(count.denominations);
+    if (count.mode === CashCountMode.OPENING || count.mode === CashCountMode.PAID_IN) {
+      if (denominations) {
+        addPieces(pieces, denominations, 1);
+      } else {
+        unaccountedIn += count.total;
+        exact = false;
+      }
+    } else if (count.mode === CashCountMode.PAID_OUT) {
+      if (denominations) {
+        addPieces(pieces, denominations, -1);
+      } else {
+        unaccountedOut += count.total;
+        exact = false;
+      }
+    }
+  }
+
+  for (const sale of shift.sales) {
+    for (const payment of sale.payments) {
+      if (payment.method !== PaymentMethod.CASH) continue;
+
+      const metadata = payment.metadata ? parseMetadata(payment.metadata) : null;
+      const received = metadata?.denominations as Record<string, unknown> | undefined;
+      const changeGiven = metadata?.changeDenominations as Record<string, unknown> | undefined;
+      const tendered = payment.tenderedAmount ?? payment.amount;
+      const changeDue = payment.changeDue ?? 0;
+
+      if (received && Object.keys(received).length > 0) {
+        addPieces(pieces, received, 1);
+      } else if (tendered > 0) {
+        unaccountedIn += tendered;
+        exact = false;
+      }
+
+      if (changeGiven && Object.keys(changeGiven).length > 0) {
+        addPieces(pieces, changeGiven, -1);
+      } else if (changeDue > 0) {
+        unaccountedOut += changeDue;
+        exact = false;
+      }
+    }
+  }
+
+  const counts: Record<string, number> = {};
+  let total = 0;
+  for (const [value, count] of pieces) {
+    // A negative count means the ledger has drifted — usually an untracked
+    // payout. Clamping keeps the figure usable, and `exact` already says it is
+    // only a belief.
+    if (count <= 0) {
+      if (count < 0) exact = false;
+      continue;
+    }
+    counts[value] = count;
+    total += Number(value) * count;
+  }
+
+  return {
+    shiftId,
+    counts,
+    total: Math.round(total * 100) / 100,
+    exact,
+    unaccountedIn: Math.round(unaccountedIn * 100) / 100,
+    unaccountedOut: Math.round(unaccountedOut * 100) / 100,
+  };
+}
+
+function parseMetadata(raw: string): Record<string, unknown> | null {
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : null;
+  } catch {
+    return null;
+  }
 }
 
 export async function buildZReport(shiftId: string): Promise<ZReportSummary> {

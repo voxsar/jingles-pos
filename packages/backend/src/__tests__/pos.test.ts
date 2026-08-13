@@ -32,7 +32,7 @@ jest.mock('../prisma', () => ({
   },
 }));
 
-const { buildZReport, confirmPlayback, getLocalSyncStatus, getServerVectorClock } = require('../services/posSync') as typeof import('../services/posSync');
+const { buildDrawerContents, buildZReport, confirmPlayback, getLocalSyncStatus, getServerVectorClock } = require('../services/posSync') as typeof import('../services/posSync');
 const { authenticate, resolveUnlockMode } = require('../routes/auth') as typeof import('../routes/auth');
 const { buildFtsQuery } = require('../services/localCatalog') as typeof import('../services/localCatalog');
 const originalPosSyncAppToken = process.env.JINGLES_POS_SYNC_APP_TOKEN;
@@ -308,6 +308,93 @@ describe('event sourced POS backend services', () => {
     expect(report.countedDrawer).toBeUndefined();
     expect(report.variance).toBeUndefined();
     expect(report.expectedDrawer).toBe(2_000);
+  });
+
+  describe('drawer contents', () => {
+    it('tracks notes in and out to reconstruct what the drawer holds', async () => {
+      mockTx.pOSShift.findUnique.mockResolvedValue({
+        id: 'shift-d1',
+        cashCounts: [
+          { mode: CashCountMode.OPENING, total: 1_100, denominations: '{"1000":1,"50":2}' },
+          { mode: CashCountMode.PAID_IN, total: 500, denominations: '{"500":1}' },
+          { mode: CashCountMode.PAID_OUT, total: 1_000, denominations: '{"1000":1}' },
+        ],
+        sales: [{
+          payments: [{
+            method: 'CASH',
+            amount: 450,
+            tenderedAmount: 500,
+            changeDue: 50,
+            metadata: '{"denominations":{"500":1},"changeDenominations":{"50":1}}',
+          }],
+        }],
+      });
+
+      const drawer = await buildDrawerContents('shift-d1');
+
+      // 1000: +1 opening, -1 paid out. 50: +2 opening, -1 as change.
+      // 500: +1 paid in, +1 taken from the customer.
+      expect(drawer.counts).toEqual({ '500': 2, '50': 1 });
+      expect(drawer.total).toBe(1_050);
+      expect(drawer.exact).toBe(true);
+      expect(drawer.unaccountedIn).toBe(0);
+      expect(drawer.unaccountedOut).toBe(0);
+    });
+
+    it('reports cash with no recorded breakdown separately rather than guessing at notes', async () => {
+      mockTx.pOSShift.findUnique.mockResolvedValue({
+        id: 'shift-d2',
+        cashCounts: [{ mode: CashCountMode.OPENING, total: 1_000, denominations: '{"1000":1}' }],
+        sales: [{
+          payments: [{
+            method: 'CASH',
+            amount: 300,
+            tenderedAmount: 500,
+            changeDue: 200,
+            // The cashier typed an amount instead of tapping the note buttons.
+            metadata: null,
+          }],
+        }],
+      });
+
+      const drawer = await buildDrawerContents('shift-d2');
+
+      expect(drawer.counts).toEqual({ '1000': 1 });
+      expect(drawer.exact).toBe(false);
+      expect(drawer.unaccountedIn).toBe(500);
+      expect(drawer.unaccountedOut).toBe(200);
+    });
+
+    it('ignores non-cash payments, which never touch the drawer', async () => {
+      mockTx.pOSShift.findUnique.mockResolvedValue({
+        id: 'shift-d3',
+        cashCounts: [{ mode: CashCountMode.OPENING, total: 500, denominations: '{"500":1}' }],
+        sales: [{
+          payments: [{ method: 'VISA', amount: 5_000, tenderedAmount: 5_000, changeDue: 0, metadata: null }],
+        }],
+      });
+
+      const drawer = await buildDrawerContents('shift-d3');
+
+      expect(drawer.counts).toEqual({ '500': 1 });
+      expect(drawer.exact).toBe(true);
+    });
+
+    it('clamps a drifted negative count and marks the drawer inexact', async () => {
+      mockTx.pOSShift.findUnique.mockResolvedValue({
+        id: 'shift-d4',
+        cashCounts: [
+          { mode: CashCountMode.OPENING, total: 100, denominations: '{"100":1}' },
+          { mode: CashCountMode.PAID_OUT, total: 300, denominations: '{"100":3}' },
+        ],
+        sales: [],
+      });
+
+      const drawer = await buildDrawerContents('shift-d4');
+
+      expect(drawer.counts).toEqual({});
+      expect(drawer.exact).toBe(false);
+    });
   });
 
   it('treats the configured POS app token as workstation sync auth', async () => {

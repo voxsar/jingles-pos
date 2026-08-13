@@ -371,6 +371,12 @@ export interface DenominationBreakdown {
 
 export interface ChangeSuggestion extends DenominationBreakdown {
   amount: number;
+  /**
+   * True when this breakdown fits inside the drawer's known contents. False
+   * means either the drawer cannot cover it, or the drawer is unknown — the
+   * caller should only surface a warning when it actually passed a supply.
+   */
+  payableFromDrawer: boolean;
 }
 
 export interface TopUpSuggestion {
@@ -383,6 +389,61 @@ export interface TopUpSuggestion {
   changeBreakdown: DenominationBreakdown;
   /** Pieces saved versus giving change for the original tender. */
   piecesSaved: number;
+  /** The drawer, plus what the customer hands over, can pay this change out. */
+  payableFromDrawer: boolean;
+  /** The drawer could not make the original change, but can make this one. */
+  unblocksDrawer: boolean;
+}
+
+/** Merges two denomination maps, for asking what the drawer holds after a tender. */
+export function addCounts(
+  base: Record<string | number, number>,
+  extra: Record<string | number, number>,
+): Record<string, number> {
+  const merged: Record<string, number> = {};
+
+  for (const [value, count] of Object.entries(base)) {
+    const parsed = Number(count);
+    if (Number.isFinite(parsed) && parsed > 0) merged[value] = parsed;
+  }
+  for (const [value, count] of Object.entries(extra)) {
+    const parsed = Number(count);
+    if (Number.isFinite(parsed) && parsed > 0) merged[value] = (merged[value] ?? 0) + parsed;
+  }
+
+  return merged;
+}
+
+/** Subtracts denominations from a map, never going below zero on any value. */
+export function subtractCounts(
+  base: Record<string | number, number>,
+  taken: Record<string | number, number>,
+): Record<string, number> {
+  const merged = addCounts(base, {});
+
+  for (const [value, count] of Object.entries(taken)) {
+    const parsed = Number(count);
+    if (!Number.isFinite(parsed) || parsed <= 0) continue;
+    const next = (merged[value] ?? 0) - parsed;
+    if (next > 0) {
+      merged[value] = next;
+    } else {
+      delete merged[value];
+    }
+  }
+
+  return merged;
+}
+
+/** Face value of a denomination map. */
+export function countsTotal(counts: Record<string | number, number>): number {
+  return roundCurrency(
+    Object.entries(counts).reduce((sum, [value, count]) => {
+      const pieces = Number(count);
+      const face = Number(value);
+      return Number.isFinite(pieces) && Number.isFinite(face) ? sum + (face * pieces) : sum;
+    }, 0),
+  );
 }
 
 function formatBreakdownCounts(counts: Record<number, number>): string {
@@ -401,29 +462,28 @@ export function formatDenominationBreakdown(breakdown: DenominationBreakdown): s
 /** Denomination values, largest first, as whole rupees. */
 const DENOMINATION_VALUES = DENOMINATIONS.map((entry) => entry.value).sort((left, right) => right - left);
 
-/**
- * The fewest-pieces way to make an amount, or null if the denominations cannot
- * make it exactly.
- *
- * Sri Lankan denominations are canonical, so the greedy choice is also the
- * optimal one; the loop is kept explicit rather than greedy-by-assumption so a
- * future denomination change cannot silently produce a wrong-but-plausible
- * answer — anything it cannot make exactly comes back as null instead.
- */
-export function makeChangeBreakdown(
-  amount: number,
-  available: number[] = DENOMINATION_VALUES,
-): DenominationBreakdown | null {
-  const target = Math.round(amount);
-  if (!Number.isFinite(target) || target < 0 || Math.abs(amount - target) > 0.005) {
-    return null;
-  }
-  if (target === 0) {
-    return { counts: {}, pieceCount: 0 };
-  }
+export interface ChangeOptions {
+  /** Denominations allowed at all; defaults to every denomination in use. */
+  values?: number[];
+  /**
+   * Pieces actually available per denomination. When given, no breakdown may
+   * use more of a denomination than the drawer holds. Omit for the theoretical
+   * answer that ignores what is in the till.
+   */
+  supply?: Record<string | number, number>;
+}
 
-  const values = [...new Set(available)].sort((left, right) => right - left);
-  // Minimum pieces for every amount up to the target.
+/** Guard against a pathological target locking the till up in a DP loop. */
+const MAX_CHANGE_TARGET = 100_000;
+
+function readSupply(supply: ChangeOptions['supply'], value: number): number {
+  if (!supply) return Number.POSITIVE_INFINITY;
+  const count = Number(supply[value] ?? supply[String(value)] ?? 0);
+  return Number.isFinite(count) && count > 0 ? Math.floor(count) : 0;
+}
+
+/** Unbounded minimum-pieces change, used when the drawer contents are unknown. */
+function makeUnboundedBreakdown(target: number, values: number[]): DenominationBreakdown | null {
   const best = new Array<number>(target + 1).fill(Number.POSITIVE_INFINITY);
   const pick = new Array<number>(target + 1).fill(0);
   best[0] = 0;
@@ -439,9 +499,7 @@ export function makeChangeBreakdown(
     }
   }
 
-  if (!Number.isFinite(best[target])) {
-    return null;
-  }
+  if (!Number.isFinite(best[target])) return null;
 
   const counts: Record<number, number> = {};
   let remaining = target;
@@ -452,6 +510,100 @@ export function makeChangeBreakdown(
   }
 
   return { counts, pieceCount: best[target] };
+}
+
+/**
+ * Minimum-pieces change that never spends more of a denomination than the
+ * drawer holds. A bounded problem, so the greedy answer can be wrong — 450 from
+ * a drawer with one 100 and plenty of 50s is 1x100 + 7x50, which greedy would
+ * never reach after taking the 100.
+ */
+function makeBoundedBreakdown(
+  target: number,
+  values: number[],
+  supply: NonNullable<ChangeOptions['supply']>,
+): DenominationBreakdown | null {
+  const size = target + 1;
+  const count = values.length;
+  const INFEASIBLE = 0x3fffffff;
+  // best[i][r]: fewest pieces making r using only values from index i onward.
+  const best = new Int32Array((count + 1) * size).fill(INFEASIBLE);
+  const chosen = new Int32Array((count + 1) * size);
+  best[count * size] = 0;
+
+  for (let index = count - 1; index >= 0; index -= 1) {
+    const value = values[index];
+    const stock = readSupply(supply, value);
+    const row = index * size;
+    const nextRow = (index + 1) * size;
+
+    for (let remaining = 0; remaining < size; remaining += 1) {
+      let bestPieces = INFEASIBLE;
+      let bestUsed = 0;
+      const limit = Math.min(stock, Math.floor(remaining / value));
+
+      for (let used = 0; used <= limit; used += 1) {
+        const sub = best[nextRow + (remaining - (used * value))];
+        if (sub >= INFEASIBLE) continue;
+        const pieces = sub + used;
+        if (pieces < bestPieces) {
+          bestPieces = pieces;
+          bestUsed = used;
+        }
+      }
+
+      best[row + remaining] = bestPieces;
+      chosen[row + remaining] = bestUsed;
+    }
+  }
+
+  if (best[target] >= INFEASIBLE) return null;
+
+  const counts: Record<number, number> = {};
+  let remaining = target;
+  for (let index = 0; index < count && remaining > 0; index += 1) {
+    const used = chosen[(index * size) + remaining];
+    if (used > 0) {
+      counts[values[index]] = used;
+      remaining -= used * values[index];
+    }
+  }
+
+  return { counts, pieceCount: best[target] };
+}
+
+/**
+ * The fewest-pieces way to make an amount, or null if it cannot be made exactly
+ * from the denominations — and, when a `supply` is given, from the pieces the
+ * drawer actually holds.
+ *
+ * The search is exhaustive rather than greedy so a future denomination change,
+ * or a drawer that has run out of something, cannot produce a
+ * wrong-but-plausible answer. Anything unmakeable comes back as null.
+ */
+export function makeChangeBreakdown(
+  amount: number,
+  options: ChangeOptions = {},
+): DenominationBreakdown | null {
+  const target = Math.round(amount);
+  if (!Number.isFinite(target) || target < 0 || Math.abs(amount - target) > 0.005) {
+    return null;
+  }
+  if (target === 0) {
+    return { counts: {}, pieceCount: 0 };
+  }
+  if (target > MAX_CHANGE_TARGET) {
+    return null;
+  }
+
+  const values = [...new Set(options.values ?? DENOMINATION_VALUES)]
+    .filter((value) => value > 0)
+    .sort((left, right) => right - left);
+  if (values.length === 0) return null;
+
+  return options.supply
+    ? makeBoundedBreakdown(target, values, options.supply)
+    : makeUnboundedBreakdown(target, values);
 }
 
 /**
@@ -470,32 +622,56 @@ const MAX_SUGGESTED_PIECES = 12;
  * made up differently because the drawer ran out of fifties. Forbidding the
  * largest instead would answer "450" with "9x50", which no one hands over.
  */
-export function suggestChangeBreakdowns(amount: number, limit = 3): ChangeSuggestion[] {
+export function suggestChangeBreakdowns(
+  amount: number,
+  limit = 3,
+  supply?: ChangeOptions['supply'],
+): ChangeSuggestion[] {
   // No change owed is not a suggestion of "hand over nothing".
   if (!Number.isFinite(amount) || amount <= 0) {
     return [];
   }
 
-  const suggestions: ChangeSuggestion[] = [];
-  const seen = new Set<string>();
-  let available = [...DENOMINATION_VALUES];
+  const collect = (constrainToSupply: boolean): ChangeSuggestion[] => {
+    const found: ChangeSuggestion[] = [];
+    const seen = new Set<string>();
+    let values = [...DENOMINATION_VALUES];
 
-  while (suggestions.length < limit && available.length > 0) {
-    const breakdown = makeChangeBreakdown(amount, available);
-    if (breakdown == null) break;
+    while (found.length < limit && values.length > 0) {
+      const breakdown = makeChangeBreakdown(amount, {
+        values,
+        supply: constrainToSupply ? supply : undefined,
+      });
+      if (breakdown == null) break;
 
-    const signature = formatBreakdownCounts(breakdown.counts);
-    if (!seen.has(signature) && breakdown.pieceCount <= MAX_SUGGESTED_PIECES) {
-      seen.add(signature);
-      suggestions.push({ ...breakdown, amount: roundCurrency(amount) });
+      const signature = formatBreakdownCounts(breakdown.counts);
+      if (!seen.has(signature) && breakdown.pieceCount <= MAX_SUGGESTED_PIECES) {
+        seen.add(signature);
+        found.push({
+          ...breakdown,
+          amount: roundCurrency(amount),
+          payableFromDrawer: constrainToSupply,
+        });
+      }
+
+      const smallestUsed = Math.min(...Object.keys(breakdown.counts).map(Number));
+      if (!Number.isFinite(smallestUsed)) break;
+      values = values.filter((value) => value !== smallestUsed);
     }
 
-    const smallestUsed = Math.min(...Object.keys(breakdown.counts).map(Number));
-    if (!Number.isFinite(smallestUsed)) break;
-    available = available.filter((value) => value !== smallestUsed);
+    return found;
+  };
+
+  if (supply != null) {
+    const payable = collect(true);
+    if (payable.length > 0) {
+      return payable;
+    }
+    // The drawer cannot make this amount. Still show how it breaks down, but
+    // marked, so the cashier is told to break a note rather than left guessing.
   }
 
-  return suggestions;
+  return collect(false);
 }
 
 /**
@@ -509,6 +685,7 @@ export function suggestTenderTopUps(
   total: number,
   tendered: number,
   limit = 3,
+  supply?: ChangeOptions['supply'],
 ): TopUpSuggestion[] {
   const baseChange = Math.round(tendered - total);
   if (baseChange <= 0) {
@@ -519,6 +696,13 @@ export function suggestTenderTopUps(
   if (baseBreakdown == null) {
     return [];
   }
+
+  // What the drawer can actually do for the current tender. If it cannot cover
+  // the change at all, any ask that *can* be covered is worth surfacing even
+  // when it saves no pieces — that is the whole reason to ask.
+  const basePayable = supply == null
+    ? null
+    : makeChangeBreakdown(baseChange, { supply });
 
   const suggestions: TopUpSuggestion[] = [];
   // Asking for more than the change being handed back is not a simplification,
@@ -534,19 +718,41 @@ export function suggestTenderTopUps(
     if (askBreakdown == null || askBreakdown.pieceCount > 2) continue;
 
     const changeAmount = baseChange + askFor;
-    const changeBreakdown = makeChangeBreakdown(changeAmount);
+    // The notes the customer hands over land in the drawer before the change
+    // comes out, so they are available to make that change.
+    const supplyAfterAsk = supply == null
+      ? undefined
+      : addCounts(supply, askBreakdown.counts);
+    const payableBreakdown = supplyAfterAsk == null
+      ? null
+      : makeChangeBreakdown(changeAmount, { supply: supplyAfterAsk });
+    const changeBreakdown = payableBreakdown ?? makeChangeBreakdown(changeAmount);
     if (changeBreakdown == null) continue;
 
     const piecesSaved = baseBreakdown.pieceCount - changeBreakdown.pieceCount;
-    // Worth mentioning only if the change genuinely gets simpler.
-    if (piecesSaved <= 0) continue;
+    const unblocksDrawer = basePayable == null && supply != null && payableBreakdown != null;
 
-    suggestions.push({ askFor, askBreakdown, changeAmount, changeBreakdown, piecesSaved });
+    // Worth mentioning if the change gets simpler, or if it is the difference
+    // between being able to give change at all and not.
+    if (piecesSaved <= 0 && !unblocksDrawer) continue;
+
+    suggestions.push({
+      askFor,
+      askBreakdown,
+      changeAmount,
+      changeBreakdown,
+      piecesSaved,
+      payableFromDrawer: payableBreakdown != null,
+      unblocksDrawer,
+    });
   }
 
   return suggestions
     .sort((left, right) => (
-      right.piecesSaved - left.piecesSaved
+      // An ask that makes the change payable at all beats one that merely tidies it.
+      Number(right.unblocksDrawer) - Number(left.unblocksDrawer)
+      || Number(right.payableFromDrawer) - Number(left.payableFromDrawer)
+      || right.piecesSaved - left.piecesSaved
       || left.askBreakdown.pieceCount - right.askBreakdown.pieceCount
       || left.askFor - right.askFor
     ))

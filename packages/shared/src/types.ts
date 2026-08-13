@@ -209,6 +209,36 @@ export interface CashMovementInput {
   /** Free-text justification, required by the workstation before submitting. */
   reason: string;
   declaration: CashDeclaration;
+  /**
+   * Explicit permission to take out more than the drawer holds. The service
+   * refuses an overdraw without it, so this must only be sent when the terminal
+   * is configured to allow one.
+   */
+  allowOverdraw?: boolean;
+}
+
+/**
+ * What the drawer is believed to physically hold right now, piece by piece.
+ *
+ * Derived from the opening count, mid-shift movements, and the denominations
+ * recorded against each cash payment: notes taken in, notes handed back as
+ * change. It is a belief, not a fact — a cashier who types a tendered amount
+ * instead of tapping the note buttons leaves no breakdown behind, so those
+ * amounts land in `unaccountedIn` / `unaccountedOut` and `exact` goes false.
+ * Consumers must treat an inexact drawer as a hint, never as an authority.
+ */
+export interface DrawerContents {
+  shiftId: string;
+  /** Piece count keyed by denomination value, e.g. `{ "1000": 4, "50": 12 }`. */
+  counts: Record<string, number>;
+  /** Value of `counts` only; it excludes the unaccounted amounts below. */
+  total: number;
+  /** True when every contributing cash movement carried a denomination breakdown. */
+  exact: boolean;
+  /** Cash known to have entered the drawer with no recorded breakdown. */
+  unaccountedIn: number;
+  /** Cash known to have left the drawer with no recorded breakdown. */
+  unaccountedOut: number;
 }
 
 export interface CashMovementSummary {
@@ -767,6 +797,14 @@ export interface POSShiftReconciliationSettings {
   alertThresholdPercent: number;
   /** Require a manager-visible confirmation before a flagged shift can be closed. */
   requireConfirmationOnAlert: boolean;
+  /**
+   * Allow a cash-out that takes more than the drawer is believed to hold, or
+   * more of a denomination than it has. Off by default: taking out money that
+   * is not there means either the count is wrong or the drawer is, and both
+   * need looking at rather than recording. Turning this on is an explicit
+   * override and every use of it is noted against the shift.
+   */
+  allowDrawerOverdraw: boolean;
 }
 
 export interface POSDesktopSettings {
@@ -811,6 +849,7 @@ export const DEFAULT_POS_SHIFT_RECONCILIATION: POSShiftReconciliationSettings = 
   alertThresholdAmount: 500,
   alertThresholdPercent: 2,
   requireConfirmationOnAlert: true,
+  allowDrawerOverdraw: false,
 };
 
 /** Tender types a cashier can be asked to declare alongside the cash count. */

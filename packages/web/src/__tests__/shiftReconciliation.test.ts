@@ -19,6 +19,7 @@ const settings: POSShiftReconciliationSettings = {
   alertThresholdAmount: 500,
   alertThresholdPercent: 2,
   requireConfirmationOnAlert: true,
+  allowDrawerOverdraw: false,
 };
 
 function buildReport(overrides: Partial<ZReportSummary> = {}): ZReportSummary {

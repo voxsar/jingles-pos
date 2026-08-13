@@ -1,8 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import {
+  addCounts,
+  countsTotal,
   formatDenominationBreakdown,
   makeChangeBreakdown,
   suggestChangeBreakdowns,
+  subtractCounts,
   suggestTenderTopUps,
 } from '../utils/pos';
 
@@ -27,8 +30,8 @@ describe('makeChangeBreakdown', () => {
   });
 
   it('reports null rather than guessing when the available set cannot reach the amount', () => {
-    expect(makeChangeBreakdown(7, [5])).toBeNull();
-    expect(formatDenominationBreakdown(makeChangeBreakdown(10, [5])!)).toBe('2x5');
+    expect(makeChangeBreakdown(7, { values: [5] })).toBeNull();
+    expect(formatDenominationBreakdown(makeChangeBreakdown(10, { values: [5] })!)).toBe('2x5');
   });
 });
 
@@ -62,6 +65,62 @@ describe('suggestChangeBreakdowns', () => {
   it('returns nothing for a zero or negative change amount', () => {
     expect(suggestChangeBreakdowns(0)).toEqual([]);
     expect(suggestChangeBreakdowns(-50)).toEqual([]);
+  });
+});
+
+describe('makeChangeBreakdown with a drawer supply', () => {
+  it('never spends more of a note than the drawer holds', () => {
+    // Greedy would take the single 100 and then be stuck; the right answer
+    // ignores it entirely.
+    const result = makeChangeBreakdown(450, { supply: { 100: 1, 50: 9 } });
+
+    expect(formatDenominationBreakdown(result!)).toBe('1x100 + 7x50');
+    expect(result!.pieceCount).toBe(8);
+  });
+
+  it('returns null when the drawer simply cannot make the amount', () => {
+    expect(makeChangeBreakdown(450, { supply: { 1000: 5 } })).toBeNull();
+    expect(makeChangeBreakdown(450, { supply: {} })).toBeNull();
+  });
+
+  it('still prefers the fewest pieces among the affordable answers', () => {
+    const result = makeChangeBreakdown(450, { supply: { 100: 4, 50: 9, 20: 10, 10: 10 } });
+
+    expect(formatDenominationBreakdown(result!)).toBe('4x100 + 1x50');
+  });
+
+  it('treats a missing or zero supply entry as none of that denomination', () => {
+    const result = makeChangeBreakdown(100, { supply: { 100: 0, 50: 2 } });
+
+    expect(formatDenominationBreakdown(result!)).toBe('2x50');
+  });
+
+  it('accepts a supply keyed by string, as it arrives over the wire', () => {
+    const result = makeChangeBreakdown(150, { supply: { '100': 1, '50': 1 } });
+
+    expect(formatDenominationBreakdown(result!)).toBe('1x100 + 1x50');
+  });
+});
+
+describe('suggestChangeBreakdowns with a drawer supply', () => {
+  it('only offers breakdowns the drawer can actually pay', () => {
+    const suggestions = suggestChangeBreakdowns(450, 3, { 100: 4, 50: 1, 20: 2, 10: 1 });
+
+    expect(suggestions.every((suggestion) => suggestion.payableFromDrawer)).toBe(true);
+    expect(formatDenominationBreakdown(suggestions[0])).toBe('4x100 + 1x50');
+  });
+
+  it('falls back to the theoretical answer, marked, when the drawer is short', () => {
+    const suggestions = suggestChangeBreakdowns(450, 3, { 5000: 2 });
+
+    expect(suggestions.length).toBeGreaterThan(0);
+    expect(suggestions.every((suggestion) => !suggestion.payableFromDrawer)).toBe(true);
+    expect(formatDenominationBreakdown(suggestions[0])).toBe('4x100 + 1x50');
+  });
+
+  it('marks suggestions as unpayable when no drawer is known', () => {
+    // Callers must not read this as "the drawer is short" — only as "unverified".
+    expect(suggestChangeBreakdowns(450, 1).every((suggestion) => !suggestion.payableFromDrawer)).toBe(true);
   });
 });
 
@@ -116,5 +175,65 @@ describe('suggestTenderTopUps', () => {
     for (const suggestion of suggestTenderTopUps(2340, 5000, 5)) {
       expect(suggestion.askFor).toBeLessThanOrEqual(5000 - 2340);
     }
+  });
+
+  it('asks for the note that unblocks a drawer which cannot make the change', () => {
+    // 450 owed back, but the drawer only has 500s. Asking for 50 more turns the
+    // change into a single 500 the drawer can actually hand over.
+    const [first] = suggestTenderTopUps(4550, 5000, 3, { 500: 4 });
+
+    expect(first.askFor).toBe(50);
+    expect(first.unblocksDrawer).toBe(true);
+    expect(first.payableFromDrawer).toBe(true);
+    expect(formatDenominationBreakdown(first.changeBreakdown)).toBe('1x500');
+  });
+
+  it('counts the notes the customer hands over as available for the change', () => {
+    // The drawer has five 100s and no 50, so 450 cannot be paid. Asking for 50
+    // makes the change 500, which the five 100s cover exactly.
+    const [first] = suggestTenderTopUps(4550, 5000, 3, { 100: 5 });
+
+    expect(first.askFor).toBe(50);
+    expect(first.unblocksDrawer).toBe(true);
+    expect(formatDenominationBreakdown(first.changeBreakdown)).toBe('5x100');
+  });
+
+  it('cannot unblock an empty drawer, because the ask is always smaller than the change', () => {
+    const suggestions = suggestTenderTopUps(4550, 5000, 3, {});
+
+    expect(suggestions.every((suggestion) => !suggestion.unblocksDrawer)).toBe(true);
+    expect(suggestions.every((suggestion) => !suggestion.payableFromDrawer)).toBe(true);
+  });
+
+  it('ranks an unblocking ask above one that merely tidies the change', () => {
+    const suggestions = suggestTenderTopUps(4550, 5000, 5, { 500: 4 });
+    const unblocking = suggestions.map((suggestion) => suggestion.unblocksDrawer);
+
+    expect(unblocking).toEqual([...unblocking].sort((left, right) => Number(right) - Number(left)));
+  });
+
+  it('leaves the drawer flags false when no drawer is known', () => {
+    for (const suggestion of suggestTenderTopUps(4550, 5000, 3)) {
+      expect(suggestion.unblocksDrawer).toBe(false);
+      expect(suggestion.payableFromDrawer).toBe(false);
+    }
+  });
+});
+
+describe('drawer count arithmetic', () => {
+  it('adds and subtracts denomination maps without going negative', () => {
+    expect(addCounts({ 100: 2 }, { 100: 3, 50: 1 })).toEqual({ 100: 5, 50: 1 });
+    expect(subtractCounts({ 100: 5, 50: 1 }, { 100: 2 })).toEqual({ 100: 3, 50: 1 });
+    // Taking more than is held clears the entry rather than recording a debt.
+    expect(subtractCounts({ 100: 1 }, { 100: 4 })).toEqual({});
+  });
+
+  it('ignores zero and non-numeric entries', () => {
+    expect(addCounts({ 100: 0 }, { 50: Number.NaN })).toEqual({});
+  });
+
+  it('values a denomination map', () => {
+    expect(countsTotal({ 1000: 2, 100: 3, 5: 1 })).toBe(2_305);
+    expect(countsTotal({})).toBe(0);
   });
 });

@@ -259,6 +259,7 @@ export function normalizeShiftReconciliation(value: unknown): POSShiftReconcilia
       100,
     ),
     requireConfirmationOnAlert: source.requireConfirmationOnAlert !== false,
+    allowDrawerOverdraw: source.allowDrawerOverdraw === true,
   };
 }
 

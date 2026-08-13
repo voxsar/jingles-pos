@@ -4,6 +4,7 @@ import {
   CartLine,
   CompleteSaleInput,
   Customer,
+  DrawerContents,
   HeldSaleSummary,
   POSCustomerDisplaySettings,
   POSCustomerDisplayStatus,
@@ -62,6 +63,7 @@ import {
   createReturn,
   createSale,
   endActiveShift,
+  getDrawerContents,
   getZReport,
   listZReportSlots,
   listHeldSales,
@@ -117,6 +119,7 @@ import {
 } from './printing';
 import { useBarcodeScanner } from './useBarcodeScanner';
 import {
+  addCounts,
   buildCashDeclaration,
   calcCartTotals,
   createCartLine,
@@ -124,6 +127,7 @@ import {
   DENOMINATIONS,
   formatCurrency,
   formatDateTime,
+  expectedForTenderKey,
   formatDenominationBreakdown,
   formatInteger,
   formatShiftReference,
@@ -261,6 +265,7 @@ export default function PosWorkstation() {
   const [zReportError, setZReportError] = useState('');
   const [isCashMovementOpen, setIsCashMovementOpen] = useState(false);
   const [isSavingCashMovement, setIsSavingCashMovement] = useState(false);
+  const [drawer, setDrawer] = useState<DrawerContents | null>(null);
   const [isReturnOpen, setIsReturnOpen] = useState(false);
   const [isOrdersOpen, setIsOrdersOpen] = useState(false);
   const [isVoidOpen, setIsVoidOpen] = useState(false);
@@ -1707,6 +1712,31 @@ export default function PosWorkstation() {
     }
   }, [activeShift, refreshZReport, showNotice]);
 
+  /**
+   * Refreshes the believed drawer contents. Failure is deliberately quiet: the
+   * drawer only powers change hints, and a cashier must never be blocked from
+   * taking payment because a helper endpoint was unavailable.
+   */
+  const refreshDrawer = useCallback(async () => {
+    if (activeShift == null) {
+      setDrawer(null);
+      return null;
+    }
+
+    try {
+      const contents = await getDrawerContents(activeShift.id);
+      setDrawer(contents);
+      return contents;
+    } catch {
+      setDrawer(null);
+      return null;
+    }
+  }, [activeShift]);
+
+  useEffect(() => {
+    void refreshDrawer();
+  }, [refreshDrawer, sales.length]);
+
   const handleOpenCashMovement = useCallback(() => {
     if (activeShift == null) {
       showNotice('error', 'Open a shift before moving cash in or out of the drawer.');
@@ -1736,11 +1766,15 @@ export default function PosWorkstation() {
         direction: input.direction,
         reason: input.reason,
         declaration,
+        // Only ever sent when the terminal is configured to permit it; the
+        // service refuses an overdraw outright without it.
+        allowOverdraw: shiftReconciliationSettings.allowDrawerOverdraw,
       });
 
       setZReport(report);
       setZReportError('');
       setIsCashMovementOpen(false);
+      void refreshDrawer();
       showNotice(
         'success',
         `${input.direction === 'in' ? 'Cash in' : 'Cash out'} of ${formatCurrency(declaration.total)} recorded. Expected drawer is now ${formatCurrency(report.expectedDrawer)}.`,
@@ -1751,7 +1785,7 @@ export default function PosWorkstation() {
     } finally {
       setIsSavingCashMovement(false);
     }
-  }, [activeShift, session, showNotice]);
+  }, [activeShift, refreshDrawer, session, shiftReconciliationSettings.allowDrawerOverdraw, showNotice]);
 
   const handleOpenMoneyModal = useCallback(() => {
     const nextMode: MoneyModalMode = activeShift == null ? 'open' : 'close';
@@ -2232,6 +2266,7 @@ export default function PosWorkstation() {
           addDenominationsToPaymentList={desktopSettings?.addDenominationsToPaymentList ?? true}
           showDenominationCombinations={desktopSettings?.showDenominationCombinations ?? true}
           allowShortPayments={desktopSettings?.allowShortPayments ?? false}
+          drawer={drawer}
         />
       )}
 
@@ -2248,6 +2283,8 @@ export default function PosWorkstation() {
 
       {isCashMovementOpen && (
         <CashMovementModal
+          allowOverdraw={shiftReconciliationSettings.allowDrawerOverdraw}
+          drawer={hideCashSales ? null : drawer}
           expectedDrawer={hideCashSales ? undefined : zReport?.expectedDrawer}
           isSaving={isSavingCashMovement}
           onClose={() => setIsCashMovementOpen(false)}
@@ -3664,6 +3701,22 @@ function ShiftReconciliationCard(
           <small>The cashier must acknowledge the discrepancy, and it is recorded against the shift either way.</small>
         </span>
       </label>
+
+      <label className="settings-checkbox-row admin-setting-row">
+        <input
+          type="checkbox"
+          disabled={props.disabled}
+          checked={props.settings.allowDrawerOverdraw}
+          onChange={(event) => update('allowDrawerOverdraw', event.target.checked)}
+        />
+        <span>
+          <b>Allow cash out beyond the drawer contents</b>
+          <small>
+            Off by default: a cash-out larger than the drawer holds is either a miscount or a loss.
+            When on, the overdraw is still recorded against the shift.
+          </small>
+        </span>
+      </label>
     </section>
   );
 }
@@ -4947,6 +5000,8 @@ function PaymentModal(
     addDenominationsToPaymentList: boolean;
     showDenominationCombinations: boolean;
     allowShortPayments: boolean;
+    /** Null when the drawer contents are unknown, so suggestions stay theoretical. */
+    drawer: DrawerContents | null;
   },
 ) {
   const [method, setMethod] = useState<PaymentMethod>(PaymentMethod.CASH);
@@ -5027,12 +5082,29 @@ function PaymentModal(
       return null;
     }
 
+    // The notes the customer is handing over reach the drawer before the change
+    // leaves it, so they count toward what is available to make that change.
+    const supply = props.drawer == null
+      ? undefined
+      : addCounts(props.drawer.counts, denominationCounts);
+
     return {
       amount: changeAmount,
-      breakdowns: suggestChangeBreakdowns(changeAmount, 3),
-      topUps: suggestTenderTopUps(splitRemaining, tendered, 3),
+      breakdowns: suggestChangeBreakdowns(changeAmount, 3, supply),
+      topUps: suggestTenderTopUps(splitRemaining, tendered, 3, supply),
     };
-  }, [splitRemaining, tendered]);
+  }, [denominationCounts, props.drawer, splitRemaining, tendered]);
+
+  // Which breakdown the cashier is handing back. Recorded on the payment so the
+  // drawer ledger knows which notes left the till, not just how much.
+  const [selectedChangeIndex, setSelectedChangeIndex] = useState(0);
+  useEffect(() => {
+    setSelectedChangeIndex(0);
+  }, [changeGuidance?.amount]);
+
+  const chosenChange = changeGuidance?.breakdowns[selectedChangeIndex]
+    ?? changeGuidance?.breakdowns[0]
+    ?? null;
 
   const hasUnsavedChanges = method !== PaymentMethod.CASH
     || tendered !== 0
@@ -5083,14 +5155,23 @@ function PaymentModal(
     }
 
     const amount = Math.min(entered, splitRemaining);
+    const changeDue = method === PaymentMethod.CASH ? roundToMoney(entered - amount) : 0;
+    const hasDenominations = Object.keys(denominationCounts).length > 0;
+    const changeDenominations = changeDue > 0 ? chosenChange?.counts : undefined;
+
     setSplitPayments((current) => [...current, {
       method,
       amount,
       tenderedAmount: method === PaymentMethod.CASH ? entered : amount,
-      changeDue: method === PaymentMethod.CASH ? roundToMoney(entered - amount) : 0,
+      changeDue,
       reference: method === PaymentMethod.CASH ? undefined : reference.trim() || undefined,
-      metadata: method === PaymentMethod.CASH && Object.keys(denominationCounts).length > 0
-        ? { denominations: denominationCounts }
+      // Both halves feed the drawer ledger: what came in, and which notes went
+      // back out. Recording only the amount would leave the till contents unknowable.
+      metadata: method === PaymentMethod.CASH && (hasDenominations || changeDenominations != null)
+        ? {
+          ...(hasDenominations ? { denominations: denominationCounts } : {}),
+          ...(changeDenominations != null ? { changeDenominations } : {}),
+        }
         : undefined,
     }]);
     setReference('');
@@ -5273,11 +5354,33 @@ function PaymentModal(
               ) : (
                 <div className="change-option-list">
                   {changeGuidance.breakdowns.map((option, index) => (
-                    <div className={`change-option ${index === 0 ? 'preferred' : ''}`} key={formatDenominationBreakdown(option)}>
+                    <button
+                      className={[
+                        'change-option',
+                        'selectable',
+                        index === selectedChangeIndex ? 'preferred' : '',
+                        props.drawer != null && !option.payableFromDrawer ? 'short' : '',
+                      ].filter(Boolean).join(' ')}
+                      key={formatDenominationBreakdown(option)}
+                      onClick={() => setSelectedChangeIndex(index)}
+                      aria-pressed={index === selectedChangeIndex}
+                    >
                       <span className="change-option-pieces">{formatDenominationBreakdown(option)}</span>
-                      <small>{formatInteger(option.pieceCount)} piece{option.pieceCount === 1 ? '' : 's'}</small>
-                    </div>
+                      <small>
+                        {formatInteger(option.pieceCount)} piece{option.pieceCount === 1 ? '' : 's'}
+                        {props.drawer != null && !option.payableFromDrawer && ' · more than the drawer holds'}
+                      </small>
+                    </button>
                   ))}
+                </div>
+              )}
+
+              {props.drawer != null && changeGuidance.breakdowns.length > 0
+                && !changeGuidance.breakdowns[0].payableFromDrawer && (
+                <div className="change-guidance-empty">
+                  The drawer does not have the notes for this change
+                  {props.drawer.exact ? '' : ' as far as it has been tracked'}.
+                  Ask for a different amount, or reload change from the safe.
                 </div>
               )}
 
@@ -5301,7 +5404,11 @@ function PaymentModal(
                         </span>
                         <small>
                           Change becomes {formatDenominationBreakdown(topUp.changeBreakdown)}
-                          {' · '}{formatInteger(topUp.piecesSaved)} fewer piece{topUp.piecesSaved === 1 ? '' : 's'}
+                          {topUp.unblocksDrawer
+                            ? ' · the drawer can pay this one'
+                            : topUp.piecesSaved > 0
+                              ? ` · ${formatInteger(topUp.piecesSaved)} fewer piece${topUp.piecesSaved === 1 ? '' : 's'}`
+                              : ''}
                         </small>
                       </button>
                     ))}
@@ -5560,7 +5667,9 @@ function MoneyDeclareModal(
               <div>
                 <div className="section-kicker">Non-cash tender</div>
                 <div className="section-title">
-                  {tenderMode === 'category' ? 'Declare each payment type' : 'Declare the non-cash total'}
+                  {declaredTenderKeys.includes(TENDER_TOTAL_KEY)
+                    ? 'Declare the non-cash total'
+                    : `Declare ${tenderRows.length === 1 ? 'this payment type' : 'each payment type'}`}
                 </div>
               </div>
               <div className="report-chip mono">Checked against the transaction log</div>
@@ -5570,11 +5679,7 @@ function MoneyDeclareModal(
               {tenderRows.map((row) => {
                 const summary = reconciliation?.tenders.find((entry) => entry.key === row.key);
                 const expected = summary?.expected
-                  ?? (row.key === TENDER_TOTAL_KEY
-                    ? Object.entries(props.report?.paymentBreakdown ?? {})
-                      .filter(([method]) => method !== PaymentMethod.CASH)
-                      .reduce((sum, [, amount]) => sum + amount, 0)
-                    : props.report?.paymentBreakdown[row.key] ?? 0);
+                  ?? expectedForTenderKey(props.report?.paymentBreakdown ?? {}, row.key);
 
                 return (
                   <div className="tender-declare-row" key={row.key}>
@@ -5641,6 +5746,8 @@ const CASH_OUT_REASONS = ['Safe drop', 'Banking', 'Supplier payout', 'Petty cash
  */
 function CashMovementModal(
   props: {
+    allowOverdraw: boolean;
+    drawer: DrawerContents | null;
     expectedDrawer?: number;
     isSaving: boolean;
     onClose: () => void;
@@ -5661,8 +5768,34 @@ function CashMovementModal(
 
   const reasonOptions = direction === 'in' ? CASH_IN_REASONS : CASH_OUT_REASONS;
   const trimmedReason = reason.trim();
-  const exceedsDrawer = direction === 'out' && props.expectedDrawer != null && total > props.expectedDrawer;
-  const canSubmit = total > 0 && trimmedReason !== '' && !props.isSaving;
+
+  /**
+   * Cash can only leave a drawer that holds it — checked both on the total and
+   * on each note, since a drawer can hold enough money overall and still not
+   * have five 1000s in it. The backend enforces the same rule; this is here so
+   * the cashier finds out before counting the whole tray out.
+   */
+  const shortfalls = useMemo(() => {
+    if (direction !== 'out' || props.drawer == null) return [];
+
+    const problems: string[] = [];
+    if (total > props.drawer.total) {
+      problems.push(`${formatCurrency(total)} is more than the ${formatCurrency(props.drawer.total)} in the drawer`);
+    }
+    for (const [value, wanted] of Object.entries(counts)) {
+      if (wanted <= 0) continue;
+      const held = props.drawer.counts[value] ?? 0;
+      if (wanted > held) {
+        problems.push(`${wanted}x${value} requested, ${held} in the drawer`);
+      }
+    }
+    return problems;
+  }, [counts, direction, props.drawer, total]);
+
+  const exceedsDrawer = shortfalls.length > 0
+    || (direction === 'out' && props.drawer == null && props.expectedDrawer != null && total > props.expectedDrawer);
+  const blocked = exceedsDrawer && !props.allowOverdraw;
+  const canSubmit = total > 0 && trimmedReason !== '' && !props.isSaving && !blocked;
 
   return (
     <ModalShell onClose={props.onClose} title="Cash in / cash out" width="wide">
@@ -5747,8 +5880,29 @@ function CashMovementModal(
         </div>
 
         {exceedsDrawer && (
-          <div className="inline-alert warning">
-            This takes out more than the drawer is expected to hold. Recheck the count before submitting.
+          <div className={`inline-alert ${blocked ? 'danger' : 'warning'}`}>
+            <b>
+              {blocked
+                ? 'The drawer does not hold this.'
+                : 'This takes out more than the drawer is expected to hold.'}
+            </b>
+            {shortfalls.length > 0 && (
+              <ul className="discrepancy-list">
+                {shortfalls.map((problem) => <li key={problem}>{problem}</li>)}
+              </ul>
+            )}
+            <small>
+              {blocked
+                ? 'Recount the drawer, or ask a manager to allow overdrawn cash-outs in Settings.'
+                : 'Allowed by settings — the overdraw will be recorded against the shift.'}
+            </small>
+          </div>
+        )}
+
+        {direction === 'out' && props.drawer != null && !props.drawer.exact && (
+          <div className="inline-alert info">
+            Some cash this shift was recorded without a note breakdown, so the drawer figure is an
+            estimate. Recount if this movement looks wrong.
           </div>
         )}
 

@@ -5,6 +5,8 @@ import {
   Branch,
   CartLine,
   CashCountMode,
+  DrawerContents,
+  PaymentMethod,
   Category,
   CompleteSaleInput,
   Customer,
@@ -2147,6 +2149,98 @@ export function getSyncStatus(
 ): SyncStatusSummary {
   const db = getDB();
   return getSyncStatusInternal(db, deviceId, terminalId);
+}
+
+function addPieces(target: Map<string, number>, counts: Record<string, unknown> | undefined, sign: 1 | -1) {
+  if (!counts) return;
+  for (const [value, raw] of Object.entries(counts)) {
+    const pieces = typeof raw === 'number' ? raw : Number.parseFloat(String(raw));
+    if (!Number.isFinite(pieces) || pieces <= 0 || !Number.isFinite(Number(value))) continue;
+    target.set(value, (target.get(value) ?? 0) + (sign * Math.floor(pieces)));
+  }
+}
+
+/**
+ * Offline mirror of the server's drawer ledger. Kept in step with
+ * `buildDrawerContents` in the backend: opening count, mid-shift movements, and
+ * the notes taken in and handed back on every cash payment. Anything recorded
+ * without a breakdown is reported as unaccounted rather than guessed at.
+ */
+export function buildLocalDrawerContents(shiftId: string): DrawerContents {
+  const db = getDB();
+  const shift = db.prepare('SELECT * FROM shifts WHERE id = ?').get(shiftId) as any;
+  if (!shift) {
+    throw new Error('Shift not found');
+  }
+
+  const cashCounts = db.prepare('SELECT * FROM shift_cash_counts WHERE shift_id = ?').all(shiftId) as any[];
+  const payments = db.prepare(`
+    SELECT payments.* FROM payments
+    INNER JOIN sales ON sales.id = payments.sale_id
+    WHERE sales.shift_id = ? AND payments.method = ?
+  `).all(shiftId, PaymentMethod.CASH) as any[];
+
+  const pieces = new Map<string, number>();
+  let unaccountedIn = 0;
+  let unaccountedOut = 0;
+  let exact = true;
+
+  for (const count of cashCounts) {
+    const denominations = parseJson<Record<string, number> | null>(count.denominations_json, null);
+    const isIncoming = count.mode === CashCountMode.OPENING || count.mode === CashCountMode.PAID_IN;
+    const isOutgoing = count.mode === CashCountMode.PAID_OUT;
+    if (!isIncoming && !isOutgoing) continue;
+
+    if (denominations && Object.keys(denominations).length > 0) {
+      addPieces(pieces, denominations, isIncoming ? 1 : -1);
+    } else {
+      if (isIncoming) unaccountedIn += count.total;
+      else unaccountedOut += count.total;
+      exact = false;
+    }
+  }
+
+  for (const payment of payments) {
+    const metadata = parseJson<Record<string, unknown> | null>(payment.metadata_json, null);
+    const received = metadata?.denominations as Record<string, unknown> | undefined;
+    const changeGiven = metadata?.changeDenominations as Record<string, unknown> | undefined;
+    const tendered = payment.tendered_amount ?? payment.amount ?? 0;
+    const changeDue = payment.change_due ?? 0;
+
+    if (received && Object.keys(received).length > 0) {
+      addPieces(pieces, received, 1);
+    } else if (tendered > 0) {
+      unaccountedIn += tendered;
+      exact = false;
+    }
+
+    if (changeGiven && Object.keys(changeGiven).length > 0) {
+      addPieces(pieces, changeGiven, -1);
+    } else if (changeDue > 0) {
+      unaccountedOut += changeDue;
+      exact = false;
+    }
+  }
+
+  const counts: Record<string, number> = {};
+  let total = 0;
+  for (const [value, count] of pieces) {
+    if (count <= 0) {
+      if (count < 0) exact = false;
+      continue;
+    }
+    counts[value] = count;
+    total += Number(value) * count;
+  }
+
+  return {
+    shiftId,
+    counts,
+    total: Math.round(total * 100) / 100,
+    exact,
+    unaccountedIn: Math.round(unaccountedIn * 100) / 100,
+    unaccountedOut: Math.round(unaccountedOut * 100) / 100,
+  };
 }
 
 export function buildLocalZReport(shiftId: string): ZReportSummary {
