@@ -361,6 +361,17 @@ export function buildZReportDocument(
         right: formatCurrency(report.paymentBreakdown.CASH ?? 0),
       },
       { type: 'columns', left: 'Opening float', right: formatCurrency(report.openingFloat) },
+    );
+
+    if (report.cashPaidIn > 0) {
+      blocks.push({ type: 'columns', left: 'Cash in', right: formatCurrency(report.cashPaidIn) });
+    }
+
+    if (report.cashPaidOut > 0) {
+      blocks.push({ type: 'columns', left: 'Cash out', right: `-${formatCurrency(report.cashPaidOut)}` });
+    }
+
+    blocks.push(
       { type: 'columns', left: 'Expected drawer', right: formatCurrency(report.expectedDrawer), bold: true },
     );
 

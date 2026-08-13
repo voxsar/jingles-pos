@@ -152,12 +152,162 @@ describe('event sourced POS backend services', () => {
       },
       expectedDrawer: 640,
       openingFloat: 500,
+      cashPaidIn: 0,
+      cashPaidOut: 0,
       countedDrawer: 650,
       variance: 10,
       paymentCounts: { CASH: 1, VISA: 1 },
       discountedLineCount: 1,
       productCount: 3,
+      cashMovements: [],
     });
+  });
+
+  it('reports the non-cash tender declared at close alongside the payment breakdown', async () => {
+    mockTx.pOSShift.findUnique.mockResolvedValue({
+      id: 'shift-2',
+      openingFloat: 0,
+      cashCounts: [
+        {
+          mode: CashCountMode.CLOSING,
+          total: 180,
+          createdAt: new Date('2026-05-21T10:00:00Z'),
+          tenders: JSON.stringify({ VISA: 90, MASTER: '10' }),
+          tenderMode: 'category',
+        },
+      ],
+      sales: [
+        {
+          subtotal: 280,
+          discountTotal: 0,
+          total: 280,
+          payments: [
+            { method: 'CASH', amount: 180 },
+            { method: 'VISA', amount: 100 },
+          ],
+          returns: [],
+          lines: [{ quantity: 1, discountAmount: 0 }],
+        },
+      ],
+    });
+
+    const report = await buildZReport('shift-2');
+
+    // Numeric strings from a hand-edited settings or sync payload are coerced.
+    expect(report.declaredTenders).toEqual({ VISA: 90, MASTER: 10 });
+    expect(report.declaredTenderMode).toBe('category');
+  });
+
+  it('ignores a malformed declared-tender blob rather than failing the Z report', async () => {
+    mockTx.pOSShift.findUnique.mockResolvedValue({
+      id: 'shift-3',
+      openingFloat: 0,
+      cashCounts: [
+        {
+          mode: CashCountMode.CLOSING,
+          total: 100,
+          createdAt: new Date('2026-05-21T10:00:00Z'),
+          tenders: '{not json',
+          tenderMode: 'category',
+        },
+      ],
+      sales: [],
+    });
+
+    const report = await buildZReport('shift-3');
+
+    expect(report.declaredTenders).toBeUndefined();
+    expect(report.transactionCount).toBe(0);
+  });
+
+  it('leaves declared tender unset for a cash-only close recorded before the feature existed', async () => {
+    mockTx.pOSShift.findUnique.mockResolvedValue({
+      id: 'shift-4',
+      openingFloat: 0,
+      cashCounts: [
+        { mode: CashCountMode.CLOSING, total: 100, createdAt: new Date('2026-05-21T10:00:00Z') },
+      ],
+      sales: [],
+    });
+
+    const report = await buildZReport('shift-4');
+
+    expect(report.declaredTenders).toBeUndefined();
+    expect(report.declaredTenderMode).toBeUndefined();
+  });
+
+  it('folds mid-shift cash movements into the expected drawer', async () => {
+    mockTx.pOSShift.findUnique.mockResolvedValue({
+      id: 'shift-5',
+      openingFloat: 1_000,
+      cashCounts: [
+        {
+          id: 'm1',
+          shiftId: 'shift-5',
+          mode: CashCountMode.PAID_IN,
+          total: 2_000,
+          denominations: '{"1000":2}',
+          reason: 'Change reload from the safe',
+          createdAt: new Date('2026-05-21T11:00:00Z'),
+        },
+        {
+          id: 'm2',
+          shiftId: 'shift-5',
+          mode: CashCountMode.PAID_OUT,
+          total: 500,
+          denominations: '{"500":1}',
+          reason: 'Safe drop',
+          createdAt: new Date('2026-05-21T13:00:00Z'),
+        },
+      ],
+      sales: [
+        {
+          subtotal: 3_000,
+          discountTotal: 0,
+          total: 3_000,
+          payments: [{ method: 'CASH', amount: 3_000 }],
+          returns: [],
+          lines: [{ quantity: 1, discountAmount: 0 }],
+        },
+      ],
+    });
+
+    const report = await buildZReport('shift-5');
+
+    // 1,000 float + 3,000 cash sales + 2,000 in - 500 out. Without the movements
+    // the drawer would look 1,500 out at close and trip the discrepancy alert.
+    expect(report.expectedDrawer).toBe(5_500);
+    expect(report.cashPaidIn).toBe(2_000);
+    expect(report.cashPaidOut).toBe(500);
+    expect(report.cashMovements.map((movement) => movement.direction)).toEqual(['in', 'out']);
+    expect(report.cashMovements[0].reason).toBe('Change reload from the safe');
+    expect(report.cashMovements[0].denominations).toEqual({ 1000: 2 });
+  });
+
+  it('keeps mid-shift movements out of the counted drawer figure', async () => {
+    mockTx.pOSShift.findUnique.mockResolvedValue({
+      id: 'shift-6',
+      openingFloat: 0,
+      cashCounts: [
+        {
+          id: 'm1',
+          shiftId: 'shift-6',
+          mode: CashCountMode.PAID_IN,
+          total: 2_000,
+          denominations: '{"1000":2}',
+          createdAt: new Date('2026-05-21T11:00:00Z'),
+        },
+      ],
+      sales: [],
+    });
+
+    const report = await buildZReport('shift-6');
+
+    // countedDrawer is what the cashier physically counted at close, and no
+    // close has happened yet; a paid-in must not masquerade as one.
+    expect(report.countedDrawer).toBeUndefined();
+    expect(report.variance).toBeUndefined();
+    expect(report.expectedDrawer).toBe(2_000);
   });
 
   it('treats the configured POS app token as workstation sync auth', async () => {

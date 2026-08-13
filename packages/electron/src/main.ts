@@ -9,6 +9,16 @@ import {
   readDesktopSettings,
   saveDesktopSettings,
 } from './desktopSettings';
+import {
+  closeCustomerDisplayWindow,
+  configureCustomerDisplay,
+  getCachedCustomerDisplayState,
+  getCustomerDisplayStatus,
+  openCustomerDisplayWindow,
+  publishCustomerDisplayState,
+  toggleCustomerDisplayWindow,
+} from './customerDisplay';
+import { resolveRendererTarget } from './rendererTarget';
 import { discoverPrinters } from './printing/discovery';
 import {
   listConfiguredPrinters,
@@ -100,22 +110,6 @@ process.on('unhandledRejection', (reason) => {
   showStartupError('Jingles POS failed to start', 'The Electron main process hit an unhandled rejection.', reason);
 });
 
-function resolveRendererTarget() {
-  if (process.env.NODE_ENV === 'development') {
-    return {
-      type: 'url' as const,
-      value: process.env.ELECTRON_RENDERER_URL ?? 'http://localhost:5173',
-    };
-  }
-
-  return {
-    type: 'file' as const,
-    value: app.isPackaged
-      ? path.join(process.resourcesPath, 'web', 'dist', 'index.html')
-      : path.join(__dirname, '../../web/dist/index.html'),
-  };
-}
-
 async function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1440,
@@ -133,6 +127,9 @@ async function createWindow() {
 
   mainWindow.on('closed', () => {
     mainWindow = null;
+    // The customer display exists to mirror the workstation; without one there
+    // is nothing left to mirror.
+    closeCustomerDisplayWindow();
   });
 
   mainWindow.webContents.on('did-fail-load', (_event, errorCode, errorDescription, validatedUrl) => {
@@ -178,9 +175,26 @@ app.whenReady().then(async () => {
   try {
     app.setAppUserModelId('com.jingles.pos');
     initializeUpdater('JINGLES_POS_UPDATE_URL');
+    configureCustomerDisplay({
+      getMainWindow: () => mainWindow,
+      onError: (message, error) => appendStartupLog(message, error),
+    });
     Menu.setApplicationMenu(Menu.buildFromTemplate([
       { role: 'fileMenu' },
       { role: 'viewMenu' },
+      {
+        label: 'Customer display',
+        submenu: [
+          {
+            label: 'Toggle customer display',
+            click: () => {
+              void toggleCustomerDisplayWindow().catch((error) => {
+                appendStartupLog('Failed to toggle the customer display window.', error);
+              });
+            },
+          },
+        ],
+      },
       getUpdateMenu(),
       { role: 'help' },
     ]));
@@ -188,6 +202,13 @@ app.whenReady().then(async () => {
     cleanPrintingWorkDirectory();
     localApiServer = await restartLocalApiServer();
     await createWindow();
+
+    if (readDesktopSettings().customerDisplay.enabled) {
+      // A failed customer display must not take the till down with it.
+      await openCustomerDisplayWindow().catch((error) => {
+        appendStartupLog('Failed to open the customer display window at startup.', error);
+      });
+    }
   } catch (error) {
     showStartupError('Jingles POS failed to start', 'Desktop startup aborted before the window was ready.', error);
     await stopLocalApiServer();
@@ -198,6 +219,7 @@ app.whenReady().then(async () => {
 app.on('before-quit', () => {
   mdnsService?.stop();
   mdnsService = null;
+  closeCustomerDisplayWindow();
   void stopLocalApiServer();
 });
 
@@ -252,6 +274,32 @@ ipcMain.handle('desktop-settings:backup-now', async () => {
   return createDesktopBackup();
 });
 
+ipcMain.handle('customer-display:status', () => {
+  return getCustomerDisplayStatus();
+});
+
+ipcMain.handle('customer-display:open', async () => {
+  return openCustomerDisplayWindow();
+});
+
+ipcMain.handle('customer-display:close', () => {
+  return closeCustomerDisplayWindow();
+});
+
+ipcMain.handle('customer-display:toggle', async () => {
+  return toggleCustomerDisplayWindow();
+});
+
+// Fire-and-forget from the workstation: a snapshot the customer should see.
+ipcMain.on('customer-display:publish', (_event, state) => {
+  publishCustomerDisplayState(state);
+});
+
+// Asked by the display window itself when it mounts.
+ipcMain.handle('customer-display:get-state', () => {
+  return getCachedCustomerDisplayState();
+});
+
 ipcMain.handle('printing:list', () => {
   return listConfiguredPrinters();
 });
@@ -290,6 +338,18 @@ ipcMain.handle('desktop-settings:save', async (_event, nextSettings) => {
   try {
     if (shouldRestartBackend) {
       await restartLocalApiServer();
+    }
+
+    // Turning the display on in settings should show it now, not at the next
+    // start; turning it off should take the customer screen down with it.
+    if (savedSettings.customerDisplay.enabled !== previousSettings.customerDisplay.enabled) {
+      if (savedSettings.customerDisplay.enabled) {
+        await openCustomerDisplayWindow().catch((error) => {
+          appendStartupLog('Failed to open the customer display window after a settings change.', error);
+        });
+      } else {
+        closeCustomerDisplayWindow();
+      }
     }
 
     return {

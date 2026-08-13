@@ -1,4 +1,6 @@
 import type {
+  POSCustomerDisplayState,
+  POSCustomerDisplayStatus,
   POSDesktopBackupResult,
   POSDesktopSettings,
   POSDesktopSettingsSaveResult,
@@ -21,6 +23,16 @@ declare global {
         pickDatabasePath: (currentPath?: string) => Promise<string | null>;
         pickBackupDirectory: (currentPath?: string) => Promise<string | null>;
         backupNow: () => Promise<POSDesktopBackupResult>;
+      };
+      customerDisplay?: {
+        getStatus: () => Promise<POSCustomerDisplayStatus>;
+        open: () => Promise<POSCustomerDisplayStatus>;
+        close: () => Promise<POSCustomerDisplayStatus>;
+        toggle: () => Promise<POSCustomerDisplayStatus>;
+        publish: (state: POSCustomerDisplayState) => void;
+        getState: () => Promise<POSCustomerDisplayState | null>;
+        onState: (callback: (state: POSCustomerDisplayState) => void) => () => void;
+        onStatus: (callback: (status: POSCustomerDisplayStatus) => void) => () => void;
       };
       printing?: {
         list: () => Promise<POSPrinterConfig[]>;

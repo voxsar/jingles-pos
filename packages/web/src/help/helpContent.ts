@@ -87,15 +87,21 @@ export const HELP_TOPICS: HelpTopic[] = [
           'All sales, holds, returns and payments you take are attached to your shift automatically. The header keeps a running "Today" revenue and bill count.',
       },
       {
+        title: 'Move cash in or out mid-shift',
+        body:
+          'Press In / Out in the header when you reload change from the safe, top the float up, or drop takings out of the drawer. Count the notes and coins the same way and give a reason. The movement is added to the expected drawer, so reloading change no longer looks like a discrepancy at closing.',
+      },
+      {
         title: 'Close the shift',
         body:
-          'Press Cash again at the end of the day. Count the drawer the same way; the modal shows the expected drawer value so you can spot a variance before confirming. Closing the shift finalises the Z-Report and signs you out of the terminal.',
+          'Press Cash again at the end of the day. Count the drawer the same way; the closing screen shows the expected drawer built from the transaction log, every mid-shift movement, and the variance between them. If the terminal is set to collect non-cash tender you also enter the card and voucher totals, either as one figure or per payment type, and each is checked against the sales log. A large discrepancy is flagged before you can confirm.',
         image: image('close-shift.png', 'The closing count. The expected drawer amount is shown so variances are visible immediately.'),
       },
     ],
     tips: [
       'Open Reports from the account menu to browse open and closed sales slots by week, month, or year. Each slot runs from its actual opening to its close, including days that closed early.',
       'If the app is restarted mid-shift the open shift is detected and resumed automatically.',
+      'A shift can still be closed when it is flagged — you acknowledge the discrepancy and it is recorded against the shift. Managers set the alert thresholds in Settings > Close-out reconciliation.',
     ],
   },
   {
@@ -155,6 +161,34 @@ export const HELP_TOPICS: HelpTopic[] = [
     ],
   },
   {
+    id: 'shortcuts',
+    kicker: 'Selling',
+    title: 'Keyboard shortcuts & quick keys',
+    summary: 'Rebind the action bar and bind your fastest-selling products to a key.',
+    keywords: [
+      'shortcut', 'shortcuts', 'keyboard', 'key', 'rebind', 'remap', 'hotkey',
+      'quick key', 'quick keys', 'function key', 'F-key',
+    ],
+    intro:
+      'Every action on the bottom bar has a key binding, and each one can be changed per workstation in Settings > Shortcuts and product quick keys. The key cap printed on each button always shows the binding actually in force, so the bar never disagrees with the keyboard.',
+    steps: [
+      {
+        title: 'Rebind an action',
+        body:
+          'Open Settings, find the action, click its key cap and press the combination you want. Press Backspace while recording to put the default back. If two things end up sharing a key the form says so.',
+      },
+      {
+        title: 'Bind a product to a key',
+        body:
+          'In the same settings card, choose a product and record a key for it. Pressing that key on the workstation drops the product straight into the cart without searching. Turn the whole feature off with the Enable product quick keys switch.',
+      },
+    ],
+    tips: [
+      'Quick keys must use Ctrl or Alt, or a function key. Plain letters and digits stay reserved: a barcode scan delivers its first character before the app can tell it is a scan, so an unmodified quick key could ring up the wrong product.',
+      'Escape always closes whatever window is open first. It only reaches the action bound to it — Void by default — when nothing is layered over the workstation.',
+    ],
+  },
+  {
     id: 'customers-tiers',
     kicker: 'Selling',
     title: 'Customers & price tiers',
@@ -166,7 +200,7 @@ export const HELP_TOPICS: HelpTopic[] = [
       {
         title: 'Pick the customer',
         body:
-          'Press F7 or use the customer selector at the top of the cart. The default tier dropdown next to it shows which price tier new lines will use.',
+          'Press F7 or use the customer selector at the top of the cart — either one opens the list with the search box focused, so you can type a name straight away. The default tier dropdown next to it shows which price tier new lines will use. Once a bill is completed, held or voided the selector returns to Walk-in, so the next customer is never billed to the last one.',
         shortcut: 'F7',
         image: image('customer.png', 'The customer selector and the default tier control at the top of the cart.'),
       },
@@ -205,7 +239,7 @@ export const HELP_TOPICS: HelpTopic[] = [
     kicker: 'Selling',
     title: 'Hold & recall bills',
     summary: 'Park a cart for later and bring it back on any terminal.',
-    keywords: ['hold', 'recall', 'park', 'suspend', 'resume', 'F4', 'F5', 'held'],
+    keywords: ['hold', 'recall', 'park', 'suspend', 'resume', 'F4', 'F5', 'held', 'quote', 'quotation', 'F9', 'estimate'],
     intro:
       'When a customer steps away — or you need the till for the next person in line — park the whole cart as a held bill instead of voiding it.',
     steps: [
@@ -223,6 +257,12 @@ export const HELP_TOPICS: HelpTopic[] = [
         shortcut: 'F5',
         image: image('recall.png', 'The recall list shows every parked bill ready to resume.'),
       },
+      {
+        title: 'Print a quotation instead',
+        body:
+          'When the customer only wants a price, press F9 (or the Quote action) to print the cart as a quotation. Nothing is saved, no stock moves and no payment is recorded — the slip is clearly marked as a quotation and carries no receipt barcode.',
+        shortcut: 'F9',
+      },
     ],
     tips: ['A recalled bill keeps its customer, discounts and salesperson assignments exactly as they were held.'],
   },
@@ -238,7 +278,7 @@ export const HELP_TOPICS: HelpTopic[] = [
       {
         title: 'Choose the method',
         body:
-          'Pick Cash, Visa, Mastercard, Amex, Credit or Gift Card. For cash, enter the amount tendered and the change due is calculated for you. For split payments, add one method, then another, until the outstanding amount reaches zero.',
+          'Pick Cash, Visa, Mastercard, Amex, Credit or Gift Card. For cash, enter the amount tendered and the change due is calculated for you, along with a few ways to hand it back by note and coin — and, when it helps, a suggestion to ask the customer for a little more so the change comes back as one note. Tapping a suggestion applies it. For split payments, add one method, then another, until the outstanding amount reaches zero.',
         shortcut: 'F8',
         image: image('payment.png', 'The payment modal: methods on the left, tendered amount and change for cash.'),
       },
@@ -295,7 +335,10 @@ export const HELP_TOPICS: HelpTopic[] = [
         image: image('zreport.png', 'The Z-Report: shift totals, payment breakdown and expected drawer.'),
       },
     ],
-    tips: ['The expected drawer equals the opening float plus cash sales minus cash refunds — compare it with the counted drawer at closing.'],
+    tips: [
+      'The expected drawer equals the opening float plus cash sales, minus cash refunds, plus any cash paid in and minus any cash paid out during the shift — compare it with the counted drawer at closing.',
+      'Cash moved in or out mid-shift is listed with its reason, so a drawer that was reloaded or dropped still reconciles.',
+    ],
   },
   {
     id: 'sync',

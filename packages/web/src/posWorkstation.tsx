@@ -5,6 +5,8 @@ import {
   CompleteSaleInput,
   Customer,
   HeldSaleSummary,
+  POSCustomerDisplaySettings,
+  POSCustomerDisplayStatus,
   POSDesktopSettings,
   POSDiscoveredPrinter,
   POSPrintResult,
@@ -41,11 +43,13 @@ import {
   formatBinding,
   isValidQuickKeyBinding,
   normalizeBinding,
+  normalizeCustomerDisplaySettings,
   normalizeShiftReconciliation,
   normalizeShortcutSettings,
   QUICK_KEY_BINDING_HINT,
   TENDER_TOTAL_KEY,
   DEFAULT_POS_ACTION_SHORTCUTS,
+  DEFAULT_POS_CUSTOMER_DISPLAY,
   DEFAULT_POS_SCANNER_SETTINGS,
   DEFAULT_POS_SHIFT_RECONCILIATION,
   DEFAULT_POS_SHORTCUT_SETTINGS,
@@ -63,6 +67,7 @@ import {
   listSales,
   openShift,
   recallHeldSale,
+  recordCashMovement,
   saveHeldSale,
   searchProducts,
   subscribeSyncStatus,
@@ -71,6 +76,20 @@ import {
 import { useAuth } from './auth/AuthContext';
 import HelpGuide from './help/HelpGuide';
 import SearchableSelect, { type SearchableSelectHandle } from './components/SearchableSelect';
+import {
+  closeCustomerDisplay,
+  hasCustomerDisplayBridge,
+  openCustomerDisplay,
+  persistCustomerDisplaySettings,
+  publishCustomerDisplayState,
+  subscribeCustomerDisplayStatus,
+} from './customerDisplay';
+import {
+  buildCartDisplayState,
+  buildCompletedSaleDisplayState,
+  type CustomerDisplayContext,
+  type CustomerDisplayPaymentProgress,
+} from './utils/customerDisplay';
 import {
   buildFallbackDesktopSettings,
   createDesktopBackup,
@@ -104,6 +123,7 @@ import {
   DENOMINATIONS,
   formatCurrency,
   formatDateTime,
+  formatDenominationBreakdown,
   formatInteger,
   formatShiftReference,
   formatTime,
@@ -118,6 +138,8 @@ import {
   recalculateCartLine,
   resolveDefaultCustomerId,
   saleIncludesCash,
+  suggestChangeBreakdowns,
+  suggestTenderTopUps,
   summarizeShiftReconciliation,
   type ShiftReconciliation,
 } from './utils/pos';
@@ -236,6 +258,8 @@ export default function PosWorkstation() {
   const [zReport, setZReport] = useState<ZReportSummary | null>(null);
   const [isZReportLoading, setIsZReportLoading] = useState(false);
   const [zReportError, setZReportError] = useState('');
+  const [isCashMovementOpen, setIsCashMovementOpen] = useState(false);
+  const [isSavingCashMovement, setIsSavingCashMovement] = useState(false);
   const [isReturnOpen, setIsReturnOpen] = useState(false);
   const [isOrdersOpen, setIsOrdersOpen] = useState(false);
   const [isVoidOpen, setIsVoidOpen] = useState(false);
@@ -255,6 +279,15 @@ export default function PosWorkstation() {
     buildFallbackDesktopSettings(readStoredThemeMode())
   ));
   const [chromeOffsets, setChromeOffsets] = useState({ top: 136, bottom: 140 });
+  const [customerDisplayStatus, setCustomerDisplayStatus] = useState<POSCustomerDisplayStatus>(
+    () => ({ supported: hasCustomerDisplayBridge(), open: false, displayCount: 0 }),
+  );
+  // Live tender while the payment window is open, mirrored to the customer.
+  const [paymentProgress, setPaymentProgress] = useState<CustomerDisplayPaymentProgress | null>(null);
+  // The sale the customer display is showing after a bill closes. Kept separate
+  // from `receiptSale`, which also holds reprints pulled from order history.
+  const [completedDisplaySale, setCompletedDisplaySale] = useState<SaleSummary | null>(null);
+  const [billStartedAt, setBillStartedAt] = useState<string | null>(null);
 
   const discountInputRef = useRef<HTMLInputElement>(null);
   const customerSelectRef = useRef<SearchableSelectHandle>(null);
@@ -262,6 +295,9 @@ export default function PosWorkstation() {
   const actionBarRef = useRef<HTMLDivElement>(null);
   const workstationGridRef = useRef<HTMLDivElement>(null);
   const controlPressCountRef = useRef(0);
+  // Signature of the last snapshot sent to the customer display, so identical
+  // redraws are not republished.
+  const lastPublishedDisplayRef = useRef<string | null>(null);
   const controlPressTimerRef = useRef<number | null>(null);
   // The window listener is installed once; shortcut dispatch is read through a
   // ref so every keystroke sees the current cart, shift and settings without
@@ -552,6 +588,118 @@ export default function PosWorkstation() {
 
   const totals = useMemo(() => calcCartTotals(cart, billDiscount), [billDiscount, cart]);
 
+  const customerDisplaySettings = desktopSettings?.customerDisplay ?? DEFAULT_POS_CUSTOMER_DISPLAY;
+
+  const customerDisplayContext = useMemo<CustomerDisplayContext>(() => ({
+    settings: customerDisplaySettings,
+    themeMode: appliedThemeMode,
+    branchName: branches.find((branch) => branch.id === (session?.branchId ?? selectedBranchId))?.name ?? '',
+    terminalCode: resolveTerminalCode(terminals, currentTerminalId),
+    cashierName: session?.user.name ?? authUser?.name ?? '',
+    customerName: selectedCustomer?.name ?? '',
+    saleStartedAt: billStartedAt ?? undefined,
+  }), [
+    appliedThemeMode,
+    authUser?.name,
+    billStartedAt,
+    branches,
+    currentTerminalId,
+    customerDisplaySettings,
+    selectedBranchId,
+    selectedCustomer?.name,
+    session,
+    terminals,
+  ]);
+
+  useEffect(() => subscribeCustomerDisplayStatus(setCustomerDisplayStatus), []);
+
+  // Tender only exists while the payment window is open; every route out of it
+  // — cancel, sign-out, a closed shift — takes the display back to the bill.
+  useEffect(() => {
+    if (!isPaymentOpen) {
+      setPaymentProgress(null);
+    }
+  }, [isPaymentOpen]);
+
+  // A bill's date is the moment the first line was rung up, not the moment the
+  // display last redrew.
+  useEffect(() => {
+    setBillStartedAt((previous) => {
+      if (cart.length === 0) {
+        return null;
+      }
+
+      return previous ?? new Date().toISOString();
+    });
+  }, [cart.length]);
+
+  /**
+   * Mirrors the bill onto the customer display. The workstation is the only
+   * writer: every change to the cart, the tender or the display settings
+   * republishes a whole snapshot, so a display opened part-way through a sale
+   * is never left showing a stale bill.
+   */
+  useEffect(() => {
+    if (!customerDisplaySettings.enabled && !customerDisplayStatus.open) {
+      return;
+    }
+
+    const state = completedDisplaySale
+      ? buildCompletedSaleDisplayState(customerDisplayContext, completedDisplaySale)
+      : buildCartDisplayState(customerDisplayContext, cart, totals, paymentProgress);
+
+    // Renders that change nothing the customer can see — a resize, a catalog
+    // filter — must not put the display through another storage write.
+    const signature = JSON.stringify({ ...state, updatedAt: '' });
+    if (signature === lastPublishedDisplayRef.current) {
+      return;
+    }
+
+    lastPublishedDisplayRef.current = signature;
+    publishCustomerDisplayState(state);
+  }, [
+    cart,
+    completedDisplaySale,
+    customerDisplayContext,
+    customerDisplaySettings.enabled,
+    customerDisplayStatus.open,
+    paymentProgress,
+    totals,
+  ]);
+
+  // The completed sale stays up for its dwell time, or until the cashier starts
+  // the next bill. A dwell of zero means "leave it until the next sale".
+  useEffect(() => {
+    if (completedDisplaySale == null) {
+      return undefined;
+    }
+
+    if (cart.length > 0) {
+      setCompletedDisplaySale(null);
+      return undefined;
+    }
+
+    const dwellSeconds = customerDisplaySettings.completedSaleTimeoutSeconds;
+    if (dwellSeconds <= 0) {
+      return undefined;
+    }
+
+    const timer = window.setTimeout(() => setCompletedDisplaySale(null), dwellSeconds * 1000);
+    return () => window.clearTimeout(timer);
+  }, [cart.length, completedDisplaySale, customerDisplaySettings.completedSaleTimeoutSeconds]);
+
+  const handleToggleCustomerDisplay = useCallback(async () => {
+    try {
+      const status = customerDisplayStatus.open
+        ? await closeCustomerDisplay()
+        : await openCustomerDisplay();
+      setCustomerDisplayStatus(status);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to open the customer display';
+      showNotice('error', message);
+    }
+  }, [customerDisplayStatus.open, showNotice]);
+
   const visibleSales = useMemo(
     () => hideCashSales ? sales.filter((sale) => !saleIncludesCash(sale)) : sales,
     [hideCashSales, sales],
@@ -662,6 +810,7 @@ export default function PosWorkstation() {
       ...settingsDraft,
       shortcuts: normalizeShortcutSettings(settingsDraft.shortcuts),
       shiftReconciliation: normalizeShiftReconciliation(settingsDraft.shiftReconciliation),
+      customerDisplay: normalizeCustomerDisplaySettings(settingsDraft.customerDisplay),
     };
 
     try {
@@ -681,9 +830,14 @@ export default function PosWorkstation() {
         setDesktopSettings(normalizedDraft);
         setSettingsDraft(normalizedDraft);
         setAppliedThemeMode(normalizedDraft.themeMode);
-        // Without the desktop bridge there is nowhere to persist to, but the
-        // theme, shortcut and scanner behaviour still apply for the rest of the session.
-        showNotice('success', 'Settings applied for this browser session.');
+        // Most desktop settings have nowhere to persist to in a browser, but the
+        // customer display is driven entirely from this window, so its wording
+        // and behaviour are kept in local storage the way the theme is.
+        persistCustomerDisplaySettings(normalizedDraft.customerDisplay);
+        showNotice(
+          'success',
+          'Settings applied for this browser session. Customer display settings were saved for this browser.',
+        );
       }
 
       setIsSettingsOpen(false);
@@ -865,6 +1019,7 @@ export default function PosWorkstation() {
     setIsReturnOpen(false);
     setIsOrdersOpen(false);
     setIsVoidOpen(false);
+    setIsCashMovementOpen(false);
     setReceiptSale(null);
     setIsSettingsOpen(false);
     setSettingsDraft(desktopSettings);
@@ -1407,6 +1562,10 @@ export default function PosWorkstation() {
     try {
       const sale = await createSale(payload);
       setReceiptSale(sale);
+      // What the customer reads back: their items, what they paid and the
+      // change owed. Replaces the live bill on the display until it times out.
+      setCompletedDisplaySale(sale);
+      setPaymentProgress(null);
       setIsPaymentOpen(false);
       setCart([]);
       setBillDiscount(0);
@@ -1547,6 +1706,52 @@ export default function PosWorkstation() {
     }
   }, [activeShift, refreshZReport, showNotice]);
 
+  const handleOpenCashMovement = useCallback(() => {
+    if (activeShift == null) {
+      showNotice('error', 'Open a shift before moving cash in or out of the drawer.');
+      return;
+    }
+    setIsCashMovementOpen(true);
+    void refreshZReport();
+  }, [activeShift, refreshZReport, showNotice]);
+
+  const handleCashMovement = useCallback(async (
+    input: { direction: 'in' | 'out'; counts: Record<string, number>; reason: string },
+  ) => {
+    if (session == null || activeShift == null) {
+      return;
+    }
+
+    setIsSavingCashMovement(true);
+    try {
+      const declaration = buildCashDeclaration(
+        input.direction === 'in' ? CashCountMode.PAID_IN : CashCountMode.PAID_OUT,
+        input.counts,
+      );
+      const report = await recordCashMovement({
+        shiftId: activeShift.id,
+        terminalId: session.terminalId,
+        cashierId: session.user.id,
+        direction: input.direction,
+        reason: input.reason,
+        declaration,
+      });
+
+      setZReport(report);
+      setZReportError('');
+      setIsCashMovementOpen(false);
+      showNotice(
+        'success',
+        `${input.direction === 'in' ? 'Cash in' : 'Cash out'} of ${formatCurrency(declaration.total)} recorded. Expected drawer is now ${formatCurrency(report.expectedDrawer)}.`,
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to record the cash movement';
+      showNotice('error', message);
+    } finally {
+      setIsSavingCashMovement(false);
+    }
+  }, [activeShift, session, showNotice]);
+
   const handleOpenMoneyModal = useCallback(() => {
     const nextMode: MoneyModalMode = activeShift == null ? 'open' : 'close';
     setMoneyMode(nextMode);
@@ -1601,6 +1806,7 @@ export default function PosWorkstation() {
     || isOrdersOpen
     || isVoidOpen
     || isSettingsOpen
+    || isCashMovementOpen
     || moneyMode != null
     || variantSelection != null
     || receiptSale != null;
@@ -1664,10 +1870,21 @@ export default function PosWorkstation() {
       case 'cashDrawer':
         handleOpenMoneyModal();
         return;
+      case 'cashMovement':
+        handleOpenCashMovement();
+        return;
       default:
         return;
     }
-  }, [activeShift, cart.length, handleOpenHoldModal, handleOpenMoneyModal, handlePrintQuotation, showNotice]);
+  }, [
+    activeShift,
+    cart.length,
+    handleOpenCashMovement,
+    handleOpenHoldModal,
+    handleOpenMoneyModal,
+    handlePrintQuotation,
+    showNotice,
+  ]);
 
   const quickKeyProducts = useMemo(() => {
     const byId = new Map(products.map((product) => [product.id, product]));
@@ -1821,6 +2038,8 @@ export default function PosWorkstation() {
         onCashAction={handleOpenMoneyModal}
         onOpenHelp={() => setIsHelpOpen(true)}
         onOpenOrders={() => setIsOrdersOpen(true)}
+        onCashMovement={handleOpenCashMovement}
+        shortcuts={actionShortcuts}
         onOpenSettings={() => void handleOpenSettings()}
         onSignOut={handleSignOut}
         onOpenSync={() => navigate('/sync')}
@@ -1997,6 +2216,8 @@ export default function PosWorkstation() {
           }}
           onDraftChange={setSettingsDraft}
           onSave={() => void handleSaveSettings()}
+          onToggleCustomerDisplay={() => void handleToggleCustomerDisplay()}
+          customerDisplayStatus={customerDisplayStatus}
           products={products}
         />
       )}
@@ -2006,6 +2227,7 @@ export default function PosWorkstation() {
           total={totals.total}
           onClose={() => setIsPaymentOpen(false)}
           onComplete={(payments) => void handleCompleteSale(payments)}
+          onProgressChange={setPaymentProgress}
           addDenominationsToPaymentList={desktopSettings?.addDenominationsToPaymentList ?? true}
           showDenominationCombinations={desktopSettings?.showDenominationCombinations ?? true}
           allowShortPayments={desktopSettings?.allowShortPayments ?? false}
@@ -2020,6 +2242,15 @@ export default function PosWorkstation() {
           onClose={() => setIsHoldOpen(false)}
           onHold={() => void handleSaveHeldSale()}
           onRecall={(heldSale) => void handleRecallHeldSale(heldSale)}
+        />
+      )}
+
+      {isCashMovementOpen && (
+        <CashMovementModal
+          expectedDrawer={hideCashSales ? undefined : zReport?.expectedDrawer}
+          isSaving={isSavingCashMovement}
+          onClose={() => setIsCashMovementOpen(false)}
+          onSubmit={(input) => void handleCashMovement(input)}
         />
       )}
 
@@ -2241,6 +2472,8 @@ type HeaderBarProps = {
   onCashAction: () => void;
   onOpenHelp: () => void;
   onOpenOrders: () => void;
+  onCashMovement: () => void;
+  shortcuts: POSActionShortcuts;
   onOpenSettings: () => void;
   needsSyncAuth: boolean;
   onOpenSync: () => void;
@@ -2319,14 +2552,24 @@ function HeaderBar(props: HeaderBarProps) {
       <div className="header-right">
         <MetricCard label="Today" value={formatCurrency(props.todayRevenue)} />
         <MetricCard label="Bills" value={String(props.todayBills)} />
-        <button className="ghost-button" onClick={props.onOpenOrders}>
+        <button className="ghost-button" onClick={props.onOpenOrders} title={`Order history (${formatBinding(props.shortcuts.orders)})`}>
           Orders
         </button>
-        <button className="ghost-button" onClick={props.onOpenHelp} title="Help & user guide (F1)">
+        <button className="ghost-button" onClick={props.onOpenHelp} title={`Help & user guide (${formatBinding(props.shortcuts.help)})`}>
           Help
         </button>
-        <button className="ghost-button" onClick={props.onCashAction}>
+        <button className="ghost-button" onClick={props.onCashAction} title={`${ACTION_SHORTCUT_HINTS.cashDrawer} (${formatBinding(props.shortcuts.cashDrawer)})`}>
           Cash
+        </button>
+        <button
+          className="ghost-button"
+          disabled={props.activeShift == null}
+          onClick={props.onCashMovement}
+          title={props.activeShift == null
+            ? 'Open a shift before moving cash in or out of the drawer.'
+            : `${ACTION_SHORTCUT_HINTS.cashMovement} (${formatBinding(props.shortcuts.cashMovement)})`}
+        >
+          In / Out
         </button>
         <div className="account-menu" ref={accountMenuRef}>
           <button
@@ -2936,6 +3179,8 @@ function SettingsModal(
     onClose: () => void;
     onDraftChange: React.Dispatch<React.SetStateAction<POSDesktopSettings | null>>;
     onSave: () => void;
+    onToggleCustomerDisplay: () => void;
+    customerDisplayStatus: POSCustomerDisplayStatus;
     hasPrintingBridge: boolean;
     products: Product[];
   },
@@ -3144,6 +3389,15 @@ function SettingsModal(
                 scanner={settings.scanner}
                 onChange={(scanner) => updateDraft('scanner', scanner)}
               />
+
+              <CustomerDisplayCard
+                disabled={props.isSaving}
+                hasDesktopBridge={props.hasDesktopBridge}
+                settings={settings.customerDisplay}
+                status={props.customerDisplayStatus}
+                onChange={(customerDisplay) => updateDraft('customerDisplay', customerDisplay)}
+                onToggleDisplay={props.onToggleCustomerDisplay}
+              />
             </div>
 
             <ShortcutSettingsCard
@@ -3196,6 +3450,10 @@ function KeyBindingInput(
 ) {
   const [isRecording, setIsRecording] = useState(false);
   const [rejected, setRejected] = useState('');
+  // Held in a ref so the capture listener is installed once per recording
+  // session rather than being torn down on every parent re-render.
+  const handlersRef = useRef(props);
+  handlersRef.current = props;
 
   useEffect(() => {
     if (!isRecording) return undefined;
@@ -3210,26 +3468,27 @@ function KeyBindingInput(
       event.preventDefault();
       event.stopPropagation();
 
+      const handlers = handlersRef.current;
       if (event.code === 'Backspace' || event.code === 'Delete') {
         setIsRecording(false);
         setRejected('');
-        props.onReset?.();
+        handlers.onReset?.();
         return;
       }
 
-      if (props.requireModifier && !isValidQuickKeyBinding(binding)) {
+      if (handlers.requireModifier && !isValidQuickKeyBinding(binding)) {
         setRejected(QUICK_KEY_BINDING_HINT);
         return;
       }
 
       setIsRecording(false);
       setRejected('');
-      props.onChange(binding);
+      handlers.onChange(binding);
     };
 
     window.addEventListener('keydown', capture, true);
     return () => window.removeEventListener('keydown', capture, true);
-  }, [isRecording, props]);
+  }, [isRecording]);
 
   return (
     <span className="key-binding-input">
@@ -3638,6 +3897,140 @@ function ScannerSettingsCard(
           <small>A short tone from the workstation, separate from the scanner's own beep.</small>
         </span>
       </label>
+    </section>
+  );
+}
+
+/**
+ * Settings for the second screen the customer reads.
+ *
+ * On the desktop the display is a real window the main process places on a
+ * second monitor; in a browser it is a pop-up this window drives through local
+ * storage. Both are opened from the same button here.
+ */
+function CustomerDisplayCard(
+  props: {
+    disabled?: boolean;
+    hasDesktopBridge: boolean;
+    settings: POSCustomerDisplaySettings;
+    status: POSCustomerDisplayStatus;
+    onChange: (settings: POSCustomerDisplaySettings) => void;
+    onToggleDisplay: () => void;
+  },
+) {
+  const update = <K extends keyof POSCustomerDisplaySettings>(
+    key: K,
+    value: POSCustomerDisplaySettings[K],
+  ) => {
+    props.onChange({ ...props.settings, [key]: value });
+  };
+
+  const placementHint = props.hasDesktopBridge
+    ? props.status.displayCount > 1
+      ? `${props.status.displayCount} monitors detected. The display opens full screen on the monitor the workstation is not using.`
+      : 'Only one monitor detected. The display opens as a movable window you can drag onto a customer screen.'
+    : 'In a browser the display opens as a separate pop-up window that follows this one. Allow pop-ups for this site.';
+
+  return (
+    <section className="settings-card">
+      <div className="settings-card-head">
+        <div>
+          <div className="section-kicker">Customer display</div>
+          <div className="section-title">Second screen</div>
+        </div>
+        <div className="report-chip mono">{props.status.open ? 'Display open' : 'Display closed'}</div>
+      </div>
+
+      <label className="settings-checkbox-row">
+        <input
+          type="checkbox"
+          disabled={props.disabled}
+          checked={props.settings.enabled}
+          onChange={(event) => update('enabled', event.target.checked)}
+        />
+        <span>
+          <b>Show a customer display</b>
+          <small>Open it automatically with the workstation and mirror every bill to it.</small>
+        </span>
+      </label>
+
+      <LabelBlock label="Welcome message">
+        <input
+          className="glass-input"
+          disabled={props.disabled}
+          value={props.settings.welcomeMessage}
+          onChange={(event) => update('welcomeMessage', event.target.value)}
+        />
+      </LabelBlock>
+
+      <LabelBlock label="Welcome subtitle">
+        <input
+          className="glass-input"
+          disabled={props.disabled}
+          value={props.settings.welcomeSubtitle}
+          onChange={(event) => update('welcomeSubtitle', event.target.value)}
+        />
+      </LabelBlock>
+
+      <div className="field-hint">Shown between sales, whenever the cart is empty.</div>
+
+      <LabelBlock label="Thank-you message">
+        <input
+          className="glass-input"
+          disabled={props.disabled}
+          value={props.settings.thankYouMessage}
+          onChange={(event) => update('thankYouMessage', event.target.value)}
+        />
+      </LabelBlock>
+
+      <div className="settings-field-row">
+        <LabelBlock label="Store name">
+          <input
+            className="glass-input"
+            disabled={props.disabled}
+            placeholder="Branch name"
+            value={props.settings.storeName}
+            onChange={(event) => update('storeName', event.target.value)}
+          />
+        </LabelBlock>
+
+        <LabelBlock label="Completed sale stays up (seconds)">
+          <input
+            className="glass-input"
+            type="number"
+            min={0}
+            max={600}
+            disabled={props.disabled}
+            value={props.settings.completedSaleTimeoutSeconds}
+            onChange={(event) => update('completedSaleTimeoutSeconds', Number(event.target.value))}
+          />
+        </LabelBlock>
+      </div>
+
+      <div className="field-hint">
+        Zero leaves the completed sale on screen until the next bill starts.
+      </div>
+
+      <label className="settings-checkbox-row">
+        <input
+          type="checkbox"
+          disabled={props.disabled}
+          checked={props.settings.showCashierName}
+          onChange={(event) => update('showCashierName', event.target.checked)}
+        />
+        <span>
+          <b>Show the cashier's name</b>
+          <small>Adds "Served by" to the display header.</small>
+        </span>
+      </label>
+
+      <div className="settings-inline-actions">
+        <button className="ghost-button" disabled={props.disabled} onClick={props.onToggleDisplay}>
+          {props.status.open ? 'Close display' : 'Open display now'}
+        </button>
+      </div>
+
+      <div className="field-hint">{placementHint}</div>
     </section>
   );
 }
@@ -4483,6 +4876,8 @@ function PaymentModal(
     total: number;
     onClose: () => void;
     onComplete: (payments: PaymentInput[]) => void;
+    /** Reports live tender so the customer display can follow the payment. */
+    onProgressChange: (progress: CustomerDisplayPaymentProgress) => void;
     addDenominationsToPaymentList: boolean;
     showDenominationCombinations: boolean;
     allowShortPayments: boolean;
@@ -4500,6 +4895,19 @@ function PaymentModal(
   const splitRemaining = Math.max(0, roundToMoney(props.total - splitPaid));
   const splitChange = roundToMoney(splitPayments.reduce((sum, payment) => sum + (payment.changeDue ?? 0), 0));
   const change = Math.max(0, roundToMoney(tendered - props.total));
+
+  // Change is what has already been given back on completed entries, plus what
+  // the amount now being keyed would return once it is added.
+  const progressChange = roundToMoney(splitChange + Math.max(0, roundToMoney(tendered - splitRemaining)));
+  const onProgressChange = props.onProgressChange;
+  useEffect(() => {
+    onProgressChange({
+      payments: splitPayments,
+      tendered,
+      balanceDue: splitRemaining,
+      changeDue: progressChange,
+    });
+  }, [onProgressChange, progressChange, splitPayments, splitRemaining, tendered]);
 
   const quickAmounts = useMemo(() => {
     const rounded100 = Math.ceil(props.total / 100) * 100;
@@ -4540,6 +4948,25 @@ function PaymentModal(
     search(target, 0, []);
     return results;
   }, [denominationCounts, isTenderedManuallyEdited, method, props.showDenominationCombinations, tendered]);
+
+  /**
+   * How to hand the change back, and whether asking the customer for a little
+   * more would make it simpler. Computed against the amount still outstanding
+   * on the bill, so it stays correct part-way through a split payment.
+   */
+  const changeGuidance = useMemo(() => {
+    const dueNow = Math.min(splitRemaining, roundToMoney(tendered));
+    const changeAmount = roundToMoney(tendered - dueNow);
+    if (changeAmount <= 0) {
+      return null;
+    }
+
+    return {
+      amount: changeAmount,
+      breakdowns: suggestChangeBreakdowns(changeAmount, 3),
+      topUps: suggestTenderTopUps(splitRemaining, tendered, 3),
+    };
+  }, [splitRemaining, tendered]);
 
   const hasUnsavedChanges = method !== PaymentMethod.CASH
     || tendered !== 0
@@ -4769,6 +5196,55 @@ function PaymentModal(
             </div>
           )}
 
+          {method === PaymentMethod.CASH && changeGuidance != null && (
+            <div className="change-guidance">
+              <div className="meta-label">Change for {formatCurrency(changeGuidance.amount)}</div>
+
+              {changeGuidance.breakdowns.length === 0 ? (
+                <div className="change-guidance-empty">
+                  This amount cannot be made exactly from the denominations in use.
+                </div>
+              ) : (
+                <div className="change-option-list">
+                  {changeGuidance.breakdowns.map((option, index) => (
+                    <div className={`change-option ${index === 0 ? 'preferred' : ''}`} key={formatDenominationBreakdown(option)}>
+                      <span className="change-option-pieces">{formatDenominationBreakdown(option)}</span>
+                      <small>{formatInteger(option.pieceCount)} piece{option.pieceCount === 1 ? '' : 's'}</small>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {changeGuidance.topUps.length > 0 && (
+                <>
+                  <div className="meta-label">Or ask for a little more</div>
+                  <div className="change-option-list">
+                    {changeGuidance.topUps.map((topUp) => (
+                      <button
+                        className="change-option topup"
+                        key={topUp.askFor}
+                        onClick={() => {
+                          setIsTenderedManuallyEdited(false);
+                          setDenominationCounts({});
+                          setTendered(roundToMoney(tendered + topUp.askFor));
+                        }}
+                        title={`Set the tendered amount to ${formatCurrency(tendered + topUp.askFor)}`}
+                      >
+                        <span className="change-option-pieces">
+                          Ask for {formatCurrency(topUp.askFor)} ({formatDenominationBreakdown(topUp.askBreakdown)})
+                        </span>
+                        <small>
+                          Change becomes {formatDenominationBreakdown(topUp.changeBreakdown)}
+                          {' · '}{formatInteger(topUp.piecesSaved)} fewer piece{topUp.piecesSaved === 1 ? '' : 's'}
+                        </small>
+                      </button>
+                    ))}
+                  </div>
+                </>
+              )}
+            </div>
+          )}
+
           {method !== PaymentMethod.CASH && method !== PaymentMethod.INSTALLMENT && (
             <LabelBlock label="Reference">
               <input
@@ -4972,6 +5448,32 @@ function MoneyDeclareModal(
           )}
         </div>
 
+        {isClosing && !props.cashSalesHidden && (props.report?.cashMovements.length ?? 0) > 0 && (
+          <section className="tender-declare">
+            <div className="settings-card-head">
+              <div>
+                <div className="section-kicker">Drawer movements</div>
+                <div className="section-title">Cash moved during this shift</div>
+              </div>
+              <div className="report-chip mono">Already in the expected drawer</div>
+            </div>
+            <div className="tender-declare-list">
+              {props.report!.cashMovements.map((movement) => (
+                <div className="tender-declare-row" key={movement.id}>
+                  <span className="tender-declare-label">
+                    {movement.direction === 'in' ? 'Cash in' : 'Cash out'}
+                  </span>
+                  <span className="tender-declare-expected">{movement.reason ?? 'No reason recorded'}</span>
+                  <span className="tender-declare-expected">{formatTime(movement.createdAt)}</span>
+                  <span className={`tender-declare-variance ${movement.direction === 'in' ? 'variance-ok' : 'variance-warn'}`}>
+                    {movement.direction === 'in' ? '+' : '-'}{formatCurrency(movement.amount)}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </section>
+        )}
+
         {isClosing && props.isReportLoading && (
           <div className="inline-alert info">Loading this shift's transaction log to reconcile the declaration...</div>
         )}
@@ -5050,6 +5552,144 @@ function MoneyDeclareModal(
           <button className="ghost-button" onClick={props.onClose}>Cancel</button>
           <button className="btn-primary" onClick={handleSubmit}>
             {isClosing ? 'Submit and close shift' : 'Confirm and open shift'}
+          </button>
+        </div>
+      </div>
+    </ModalShell>
+  );
+}
+
+const CASH_IN_REASONS = ['Change reload from the safe', 'Float top-up', 'Petty cash returned'];
+const CASH_OUT_REASONS = ['Safe drop', 'Banking', 'Supplier payout', 'Petty cash taken'];
+
+/**
+ * Records a mid-shift drawer movement.
+ *
+ * Counted by denomination like every other cash declaration, because the point
+ * is that the expected drawer at close accounts for it. A reason is mandatory:
+ * an unexplained movement is indistinguishable from a shortage.
+ */
+function CashMovementModal(
+  props: {
+    expectedDrawer?: number;
+    isSaving: boolean;
+    onClose: () => void;
+    onSubmit: (input: { direction: 'in' | 'out'; counts: Record<string, number>; reason: string }) => void;
+  },
+) {
+  const [direction, setDirection] = useState<'in' | 'out'>('in');
+  const [counts, setCounts] = useState<Record<string, number>>(() => createEmptyDenominationCounts());
+  const [reason, setReason] = useState('');
+
+  const total = useMemo(
+    () => buildCashDeclaration(
+      direction === 'in' ? CashCountMode.PAID_IN : CashCountMode.PAID_OUT,
+      counts,
+    ).total,
+    [counts, direction],
+  );
+
+  const reasonOptions = direction === 'in' ? CASH_IN_REASONS : CASH_OUT_REASONS;
+  const trimmedReason = reason.trim();
+  const exceedsDrawer = direction === 'out' && props.expectedDrawer != null && total > props.expectedDrawer;
+  const canSubmit = total > 0 && trimmedReason !== '' && !props.isSaving;
+
+  return (
+    <ModalShell onClose={props.onClose} title="Cash in / cash out" width="wide">
+      <div className="modal-stack">
+        <div className="theme-option-row">
+          <button
+            className={`theme-option ${direction === 'in' ? 'active' : ''}`}
+            onClick={() => setDirection('in')}
+          >
+            <span className="theme-option-title">Cash in</span>
+            <span className="theme-option-copy">Reloading change or topping the float up from the safe.</span>
+          </button>
+          <button
+            className={`theme-option ${direction === 'out' ? 'active' : ''}`}
+            onClick={() => setDirection('out')}
+          >
+            <span className="theme-option-title">Cash out</span>
+            <span className="theme-option-copy">Dropping takings to the safe, banking, or paying something out.</span>
+          </button>
+        </div>
+
+        <div className="cash-grid">
+          <div>
+            <div className="meta-label">Notes</div>
+            {DENOMINATIONS.filter((entry) => entry.kind === 'note').map((entry) => (
+              <DenominationRow
+                key={entry.value}
+                count={counts[String(entry.value)] ?? 0}
+                denomination={entry}
+                onChange={(nextCount) => setCounts((previous) => ({ ...previous, [String(entry.value)]: Math.max(0, nextCount) }))}
+              />
+            ))}
+          </div>
+          <div>
+            <div className="meta-label">Coins</div>
+            {DENOMINATIONS.filter((entry) => entry.kind === 'coin').map((entry) => (
+              <DenominationRow
+                key={entry.value}
+                count={counts[String(entry.value)] ?? 0}
+                denomination={entry}
+                onChange={(nextCount) => setCounts((previous) => ({ ...previous, [String(entry.value)]: Math.max(0, nextCount) }))}
+              />
+            ))}
+          </div>
+        </div>
+
+        <LabelBlock label="Reason">
+          <input
+            className="glass-input"
+            value={reason}
+            maxLength={140}
+            placeholder={direction === 'in' ? 'Why is cash going in?' : 'Why is cash coming out?'}
+            onChange={(event) => setReason(event.target.value)}
+          />
+        </LabelBlock>
+
+        <div className="reason-chip-row">
+          {reasonOptions.map((option) => (
+            <button
+              key={option}
+              className={`reason-chip ${trimmedReason === option ? 'active' : ''}`}
+              onClick={() => setReason(option)}
+            >
+              {option}
+            </button>
+          ))}
+        </div>
+
+        <div className="cash-total-bar">
+          <div>
+            <div className="meta-label">{direction === 'in' ? 'Cash going in' : 'Cash coming out'}</div>
+            <div className="payment-total">{formatCurrency(total)}</div>
+          </div>
+          {props.expectedDrawer != null && (
+            <div className="variance-card">
+              <div className="meta-label">Drawer after this</div>
+              <div className={exceedsDrawer ? 'variance-alert' : ''}>
+                {formatCurrency(direction === 'in' ? props.expectedDrawer + total : props.expectedDrawer - total)}
+              </div>
+            </div>
+          )}
+        </div>
+
+        {exceedsDrawer && (
+          <div className="inline-alert warning">
+            This takes out more than the drawer is expected to hold. Recheck the count before submitting.
+          </div>
+        )}
+
+        <div className="modal-actions">
+          <button className="ghost-button" onClick={props.onClose}>Cancel</button>
+          <button
+            className="btn-primary"
+            disabled={!canSubmit}
+            onClick={() => props.onSubmit({ direction, counts, reason: trimmedReason })}
+          >
+            {props.isSaving ? 'Recording...' : direction === 'in' ? 'Record cash in' : 'Record cash out'}
           </button>
         </div>
       </div>
@@ -5280,6 +5920,12 @@ function ZReportModal(props: {
             <div className="z-reading-lines">
               <ReportRow label="Cash sale" value={`${formatInteger(zReading.paymentCounts.CASH ?? 0)}    ${formatCurrency(zReading.cashSales)}`} />
               <ReportRow label="Opening float" value={formatCurrency(visibleReport.openingFloat)} />
+              {visibleReport.cashPaidIn > 0 && (
+                <ReportRow label="Cash in" value={formatCurrency(visibleReport.cashPaidIn)} />
+              )}
+              {visibleReport.cashPaidOut > 0 && (
+                <ReportRow label="Cash out" value={`- ${formatCurrency(visibleReport.cashPaidOut)}`} />
+              )}
               <ReportRow label="Expected drawer" value={formatCurrency(visibleReport.expectedDrawer)} strong />
               {visibleReport.countedDrawer != null && <ReportRow label="Declared amount" value={formatCurrency(visibleReport.countedDrawer)} />}
               {visibleReport.variance != null && <ReportRow label="Cash excess / (short)" value={formatCurrency(visibleReport.variance)} strong />}

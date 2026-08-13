@@ -32,6 +32,10 @@ export enum PaymentMethod {
 export enum CashCountMode {
   OPENING = 'OPENING',
   CLOSING = 'CLOSING',
+  /** Cash added to the drawer mid-shift: a change reload or a float top-up. */
+  PAID_IN = 'PAID_IN',
+  /** Cash removed from the drawer mid-shift: a safe drop, payout or banking. */
+  PAID_OUT = 'PAID_OUT',
 }
 
 export enum SyncEventType {

@@ -141,6 +141,8 @@ model ShiftCashCount {
   tenders        String?
   /// 'total' or 'category'; null when the terminal declares cash only.
   tenderMode     String?
+  /// Why cash was moved in or out mid-shift; null for opening and closing counts.
+  reason         String?
   createdAt      DateTime @default(now())
   shift          POSShift @relation(fields: [shiftId], references: [id])
 }

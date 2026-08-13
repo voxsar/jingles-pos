@@ -5,6 +5,7 @@ import { app } from 'electron';
 import {
   DEFAULT_POS_PRINTER_CONFIG,
   DEFAULT_POS_SCANNER_SETTINGS,
+  normalizeCustomerDisplaySettings,
   normalizeShiftReconciliation,
   normalizeShortcutSettings,
   type POSDesktopBackupResult,
@@ -183,6 +184,7 @@ function toSnapshot(value: StoredDesktopSettings | null | undefined): POSDesktop
     scanner: normalizeScanner(value?.scanner),
     shortcuts: normalizeShortcutSettings(value?.shortcuts),
     shiftReconciliation: normalizeShiftReconciliation(value?.shiftReconciliation),
+    customerDisplay: normalizeCustomerDisplaySettings(value?.customerDisplay),
   };
 }
 

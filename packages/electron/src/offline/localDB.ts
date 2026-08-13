@@ -355,6 +355,9 @@ function initSchema(db: Database.Database): void {
       total REAL NOT NULL,
       denominations_json TEXT NOT NULL,
       variance REAL,
+      tenders_json TEXT,
+      tender_mode TEXT,
+      reason TEXT,
       created_at TEXT NOT NULL
     );
 
@@ -577,6 +580,9 @@ function initSchema(db: Database.Database): void {
   ensureColumn(db, 'sale_lines', 'variant_name', 'TEXT');
   ensureColumn(db, 'sale_lines', 'variant_attributes_json', 'TEXT');
   ensureColumn(db, 'return_lines', 'variant_id', 'TEXT');
+  ensureColumn(db, 'shift_cash_counts', 'tenders_json', 'TEXT');
+  ensureColumn(db, 'shift_cash_counts', 'tender_mode', 'TEXT');
+  ensureColumn(db, 'shift_cash_counts', 'reason', 'TEXT');
   db.exec(`
     CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
   `);
@@ -1080,13 +1086,20 @@ function saveCashCountRow(
     return;
   }
 
+  const hasTenders = declaration.tenderMode != null
+    && Object.keys(declaration.tenders ?? {}).length > 0;
+
   db.prepare(`
-    INSERT INTO shift_cash_counts (id, shift_id, mode, total, denominations_json, variance, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO shift_cash_counts (
+      id, shift_id, mode, total, denominations_json, variance, tenders_json, tender_mode, created_at
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(id) DO UPDATE SET
       total = excluded.total,
       denominations_json = excluded.denominations_json,
-      variance = excluded.variance
+      variance = excluded.variance,
+      tenders_json = excluded.tenders_json,
+      tender_mode = excluded.tender_mode
   `).run(
     `${idPrefix}-${declaration.mode}`,
     shiftId,
@@ -1094,6 +1107,8 @@ function saveCashCountRow(
     declaration.total,
     stringifyJson(declaration.denominations),
     declaration.variance ?? null,
+    hasTenders ? stringifyJson(declaration.tenders) : null,
+    hasTenders ? declaration.tenderMode : null,
     new Date().toISOString(),
   );
 }
@@ -2166,6 +2181,11 @@ export function buildLocalZReport(shiftId: string): ZReportSummary {
     ORDER BY created_at DESC
     LIMIT 1
   `).get(shiftId, CashCountMode.CLOSING) as any;
+  const movementRows = db.prepare(`
+    SELECT * FROM shift_cash_counts
+    WHERE shift_id = ? AND mode IN (?, ?)
+    ORDER BY created_at ASC
+  `).all(shiftId, CashCountMode.PAID_IN, CashCountMode.PAID_OUT) as any[];
 
   const grossSales = sales.reduce((sum, sale) => sum + sale.subtotal, 0);
   const discounts = sales.reduce((sum, sale) => sum + sale.discount_total, 0);
@@ -2178,7 +2198,19 @@ export function buildLocalZReport(shiftId: string): ZReportSummary {
     bucket[row.method] = (bucket[row.method] ?? 0) + 1;
     return bucket;
   }, {});
-  const expectedDrawer = shift.opening_float + (paymentBreakdown.CASH ?? 0) - refunds;
+  const cashPaidIn = movementRows
+    .filter((row) => row.mode === CashCountMode.PAID_IN)
+    .reduce((sum, row) => sum + row.total, 0);
+  const cashPaidOut = movementRows
+    .filter((row) => row.mode === CashCountMode.PAID_OUT)
+    .reduce((sum, row) => sum + row.total, 0);
+  // Mid-shift movements belong here for the same reason they do on the server:
+  // without them a change reload or safe drop reads as an unexplained variance.
+  const expectedDrawer = shift.opening_float
+    + (paymentBreakdown.CASH ?? 0)
+    - refunds
+    + cashPaidIn
+    - cashPaidOut;
 
   return {
     shiftId,
@@ -2190,8 +2222,19 @@ export function buildLocalZReport(shiftId: string): ZReportSummary {
     paymentBreakdown,
     expectedDrawer,
     openingFloat: shift.opening_float,
+    cashPaidIn,
+    cashPaidOut,
     countedDrawer: closingCount?.total ?? undefined,
     variance: closingCount ? closingCount.total - expectedDrawer : undefined,
+    cashMovements: movementRows.map((row) => ({
+      id: row.id,
+      shiftId,
+      direction: (row.mode === CashCountMode.PAID_IN ? 'in' : 'out') as 'in' | 'out',
+      amount: row.total,
+      reason: row.reason ?? undefined,
+      denominations: parseJson<Record<string, number>>(row.denominations_json, {}),
+      createdAt: row.created_at,
+    })),
     paymentCounts,
     discountedLineCount: Number(lineTotals?.discounted_line_count ?? 0),
     productCount: Number(lineTotals?.product_count ?? 0),

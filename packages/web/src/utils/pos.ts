@@ -357,6 +357,197 @@ export function calcCartTotals(lines: CartLine[], billDiscount: number = 0): Car
   };
 }
 
+export interface DenominationBreakdown {
+  /** Denomination value to piece count, e.g. `{ 100: 4, 50: 1 }`. */
+  counts: Record<number, number>;
+  /** Total pieces handed over; the tie-break a cashier actually cares about. */
+  pieceCount: number;
+}
+
+export interface ChangeSuggestion extends DenominationBreakdown {
+  amount: number;
+}
+
+export interface TopUpSuggestion {
+  /** Extra the customer is asked for on top of what they already handed over. */
+  askFor: number;
+  /** Denominations that make up the extra ask. */
+  askBreakdown: DenominationBreakdown;
+  /** Change once the extra is included — the point of asking. */
+  changeAmount: number;
+  changeBreakdown: DenominationBreakdown;
+  /** Pieces saved versus giving change for the original tender. */
+  piecesSaved: number;
+}
+
+function formatBreakdownCounts(counts: Record<number, number>): string {
+  return Object.entries(counts)
+    .map(([value, count]) => [Number(value), count] as const)
+    .sort((left, right) => right[0] - left[0])
+    .map(([value, count]) => `${count}x${value}`)
+    .join(' + ');
+}
+
+/** Renders `{ 100: 4, 50: 1 }` as `4x100 + 1x50`, the way a cashier reads a till slip. */
+export function formatDenominationBreakdown(breakdown: DenominationBreakdown): string {
+  return formatBreakdownCounts(breakdown.counts);
+}
+
+/** Denomination values, largest first, as whole rupees. */
+const DENOMINATION_VALUES = DENOMINATIONS.map((entry) => entry.value).sort((left, right) => right - left);
+
+/**
+ * The fewest-pieces way to make an amount, or null if the denominations cannot
+ * make it exactly.
+ *
+ * Sri Lankan denominations are canonical, so the greedy choice is also the
+ * optimal one; the loop is kept explicit rather than greedy-by-assumption so a
+ * future denomination change cannot silently produce a wrong-but-plausible
+ * answer — anything it cannot make exactly comes back as null instead.
+ */
+export function makeChangeBreakdown(
+  amount: number,
+  available: number[] = DENOMINATION_VALUES,
+): DenominationBreakdown | null {
+  const target = Math.round(amount);
+  if (!Number.isFinite(target) || target < 0 || Math.abs(amount - target) > 0.005) {
+    return null;
+  }
+  if (target === 0) {
+    return { counts: {}, pieceCount: 0 };
+  }
+
+  const values = [...new Set(available)].sort((left, right) => right - left);
+  // Minimum pieces for every amount up to the target.
+  const best = new Array<number>(target + 1).fill(Number.POSITIVE_INFINITY);
+  const pick = new Array<number>(target + 1).fill(0);
+  best[0] = 0;
+
+  for (let amountSoFar = 1; amountSoFar <= target; amountSoFar += 1) {
+    for (const value of values) {
+      if (value > amountSoFar) continue;
+      const candidate = best[amountSoFar - value] + 1;
+      if (candidate < best[amountSoFar]) {
+        best[amountSoFar] = candidate;
+        pick[amountSoFar] = value;
+      }
+    }
+  }
+
+  if (!Number.isFinite(best[target])) {
+    return null;
+  }
+
+  const counts: Record<number, number> = {};
+  let remaining = target;
+  while (remaining > 0) {
+    const value = pick[remaining];
+    counts[value] = (counts[value] ?? 0) + 1;
+    remaining -= value;
+  }
+
+  return { counts, pieceCount: best[target] };
+}
+
+/**
+ * More pieces than a cashier would ever count out by hand. A breakdown above
+ * this is arithmetically valid but useless at a till — 45 ten-rupee coins for a
+ * 450 change is not a suggestion, it is noise.
+ */
+const MAX_SUGGESTED_PIECES = 12;
+
+/**
+ * Alternative ways to hand back the same change.
+ *
+ * The first result is the fewest-pieces breakdown. Each further suggestion
+ * forbids the *smallest* denomination the previous one used, which is what
+ * actually happens at a till: the big notes stay, and the small remainder gets
+ * made up differently because the drawer ran out of fifties. Forbidding the
+ * largest instead would answer "450" with "9x50", which no one hands over.
+ */
+export function suggestChangeBreakdowns(amount: number, limit = 3): ChangeSuggestion[] {
+  // No change owed is not a suggestion of "hand over nothing".
+  if (!Number.isFinite(amount) || amount <= 0) {
+    return [];
+  }
+
+  const suggestions: ChangeSuggestion[] = [];
+  const seen = new Set<string>();
+  let available = [...DENOMINATION_VALUES];
+
+  while (suggestions.length < limit && available.length > 0) {
+    const breakdown = makeChangeBreakdown(amount, available);
+    if (breakdown == null) break;
+
+    const signature = formatBreakdownCounts(breakdown.counts);
+    if (!seen.has(signature) && breakdown.pieceCount <= MAX_SUGGESTED_PIECES) {
+      seen.add(signature);
+      suggestions.push({ ...breakdown, amount: roundCurrency(amount) });
+    }
+
+    const smallestUsed = Math.min(...Object.keys(breakdown.counts).map(Number));
+    if (!Number.isFinite(smallestUsed)) break;
+    available = available.filter((value) => value !== smallestUsed);
+  }
+
+  return suggestions;
+}
+
+/**
+ * Small extra amounts worth asking the customer for, because they make the
+ * change rounder and use fewer pieces.
+ *
+ * The classic case: a 4,550 bill paid with 5,000 needs 450 back as four notes
+ * and a coin, but asking for another 50 turns it into a single 500 note.
+ */
+export function suggestTenderTopUps(
+  total: number,
+  tendered: number,
+  limit = 3,
+): TopUpSuggestion[] {
+  const baseChange = Math.round(tendered - total);
+  if (baseChange <= 0) {
+    return [];
+  }
+
+  const baseBreakdown = makeChangeBreakdown(baseChange);
+  if (baseBreakdown == null) {
+    return [];
+  }
+
+  const suggestions: TopUpSuggestion[] = [];
+  // Asking for more than the change being handed back is not a simplification,
+  // it is a re-tender; the 100 floor keeps small bills from having no options.
+  const maxAsk = Math.min(1_000, Math.max(baseChange, 100));
+
+  // Round asks only. "Do you have another 50?" is a question a cashier asks;
+  // "do you have another 51?" is not, however good the resulting change looks.
+  for (let askFor = 5; askFor <= maxAsk; askFor += 5) {
+    const askBreakdown = makeChangeBreakdown(askFor);
+    // The customer has to be able to hand this over without counting out a
+    // handful, or the suggestion is slower than just giving the change.
+    if (askBreakdown == null || askBreakdown.pieceCount > 2) continue;
+
+    const changeAmount = baseChange + askFor;
+    const changeBreakdown = makeChangeBreakdown(changeAmount);
+    if (changeBreakdown == null) continue;
+
+    const piecesSaved = baseBreakdown.pieceCount - changeBreakdown.pieceCount;
+    // Worth mentioning only if the change genuinely gets simpler.
+    if (piecesSaved <= 0) continue;
+
+    suggestions.push({ askFor, askBreakdown, changeAmount, changeBreakdown, piecesSaved });
+  }
+
+  return suggestions
+    .sort((left, right) => (
+      right.piecesSaved - left.piecesSaved
+      || left.askBreakdown.pieceCount - right.askBreakdown.pieceCount
+      || left.askFor - right.askFor
+    ))
+    .slice(0, limit);
+}
+
 export function createEmptyDenominationCounts(): Record<string, number> {
   return Object.fromEntries(DENOMINATIONS.map((denomination) => [String(denomination.value), 0]));
 }

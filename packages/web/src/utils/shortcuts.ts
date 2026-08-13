@@ -28,6 +28,7 @@ export const ACTION_SHORTCUT_LABELS: Record<POSActionShortcutId, string> = {
   refund: 'Refund',
   void: 'Void',
   cashDrawer: 'Cash drawer',
+  cashMovement: 'Cash in / out',
 };
 
 export const ACTION_SHORTCUT_HINTS: Record<POSActionShortcutId, string> = {
@@ -43,6 +44,7 @@ export const ACTION_SHORTCUT_HINTS: Record<POSActionShortcutId, string> = {
   refund: 'Opens the refund and return window.',
   void: 'Voids the current bill. When an overlay is open this key closes it first.',
   cashDrawer: 'Opens the shift money declare window, or the cash drawer once a shift is open.',
+  cashMovement: 'Records cash added to or taken out of the drawer mid-shift, so the close still reconciles.',
 };
 
 /**

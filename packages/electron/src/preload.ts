@@ -1,5 +1,7 @@
 import { contextBridge, ipcRenderer } from 'electron';
 import type {
+  POSCustomerDisplayState,
+  POSCustomerDisplayStatus,
   POSDesktopBackupResult,
   POSDesktopSettings,
   POSDesktopSettingsSaveResult,
@@ -63,6 +65,24 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.invoke('printing:open-drawer', printerId) as Promise<POSPrintResult>
     ),
   },
+  customerDisplay: {
+    getStatus: () => ipcRenderer.invoke('customer-display:status') as Promise<POSCustomerDisplayStatus>,
+    open: () => ipcRenderer.invoke('customer-display:open') as Promise<POSCustomerDisplayStatus>,
+    close: () => ipcRenderer.invoke('customer-display:close') as Promise<POSCustomerDisplayStatus>,
+    toggle: () => ipcRenderer.invoke('customer-display:toggle') as Promise<POSCustomerDisplayStatus>,
+    publish: (state: POSCustomerDisplayState) => ipcRenderer.send('customer-display:publish', state),
+    getState: () => ipcRenderer.invoke('customer-display:get-state') as Promise<POSCustomerDisplayState | null>,
+    onState: (callback: (state: POSCustomerDisplayState) => void) => {
+      const listener = (_event: Electron.IpcRendererEvent, state: POSCustomerDisplayState) => callback(state);
+      ipcRenderer.on('customer-display:state', listener);
+      return () => ipcRenderer.removeListener('customer-display:state', listener);
+    },
+    onStatus: (callback: (status: POSCustomerDisplayStatus) => void) => {
+      const listener = (_event: Electron.IpcRendererEvent, status: POSCustomerDisplayStatus) => callback(status);
+      ipcRenderer.on('customer-display:status', listener);
+      return () => ipcRenderer.removeListener('customer-display:status', listener);
+    },
+  },
   updates: {
     getStatus: () => ipcRenderer.invoke('updater:get-status'),
     check: () => ipcRenderer.invoke('updater:check'),
@@ -96,6 +116,16 @@ declare global {
         printReceipt: (document: POSPrintDocument, options?: { printerId?: string }) => Promise<POSPrintResult>;
         printLabel: (document: POSLabelDocument, options?: { printerId?: string }) => Promise<POSPrintResult>;
         openCashDrawer: (printerId?: string) => Promise<POSPrintResult>;
+      };
+      customerDisplay?: {
+        getStatus: () => Promise<POSCustomerDisplayStatus>;
+        open: () => Promise<POSCustomerDisplayStatus>;
+        close: () => Promise<POSCustomerDisplayStatus>;
+        toggle: () => Promise<POSCustomerDisplayStatus>;
+        publish: (state: POSCustomerDisplayState) => void;
+        getState: () => Promise<POSCustomerDisplayState | null>;
+        onState: (callback: (state: POSCustomerDisplayState) => void) => () => void;
+        onStatus: (callback: (status: POSCustomerDisplayStatus) => void) => () => void;
       };
       updates?: {
         getStatus: () => Promise<unknown>;

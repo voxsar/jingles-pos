@@ -1,4 +1,5 @@
 import {
+	CashMovementInput,
 	CompleteSaleInput,
 	POSAuthLoginInput,
 	POSAuthResult,
@@ -113,6 +114,11 @@ export async function openShift(input: ShiftOpenInput): Promise<ShiftSummary> {
 
 export async function closeShift(input: ShiftCloseInput & { terminalId?: string }): Promise<ShiftSummary> {
 	return postJson<ShiftSummary>(`/shifts/${encodeURIComponent(input.shiftId)}/close`, input);
+}
+
+/** Records cash moving in or out of the drawer mid-shift; returns the refreshed Z-report. */
+export async function recordCashMovement(input: CashMovementInput): Promise<ZReportSummary> {
+	return postJson<ZReportSummary>(`/shifts/${encodeURIComponent(input.shiftId)}/cash-movement`, input);
 }
 
 export async function endActiveShift(shiftId: string, terminalId: string): Promise<ShiftSummary> {

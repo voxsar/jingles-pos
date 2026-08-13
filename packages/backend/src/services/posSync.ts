@@ -441,23 +441,34 @@ async function applyShiftClosedEvent(tx: Tx, event: SyncEvent<ShiftCloseInput>):
 
 async function applyCashDeclaredEvent(
   tx: Tx,
-  event: SyncEvent<{ shiftId: string; declaration: ShiftOpenInput['declaration'] | ShiftCloseInput['declaration'] }>,
+  event: SyncEvent<{
+    shiftId: string;
+    movementId?: string;
+    reason?: string;
+    declaration: ShiftOpenInput['declaration'] | ShiftCloseInput['declaration'];
+  }>,
 ): Promise<void> {
   const declaration = event.payload.declaration;
   if (!declaration) {
     return;
   }
 
-  await tx.shiftCashCount.create({
-    data: {
-      id: `${event.aggregateId}-${event.id}`,
-      shiftId: event.payload.shiftId,
-      mode: declaration.mode,
-      total: declaration.total,
-      denominations: json(declaration.denominations),
-      variance: declaration.variance ?? null,
-      ...serializeDeclaredTenders(declaration),
-    },
+  // Upsert rather than create so a redelivered or replayed event cannot post the
+  // same drawer movement twice and silently inflate the expected drawer.
+  const id = `${event.aggregateId}-${event.payload.movementId ?? event.id}`;
+  const data = {
+    mode: declaration.mode,
+    total: declaration.total,
+    denominations: json(declaration.denominations),
+    variance: declaration.variance ?? null,
+    reason: event.payload.reason?.trim() || null,
+    ...serializeDeclaredTenders(declaration),
+  };
+
+  await tx.shiftCashCount.upsert({
+    where: { id },
+    create: { id, shiftId: event.payload.shiftId, ...data },
+    update: data,
   });
 }
 
@@ -1879,7 +1890,30 @@ function summarizeZShift(shift: ZReportShift): ZReportSummary {
       .filter((item) => item.mode === CashCountMode.CLOSING)
       .sort((left, right) => right.createdAt.getTime() - left.createdAt.getTime())[0];
     const countedDrawer = closingCount?.total;
-    const expectedDrawer = shift.openingFloat + (paymentBreakdown.CASH ?? 0) - refunds;
+    const sumCashCounts = (mode: CashCountMode) => shift.cashCounts
+      .filter((item) => item.mode === mode)
+      .reduce((sum, item) => sum + item.total, 0);
+    const cashPaidIn = sumCashCounts(CashCountMode.PAID_IN);
+    const cashPaidOut = sumCashCounts(CashCountMode.PAID_OUT);
+    const cashMovements = shift.cashCounts
+      .filter((item) => item.mode === CashCountMode.PAID_IN || item.mode === CashCountMode.PAID_OUT)
+      .sort((left, right) => left.createdAt.getTime() - right.createdAt.getTime())
+      .map((item) => ({
+        id: item.id,
+        shiftId: item.shiftId,
+        direction: (item.mode === CashCountMode.PAID_IN ? 'in' : 'out') as 'in' | 'out',
+        amount: item.total,
+        reason: item.reason ?? undefined,
+        denominations: parseDeclaredTenders(item.denominations) ?? {},
+        createdAt: item.createdAt.toISOString(),
+      }));
+    // Mid-shift movements have to land here, or reloading change and dropping
+    // takings to the safe both read as an unexplained variance at close.
+    const expectedDrawer = shift.openingFloat
+      + (paymentBreakdown.CASH ?? 0)
+      - refunds
+      + cashPaidIn
+      - cashPaidOut;
     const declaredTenders = parseDeclaredTenders(closingCount?.tenders);
 
     return {
@@ -1892,6 +1926,8 @@ function summarizeZShift(shift: ZReportShift): ZReportSummary {
       paymentBreakdown,
       expectedDrawer,
       openingFloat: shift.openingFloat,
+      cashPaidIn,
+      cashPaidOut,
       countedDrawer,
       variance: countedDrawer == null ? undefined : countedDrawer - expectedDrawer,
       paymentCounts,
@@ -1899,6 +1935,7 @@ function summarizeZShift(shift: ZReportShift): ZReportSummary {
       productCount,
       declaredTenders,
       declaredTenderMode: (closingCount?.tenderMode as ZReportSummary['declaredTenderMode']) ?? undefined,
+      cashMovements,
     };
 }
 

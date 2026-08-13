@@ -192,6 +192,35 @@ export interface CashDeclaration {
 /** The single bucket key used when non-cash tender is declared as one figure. */
 export const TENDER_TOTAL_KEY = 'TOTAL';
 
+/**
+ * Cash added to or removed from the drawer part-way through a shift.
+ *
+ * Recorded as a `CASH_DECLARED` event against the open shift with a `PAID_IN`
+ * or `PAID_OUT` count mode, so it lands in the same audited cash-count history
+ * as the opening and closing declarations and is picked up by the expected-drawer
+ * calculation. Without it, reloading change or dropping takings to the safe
+ * shows up at close as an unexplained discrepancy.
+ */
+export interface CashMovementInput {
+  shiftId: string;
+  terminalId: string;
+  cashierId: string;
+  direction: 'in' | 'out';
+  /** Free-text justification, required by the workstation before submitting. */
+  reason: string;
+  declaration: CashDeclaration;
+}
+
+export interface CashMovementSummary {
+  id: string;
+  shiftId: string;
+  direction: 'in' | 'out';
+  amount: number;
+  reason?: string;
+  denominations: Record<string, number>;
+  createdAt: string;
+}
+
 export interface ShiftSummary {
   id: string;
   terminalId: string;
@@ -304,6 +333,10 @@ export interface ZReportSummary {
   paymentBreakdown: Record<string, number>;
   expectedDrawer: number;
   openingFloat: number;
+  /** Cash added to the drawer mid-shift (change reloads, float top-ups). */
+  cashPaidIn: number;
+  /** Cash removed from the drawer mid-shift (safe drops, payouts). */
+  cashPaidOut: number;
   countedDrawer?: number;
   variance?: number;
   paymentCounts: Record<string, number>;
@@ -312,6 +345,8 @@ export interface ZReportSummary {
   /** Non-cash tender the cashier declared at close, keyed as in `CashDeclaration.tenders`. */
   declaredTenders?: Record<string, number>;
   declaredTenderMode?: POSTenderDeclarationMode;
+  /** Mid-shift drawer movements, oldest first, so a close can be explained. */
+  cashMovements: CashMovementSummary[];
 }
 
 export interface ZReportSlot {
@@ -588,7 +623,8 @@ export type POSActionShortcutId =
   | 'quote'
   | 'refund'
   | 'void'
-  | 'cashDrawer';
+  | 'cashDrawer'
+  | 'cashMovement';
 
 /**
  * A key binding, serialised as ordered modifiers followed by a `KeyboardEvent.code`,
@@ -617,6 +653,103 @@ export interface POSShortcutSettings {
   quickKeys: POSQuickKey[];
 }
 
+/**
+ * The pole display / second screen the customer reads while the cashier bills.
+ *
+ * The workstation is the only writer: it pushes a full snapshot of what the
+ * customer should see on every change, so the display window holds no billing
+ * logic of its own and can be closed and reopened at any point in a sale.
+ */
+export interface POSCustomerDisplaySettings {
+  /** Open the display automatically when the workstation starts. */
+  enabled: boolean;
+  /** Headline shown between sales. */
+  welcomeMessage: string;
+  /** Secondary line under the headline. */
+  welcomeSubtitle: string;
+  /** Headline shown while the completed-sale summary is up. */
+  thankYouMessage: string;
+  /** Name the display heads with; blank falls back to the branch name. */
+  storeName: string;
+  /** Show the serving cashier in the display header. */
+  showCashierName: boolean;
+  /** Seconds a completed sale stays on screen before the welcome message returns. */
+  completedSaleTimeoutSeconds: number;
+}
+
+/**
+ * What the customer display is currently showing.
+ *
+ * - `idle`      welcome message, no sale in progress.
+ * - `sale`      lines are being rung up.
+ * - `payment`   the payment window is open; tender and balance are live.
+ * - `complete`  the sale closed; totals, payments and change stay up briefly.
+ */
+export type POSCustomerDisplayMode = 'idle' | 'sale' | 'payment' | 'complete';
+
+export interface POSCustomerDisplayLine {
+  uid: string;
+  name: string;
+  /** Variant summary, e.g. `Red / XL`, when the line is for a specific variant. */
+  variant?: string;
+  quantity: number;
+  unitPrice: number;
+  discountAmount: number;
+  lineTotal: number;
+}
+
+export interface POSCustomerDisplayPayment {
+  method: string;
+  label: string;
+  amount: number;
+  tenderedAmount?: number;
+}
+
+/**
+ * A complete snapshot of the customer-facing screen.
+ *
+ * Presentation settings travel with the snapshot rather than being read
+ * separately by the display window, so a freshly opened window renders the
+ * configured welcome message from the first frame it receives.
+ */
+export interface POSCustomerDisplayState {
+  mode: POSCustomerDisplayMode;
+  /** When the workstation produced this snapshot, ISO-8601. */
+  updatedAt: string;
+  /** Sale timestamp for `complete`, otherwise the time the bill was started. */
+  saleDate: string;
+  storeName: string;
+  branchName: string;
+  terminalCode: string;
+  cashierName: string;
+  customerName: string;
+  /** Receipt number, known only once the sale is committed. */
+  receiptNumber: string;
+  lines: POSCustomerDisplayLine[];
+  itemCount: number;
+  subtotal: number;
+  discountTotal: number;
+  taxTotal: number;
+  total: number;
+  payments: POSCustomerDisplayPayment[];
+  amountPaid: number;
+  balanceDue: number;
+  changeDue: number;
+  welcomeMessage: string;
+  welcomeSubtitle: string;
+  thankYouMessage: string;
+  showCashierName: boolean;
+  themeMode: POSThemeMode;
+}
+
+export interface POSCustomerDisplayStatus {
+  /** False in a browser, where the workstation opens a popup window instead. */
+  supported: boolean;
+  open: boolean;
+  /** Attached monitors, so the settings screen can say where the display lands. */
+  displayCount: number;
+}
+
 export interface POSShiftReconciliationSettings {
   tenderDeclarationMode: POSTenderDeclarationMode;
   /** Absolute variance, in currency units, that counts as a large discrepancy. */
@@ -639,6 +772,7 @@ export interface POSDesktopSettings {
   scanner: POSScannerSettings;
   shortcuts: POSShortcutSettings;
   shiftReconciliation: POSShiftReconciliationSettings;
+  customerDisplay: POSCustomerDisplaySettings;
 }
 
 export const DEFAULT_POS_ACTION_SHORTCUTS: POSActionShortcuts = {
@@ -654,6 +788,7 @@ export const DEFAULT_POS_ACTION_SHORTCUTS: POSActionShortcuts = {
   refund: 'F10',
   void: 'Escape',
   cashDrawer: 'F11',
+  cashMovement: 'Ctrl+F11',
 };
 
 export const DEFAULT_POS_SHORTCUT_SETTINGS: POSShortcutSettings = {
@@ -667,6 +802,16 @@ export const DEFAULT_POS_SHIFT_RECONCILIATION: POSShiftReconciliationSettings = 
   alertThresholdAmount: 500,
   alertThresholdPercent: 2,
   requireConfirmationOnAlert: true,
+};
+
+export const DEFAULT_POS_CUSTOMER_DISPLAY: POSCustomerDisplaySettings = {
+  enabled: false,
+  welcomeMessage: 'Welcome',
+  welcomeSubtitle: 'Please wait while we serve you.',
+  thankYouMessage: 'Thank you for shopping with us',
+  storeName: '',
+  showCashierName: true,
+  completedSaleTimeoutSeconds: 20,
 };
 
 export const DEFAULT_POS_SCANNER_SETTINGS: POSScannerSettings = {

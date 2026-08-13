@@ -2,6 +2,7 @@ import { Router, Request, Response, NextFunction } from 'express';
 import { timingSafeEqual } from 'crypto';
 import { v4 as uuidv4 } from 'uuid';
 import {
+  CashCountMode,
   DEFAULT_DEVICE_ID,
   DEFAULT_TERMINAL_ID,
   CompleteSaleInput,
@@ -591,6 +592,73 @@ router.post('/shifts/:id/close', async (req: Request, res: Response) => {
   } catch (error) {
     console.error(error);
     return res.status(500).json({ error: 'Failed to close shift' });
+  }
+});
+
+/**
+ * Records cash moving in or out of the drawer part-way through a shift.
+ *
+ * This rides the existing CASH_DECLARED event with a PAID_IN / PAID_OUT count
+ * mode rather than introducing a new event type, so the movement lands in the
+ * same append-only cash-count history the opening and closing declarations use
+ * and replays identically upstream.
+ */
+router.post('/shifts/:id/cash-movement', async (req: Request, res: Response) => {
+  try {
+    const direction = req.body.direction === 'out' ? 'out' : 'in';
+    const declaration = req.body.declaration;
+
+    if (!declaration || typeof declaration.total !== 'number' || !Number.isFinite(declaration.total)) {
+      return res.status(400).json({ error: 'A counted cash declaration is required' });
+    }
+    if (declaration.total <= 0) {
+      return res.status(400).json({ error: 'A cash movement must be for more than zero' });
+    }
+
+    const reason = typeof req.body.reason === 'string' ? req.body.reason.trim() : '';
+    if (reason === '') {
+      return res.status(400).json({ error: 'A reason is required for a cash movement' });
+    }
+
+    const shift = await prisma.pOSShift.findUnique({ where: { id: req.params.id } });
+    if (!shift) {
+      return res.status(404).json({ error: 'Shift not found' });
+    }
+    if (shift.status !== ShiftStatus.OPEN) {
+      return res.status(409).json({ error: 'Cash can only be moved while the shift is open' });
+    }
+    if (req.body.terminalId && req.body.terminalId !== shift.terminalId) {
+      return res.status(409).json({ error: 'The active shift belongs to a different terminal' });
+    }
+
+    const mode = direction === 'in' ? CashCountMode.PAID_IN : CashCountMode.PAID_OUT;
+    const movementId = req.body.movementId ?? uuidv4();
+
+    await applyWorkstationEvent(req, {
+      aggregateType: 'shift',
+      aggregateId: shift.id,
+      eventType: SyncEventType.CASH_DECLARED,
+      terminalId: shift.terminalId,
+      payload: {
+        shiftId: shift.id,
+        movementId,
+        direction,
+        reason,
+        declaration: {
+          ...declaration,
+          mode,
+          // Signed so a reader that only looks at the total still gets the
+          // direction right without having to interpret the mode.
+          variance: direction === 'in' ? declaration.total : -declaration.total,
+        },
+      },
+    });
+
+    const report = await buildZReport(shift.id);
+    return res.status(201).json(report);
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({ error: 'Failed to record the cash movement' });
   }
 });
 

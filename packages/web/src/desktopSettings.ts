@@ -10,6 +10,7 @@ import {
   type POSPrinterRole,
   type POSThemeMode,
 } from '@jingles/shared';
+import { readStoredCustomerDisplaySettings } from './customerDisplay';
 
 export const DEFAULT_POS_SYNC_URL = 'https://inv.theredsun.org';
 const THEME_STORAGE_KEY = 'jingles-pos-theme-mode';
@@ -59,6 +60,9 @@ export function buildFallbackDesktopSettings(themeMode: POSThemeMode): POSDeskto
       quickKeys: [],
     },
     shiftReconciliation: { ...DEFAULT_POS_SHIFT_RECONCILIATION },
+    // The browser build has no settings file, so the one section it can still
+    // honour is kept in local storage instead of defaulting on every reload.
+    customerDisplay: readStoredCustomerDisplaySettings(),
   };
 }
 
