@@ -1227,7 +1227,9 @@ router.patch('/customers/:id', async (req: Request, res: Response) => {
       aggregateId: customerId,
       eventType: SyncEventType.CUSTOMER_UPSERTED,
       terminalId: req.body.terminalId,
-      payload: patch,
+      // Send a full profile snapshot so a central Inventory projection can
+      // create this customer even when it has never seen the local POS seed.
+      payload: { ...mapCustomer(existing), ...patch },
     });
 
     const updated = await prisma.customer.findUnique({ where: { id: customerId } });
@@ -1253,6 +1255,16 @@ router.post('/customers/:id/credit-payments', async (req: Request, res: Response
     }
 
     const paymentId = req.body.paymentId ?? uuidv4();
+    // A payment may be the first customer-related event sent by this POS.
+    // Queue the customer snapshot first so upstream projections can preserve
+    // the ledger relationship without placeholder customer records.
+    await applyWorkstationEvent(req, {
+      aggregateType: 'customer',
+      aggregateId: customerId,
+      eventType: SyncEventType.CUSTOMER_UPSERTED,
+      terminalId: req.body.terminalId,
+      payload: mapCustomer(customer),
+    });
     await applyWorkstationEvent(req, {
       aggregateType: 'credit-payment',
       aggregateId: paymentId,
