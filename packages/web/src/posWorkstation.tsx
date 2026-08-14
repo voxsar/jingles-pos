@@ -215,17 +215,46 @@ const MIN_CATALOG_PANEL_PX = 420;
 const MIN_CART_PANEL_PX = 380;
 const PANEL_RESIZER_WIDTH = 16;
 
-const PAYMENT_OPTIONS: Array<{ method: PaymentMethod; label: string; short: string }> = [
-  { method: PaymentMethod.CASH, label: 'Cash', short: 'CA' },
-  { method: PaymentMethod.VISA, label: 'Visa', short: 'VI' },
-  { method: PaymentMethod.MASTER, label: 'Master', short: 'MC' },
-  { method: PaymentMethod.AMEX, label: 'Amex', short: 'AX' },
-  { method: PaymentMethod.CREDIT, label: 'Credit', short: 'CR' },
-  { method: PaymentMethod.GIFT, label: 'Gift voucher', short: 'GV' },
-  { method: PaymentMethod.INSTALLMENT, label: 'Installment plan', short: 'IN' },
-  { method: PaymentMethod.CHEQUE, label: 'Cheque', short: 'CH' },
-  { method: PaymentMethod.BANK_TRANSFER, label: 'Online bank transfer', short: 'BT' },
+function formatStockQuantity(value: number): string {
+  if (Math.abs(value) < 10_000) return formatInteger(value);
+  return new Intl.NumberFormat('en', {
+    notation: 'compact',
+    maximumFractionDigits: 1,
+  }).format(value);
+}
+
+const PAYMENT_OPTIONS: Array<{ method: PaymentMethod; label: string; short: string; keyCode: string; keyLabel: string }> = [
+  { method: PaymentMethod.CASH, label: 'Cash', short: 'CA', keyCode: 'KeyC', keyLabel: 'C' },
+  { method: PaymentMethod.VISA, label: 'Visa', short: 'VI', keyCode: 'KeyV', keyLabel: 'V' },
+  { method: PaymentMethod.MASTER, label: 'Master', short: 'MC', keyCode: 'KeyM', keyLabel: 'M' },
+  { method: PaymentMethod.AMEX, label: 'Amex', short: 'AX', keyCode: 'KeyA', keyLabel: 'A' },
+  { method: PaymentMethod.CREDIT, label: 'Credit', short: 'CR', keyCode: 'KeyD', keyLabel: 'D' },
+  { method: PaymentMethod.GIFT, label: 'Gift voucher', short: 'GV', keyCode: 'KeyG', keyLabel: 'G' },
+  { method: PaymentMethod.INSTALLMENT, label: 'Installment plan', short: 'IN', keyCode: 'KeyI', keyLabel: 'I' },
+  { method: PaymentMethod.CHEQUE, label: 'Cheque', short: 'CH', keyCode: 'KeyH', keyLabel: 'H' },
+  { method: PaymentMethod.BANK_TRANSFER, label: 'Online bank transfer', short: 'BT', keyCode: 'KeyB', keyLabel: 'B' },
 ];
+
+const PAYMENT_CASH_SHORTCUTS = [
+  { code: 'Digit1', value: 1, label: '1' },
+  { code: 'Digit2', value: 2, label: '2' },
+  { code: 'Digit3', value: 5, label: '3' },
+  { code: 'Digit4', value: 10, label: '4' },
+  { code: 'Digit5', value: 20, label: '5' },
+  { code: 'Digit6', value: 50, label: '6' },
+  { code: 'Digit7', value: 100, label: '7' },
+  { code: 'Digit8', value: 500, label: '8' },
+  { code: 'Digit9', value: 5000, label: '9' },
+] as const;
+
+const PAYMENT_SUGGESTION_KEYS = [
+  { code: 'KeyQ', label: 'Q' },
+  { code: 'KeyW', label: 'W' },
+  { code: 'KeyE', label: 'E' },
+  { code: 'KeyR', label: 'R' },
+  { code: 'KeyT', label: 'T' },
+  { code: 'KeyY', label: 'Y' },
+] as const;
 
 /** CBSL licensed commercial and specialised banks operating in Sri Lanka. */
 const SRI_LANKAN_BANK_OPTIONS = [
@@ -3147,7 +3176,7 @@ function ProductPanel(props: ProductPanelProps) {
                         {(product.variants?.length ?? 0) > 0 ? ` - ${formatInteger(product.variants?.length ?? 0)} variants` : ''}
                       </div>
                       <div className="product-tile-footer">
-                        <div className="product-stock">Stock {formatInteger(product.stockOnHand)}</div>
+                        <div className="product-stock">Stock {formatStockQuantity(product.stockOnHand)}</div>
                         <div className="product-price">{formatCurrency(product.priceTiers[0]?.price ?? 0)}</div>
                       </div>
                     </button>
@@ -3264,7 +3293,7 @@ function CartPanel(props: CartPanelProps) {
                     {getLineVariantSummary(line) != null && (
                       <div className="cart-line-variant">{getLineVariantSummary(line)}</div>
                     )}
-                    <div className="cart-line-meta">{line.sku} - stock {formatInteger(line.stockOnHand)}</div>
+                    <div className="cart-line-meta">{line.sku} - stock {formatStockQuantity(line.stockOnHand)}</div>
                   </div>
                   <button className="line-remove" onClick={() => props.onLineRemove(line.uid)}>
                     x
@@ -3487,14 +3516,65 @@ function MetricCard(props: { label: string; value: string }) {
 function ModalShell(
   props: {
     children: React.ReactNode;
+    initialFocusRef?: React.RefObject<HTMLElement>;
     onClose: () => void;
+    trapFocus?: boolean;
     title: string;
     width?: 'narrow' | 'medium' | 'wide' | 'payment';
   },
 ) {
+  const shellRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!props.trapFocus) return undefined;
+    const previouslyFocused = document.activeElement as HTMLElement | null;
+    const focusInitial = () => {
+      const target = props.initialFocusRef?.current
+        ?? shellRef.current?.querySelector<HTMLElement>('input:not([disabled]), button:not([disabled]), [tabindex]:not([tabindex="-1"])');
+      target?.focus();
+    };
+    window.requestAnimationFrame(focusInitial);
+
+    const keepFocusInside = (event: FocusEvent) => {
+      const target = event.target as Element | null;
+      if (shellRef.current?.contains(target)
+        || target?.closest('.searchable-select-menu') != null) return;
+      focusInitial();
+    };
+    const trapTab = (event: KeyboardEvent) => {
+      if (event.key !== 'Tab' || shellRef.current == null) return;
+      const focusable = [...shellRef.current.querySelectorAll<HTMLElement>(
+        'input:not([disabled]), button:not([disabled]), [tabindex]:not([tabindex="-1"])',
+      )].filter((element) => element.offsetParent !== null);
+      if (focusable.length === 0) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    document.addEventListener('focusin', keepFocusInside);
+    window.addEventListener('keydown', trapTab, true);
+    return () => {
+      document.removeEventListener('focusin', keepFocusInside);
+      window.removeEventListener('keydown', trapTab, true);
+      previouslyFocused?.focus();
+    };
+  }, [props.initialFocusRef, props.trapFocus]);
+
   return (
     <div className="modal-overlay" onClick={props.onClose}>
-      <div className={`glass-panel modal-shell ${props.width ?? 'medium'}`} onClick={(event) => event.stopPropagation()}>
+      <div
+        ref={shellRef}
+        aria-modal="true"
+        role="dialog"
+        className={`glass-panel modal-shell ${props.width ?? 'medium'}`}
+        onClick={(event) => event.stopPropagation()}
+      >
         <div className="modal-head">
           <h2>{props.title}</h2>
           <button className="modal-close" onClick={props.onClose}>
@@ -5030,7 +5110,7 @@ function SearchOverlay(
                 <div className="search-result-copy">
                   <div>{product.name}</div>
                   <div>
-                    {product.sku} - {product.subcategory} - stock {formatInteger(product.stockOnHand)}
+                    {product.sku} - {product.subcategory} - stock {formatStockQuantity(product.stockOnHand)}
                     {(product.variants?.length ?? 0) > 0 ? ` - ${formatInteger(product.variants?.length ?? 0)} variants` : ''}
                   </div>
                 </div>
@@ -5573,7 +5653,7 @@ function VariantSelectionModal(
                       {index < 9 && <kbd className="picker-number">{index + 1}</kbd>}
                       <div className="variant-choice-head">
                         <span>{label}</span>
-                        <span className="variant-choice-stock">Stock {formatInteger(variant.stockOnHand)}</span>
+                        <span className="variant-choice-stock">Stock {formatStockQuantity(variant.stockOnHand)}</span>
                       </div>
                       <div className="variant-choice-subtitle">{variant.variantCode}</div>
                     </button>
@@ -5633,7 +5713,7 @@ function VariantSelectionModal(
               {selectedVariant != null && (
                 <div className="variant-selection-meta">
                   <span>{selectedVariant.variantCode}</span>
-                  <span>Stock {formatInteger(selectedVariant.stockOnHand)}</span>
+                  <span>Stock {formatStockQuantity(selectedVariant.stockOnHand)}</span>
                 </div>
               )}
             </div>
@@ -5686,6 +5766,8 @@ function PaymentModal(
   const [installmentCount, setInstallmentCount] = useState(3);
   const [denominationCounts, setDenominationCounts] = useState<Record<string, number>>({});
   const [isTenderedManuallyEdited, setIsTenderedManuallyEdited] = useState(false);
+  const [isUnderpaymentWarning, setIsUnderpaymentWarning] = useState(false);
+  const tenderedInputRef = useRef<HTMLInputElement>(null);
   const splitPaid = roundToMoney(splitPayments.reduce((sum, payment) => sum + payment.amount, 0));
   const splitRemaining = Math.max(0, roundToMoney(props.total - splitPaid));
   const splitChange = roundToMoney(splitPayments.reduce((sum, payment) => sum + (payment.changeDue ?? 0), 0));
@@ -5710,6 +5792,9 @@ function PaymentModal(
     const rounded1000 = Math.ceil(props.total / 1000) * 1000;
     return [...new Set([props.total, rounded100, rounded500, rounded1000])];
   }, [props.total]);
+  const suggestedAmounts = useMemo(() => (
+    [...new Set([splitRemaining, ...quickAmounts.filter((amount) => amount >= splitRemaining)])].slice(0, 6)
+  ), [quickAmounts, splitRemaining]);
 
   const possibleDenominationCombinations = useMemo(() => {
     if (method !== PaymentMethod.CASH || !props.showDenominationCombinations || !isTenderedManuallyEdited || Object.keys(denominationCounts).length > 0) {
@@ -5797,10 +5882,33 @@ function PaymentModal(
     props.onClose();
   };
 
+  const focusTendered = useCallback(() => {
+    if (method !== PaymentMethod.INSTALLMENT) {
+      window.requestAnimationFrame(() => {
+        tenderedInputRef.current?.focus();
+        tenderedInputRef.current?.select();
+      });
+    }
+  }, [method]);
+
+  useEffect(() => {
+    focusTendered();
+  }, [focusTendered]);
+
   const selectMethod = (nextMethod: PaymentMethod) => {
     setMethod(nextMethod);
     setIsTenderedManuallyEdited(false);
+    setIsUnderpaymentWarning(false);
     setTendered(0);
+  };
+
+  const rejectUnderpayment = () => {
+    setIsUnderpaymentWarning(false);
+    window.requestAnimationFrame(() => {
+      setIsUnderpaymentWarning(true);
+      tenderedInputRef.current?.focus();
+      tenderedInputRef.current?.select();
+    });
   };
 
   const addSplitPayment = () => {
@@ -5835,6 +5943,11 @@ function PaymentModal(
       return;
     }
     if (entered <= 0) {
+      rejectUnderpayment();
+      return;
+    }
+    if (method === PaymentMethod.CASH && entered < splitRemaining) {
+      rejectUnderpayment();
       return;
     }
 
@@ -5868,8 +5981,72 @@ function PaymentModal(
     setPaymentReason('');
     setDenominationCounts({});
     setIsTenderedManuallyEdited(false);
+    setIsUnderpaymentWarning(false);
     setTendered(0);
   };
+
+  useEffect(() => {
+    const handlePaymentKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        event.stopPropagation();
+        handleClose();
+        return;
+      }
+
+      const target = event.target as HTMLElement | null;
+      const isOtherTextEntry = (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement)
+        && target !== tenderedInputRef.current;
+      if (isOtherTextEntry || event.ctrlKey || event.altKey || event.metaKey) return;
+
+      if (method === PaymentMethod.CASH) {
+        const cashShortcut = PAYMENT_CASH_SHORTCUTS.find((shortcut) => shortcut.code === event.code);
+        if (cashShortcut) {
+          event.preventDefault();
+          event.stopPropagation();
+          setIsUnderpaymentWarning(false);
+          setIsTenderedManuallyEdited(false);
+          setTendered((current) => roundToMoney(current + cashShortcut.value));
+          if (props.addDenominationsToPaymentList) {
+            setDenominationCounts((current) => ({
+              ...current,
+              [String(cashShortcut.value)]: (current[String(cashShortcut.value)] ?? 0) + 1,
+            }));
+          }
+          focusTendered();
+          return;
+        }
+
+        const suggestionIndex = PAYMENT_SUGGESTION_KEYS.findIndex((shortcut) => shortcut.code === event.code);
+        if (suggestionIndex >= 0 && suggestedAmounts[suggestionIndex] != null) {
+          event.preventDefault();
+          event.stopPropagation();
+          setIsUnderpaymentWarning(false);
+          setIsTenderedManuallyEdited(false);
+          setDenominationCounts({});
+          setTendered(suggestedAmounts[suggestionIndex]);
+          focusTendered();
+          return;
+        }
+      }
+
+      const paymentOption = PAYMENT_OPTIONS.find((option) => option.keyCode === event.code);
+      if (paymentOption) {
+        event.preventDefault();
+        event.stopPropagation();
+        selectMethod(paymentOption.method);
+        return;
+      }
+
+      if (event.key === 'Enter' && target === tenderedInputRef.current) {
+        event.preventDefault();
+        event.stopPropagation();
+        addSplitPayment();
+      }
+    };
+    window.addEventListener('keydown', handlePaymentKey, true);
+    return () => window.removeEventListener('keydown', handlePaymentKey, true);
+  });
 
   const completeSplitPayment = () => {
     if (splitPaid <= 0 || (!props.allowShortPayments && splitRemaining > 0)) {
@@ -5892,8 +6069,11 @@ function PaymentModal(
   };
 
   return (
-    <ModalShell onClose={handleClose} title="Payment" width="payment">
-      <div className="payment-layout">
+    <ModalShell initialFocusRef={tenderedInputRef} trapFocus onClose={handleClose} title="Payment" width="payment">
+      <div
+        className={`payment-layout ${isUnderpaymentWarning ? 'payment-underpayment-shake' : ''}`}
+        onAnimationEnd={() => setIsUnderpaymentWarning(false)}
+      >
         <div className="payment-methods">
           {PAYMENT_OPTIONS.map((option) => (
             <button
@@ -5903,6 +6083,7 @@ function PaymentModal(
             >
               <span>{option.short}</span>
               <div>{option.label}</div>
+              <kbd className="payment-method-key">{option.keyLabel}</kbd>
             </button>
           ))}
         </div>
@@ -5973,13 +6154,16 @@ function PaymentModal(
           ) : (
             <LabelBlock label={method === PaymentMethod.CASH ? 'Tendered' : 'Amount'}>
             <input
-              className="glass-input large"
+              ref={tenderedInputRef}
+              autoFocus
+              className={`glass-input large payment-tendered-input ${isUnderpaymentWarning ? 'amount-too-low' : ''}`}
               disabled={false}
               type="number"
               min={0}
               step={0.01}
               value={tendered}
               onChange={(event) => {
+                setIsUnderpaymentWarning(false);
                 setIsTenderedManuallyEdited(true);
                 setDenominationCounts({});
                 setTendered(Number(event.target.value) || 0);
@@ -5988,9 +6172,16 @@ function PaymentModal(
             </LabelBlock>
           )}
 
+          {isUnderpaymentWarning && method === PaymentMethod.CASH && (
+            <div className="payment-amount-warning" role="alert">
+              Tendered amount is lower than the remaining {formatCurrency(splitRemaining)}.
+            </div>
+          )}
+
           {method !== PaymentMethod.INSTALLMENT && <div className="quick-cash-row">
-            {(isSplit ? [...new Set([splitRemaining, ...quickAmounts.filter((amount) => amount >= splitRemaining)])] : quickAmounts).map((amount) => (
-              <button key={amount} className="quick-cash" onClick={() => { setIsTenderedManuallyEdited(false); setDenominationCounts({}); setTendered(amount); }}>
+            {suggestedAmounts.map((amount, index) => (
+              <button key={amount} className="quick-cash" onClick={() => { setIsUnderpaymentWarning(false); setIsTenderedManuallyEdited(false); setDenominationCounts({}); setTendered(amount); focusTendered(); }}>
+                {PAYMENT_SUGGESTION_KEYS[index] && <kbd>{PAYMENT_SUGGESTION_KEYS[index].label}</kbd>}
                 {formatCurrency(amount)}
               </button>
             ))}
@@ -5999,11 +6190,14 @@ function PaymentModal(
             <div className="cash-denomination-shortcuts">
               <div className="meta-label">Cash denomination shortcuts</div>
               <div className="cash-denomination-list">
-                {DENOMINATIONS.map((denomination) => (
+                {DENOMINATIONS.map((denomination) => {
+                  const shortcut = PAYMENT_CASH_SHORTCUTS.find((entry) => entry.value === denomination.value);
+                  return (
                   <button
                     key={denomination.value}
                     className="cash-denomination-button"
                     onClick={() => {
+                      setIsUnderpaymentWarning(false);
                       setIsTenderedManuallyEdited(false);
                       setTendered((current) => roundToMoney(current + denomination.value));
                       if (props.addDenominationsToPaymentList) {
@@ -6012,13 +6206,16 @@ function PaymentModal(
                           [String(denomination.value)]: (current[String(denomination.value)] ?? 0) + 1,
                         }));
                       }
+                      focusTendered();
                     }}
                     title={`Add ${denomination.label}`}
                   >
+                    {shortcut && <kbd className="cash-denomination-key">{shortcut.label}</kbd>}
                     <img src={`./currency/${denomination.value}.png`} alt="" />
                     <span>{denomination.label}</span>
                   </button>
-                ))}
+                  );
+                })}
               </div>
             </div>
           )}
