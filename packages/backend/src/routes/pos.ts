@@ -45,6 +45,25 @@ import { authenticate } from './auth';
 
 const router = Router();
 
+function logPosRouteError(
+  operation: string,
+  error: unknown,
+  context: Record<string, unknown> = {},
+) {
+  const errorRecord = error && typeof error === 'object'
+    ? error as { name?: unknown; message?: unknown; stack?: unknown; code?: unknown; meta?: unknown }
+    : {};
+  console.error(`[POS API] ${operation} failed`, {
+    occurredAt: new Date().toISOString(),
+    errorName: errorRecord.name ?? typeof error,
+    message: errorRecord.message ?? String(error),
+    code: errorRecord.code,
+    stack: errorRecord.stack,
+    meta: errorRecord.meta,
+    context,
+  });
+}
+
 // Login is only useful if the business endpoints enforce the resulting session.
 // Keep this ahead of catalog preparation so unauthenticated requests cannot trigger
 // database work or mutate workstation state.
@@ -613,11 +632,18 @@ router.post('/shifts/open', async (req: Request, res: Response) => {
           return existingShiftResponse;
         }
       } catch (recoveryError) {
-        console.error('Failed to recover an existing open shift', recoveryError);
+        logPosRouteError('Recover existing open shift', recoveryError, {
+          terminalId: req.body.terminalId,
+          cashierId: req.body.cashierId,
+        });
       }
     }
 
-    console.error(error);
+    logPosRouteError('Open shift', error, {
+      terminalId: req.body.terminalId,
+      cashierId: req.body.cashierId,
+      requestedShiftId: req.body.shiftId,
+    });
     return res.status(500).json({ error: 'Failed to open shift' });
   }
 });

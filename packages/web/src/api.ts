@@ -22,6 +22,7 @@ import {
 	ZReportSlot,
 } from '@jingles/shared';
 import { resolveBackendUrl } from './runtime';
+import { reportClientError } from './clientErrorReporter';
 
 const BASE = resolveBackendUrl('/api/pos');
 const TOKEN_STORAGE_KEY = 'jingles-pos-auth-token';
@@ -41,28 +42,72 @@ function buildAuthHeaders(token?: string | null): Record<string, string> {
 }
 
 async function getJson<T>(path: string, options?: { token?: string | null }): Promise<T> {
-	const response = await fetch(`${BASE}${path}`, {
-		headers: buildAuthHeaders(options?.token),
-	});
+	let response: Response;
+	try {
+		response = await fetch(`${BASE}${path}`, {
+			headers: buildAuthHeaders(options?.token),
+		});
+	} catch (error) {
+		console.error(`[POS API] GET ${path} could not reach the backend`, error);
+		reportClientError(error, { source: 'api.network', route: path, method: 'GET' });
+		throw error;
+	}
 	if (!response.ok) {
 		const error = await response.json().catch(() => ({ error: `HTTP ${response.status}` })) as { error?: string };
-		throw new Error(error.error || `HTTP ${response.status}`);
+		const requestError = new Error(error.error || `HTTP ${response.status}`);
+		console.error(`[POS API] GET ${path} failed`, {
+			status: response.status,
+			statusText: response.statusText,
+			message: requestError.message,
+		});
+		if (response.status >= 500) {
+			reportClientError(requestError, {
+				source: 'api.response',
+				route: path,
+				method: 'GET',
+				status: response.status,
+				context: { statusText: response.statusText },
+			});
+		}
+		throw requestError;
 	}
 	return response.json() as Promise<T>;
 }
 
 async function postJson<T>(path: string, payload: unknown, options?: { token?: string | null }): Promise<T> {
-	const response = await fetch(`${BASE}${path}`, {
-		method: 'POST',
-		headers: {
-			'Content-Type': 'application/json',
-			...buildAuthHeaders(options?.token),
-		},
-		body: JSON.stringify(payload),
-	});
+	let response: Response;
+	try {
+		response = await fetch(`${BASE}${path}`, {
+			method: 'POST',
+			headers: {
+				'Content-Type': 'application/json',
+				...buildAuthHeaders(options?.token),
+			},
+			body: JSON.stringify(payload),
+		});
+	} catch (error) {
+		console.error(`[POS API] POST ${path} could not reach the backend`, error);
+		reportClientError(error, { source: 'api.network', route: path, method: 'POST' });
+		throw error;
+	}
 	if (!response.ok) {
 		const error = await response.json().catch(() => ({ error: `HTTP ${response.status}` })) as { error?: string };
-		throw new Error(error.error || `HTTP ${response.status}`);
+		const requestError = new Error(error.error || `HTTP ${response.status}`);
+		console.error(`[POS API] POST ${path} failed`, {
+			status: response.status,
+			statusText: response.statusText,
+			message: requestError.message,
+		});
+		if (response.status >= 500) {
+			reportClientError(requestError, {
+				source: 'api.response',
+				route: path,
+				method: 'POST',
+				status: response.status,
+				context: { statusText: response.statusText },
+			});
+		}
+		throw requestError;
 	}
 	return response.json() as Promise<T>;
 }

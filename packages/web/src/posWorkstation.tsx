@@ -79,6 +79,7 @@ import {
 import { useAuth } from './auth/AuthContext';
 import HelpGuide from './help/HelpGuide';
 import SearchableSelect, { type SearchableSelectHandle } from './components/SearchableSelect';
+import { setCentralClientErrorServer, setClientErrorIdentity } from './clientErrorReporter';
 import { resolveBootstrapTerminal } from './terminalBootstrap';
 import {
   closeCustomerDisplay,
@@ -404,6 +405,10 @@ export default function PosWorkstation() {
       setSettingsDraft(buildFallbackDesktopSettings(readStoredThemeMode()));
     });
   }, [loadDesktopSettingsIntoState]);
+
+  useEffect(() => {
+    setCentralClientErrorServer(desktopSettings?.syncUrl);
+  }, [desktopSettings?.syncUrl]);
 
   useEffect(() => {
     if (!isResizingCatalogPane) {
@@ -754,6 +759,10 @@ export default function PosWorkstation() {
           resolvedActiveShift?.terminalId === resolvedTerminal?.id ? resolvedActiveShift : null,
         );
         setSyncStatus(data.syncStatus);
+        setClientErrorIdentity({
+          deviceId: data.syncStatus.deviceId,
+          terminalId: resolvedTerminal?.id,
+        });
       } catch (error) {
         if (requestId !== bootstrapRequestIdRef.current) {
           return;

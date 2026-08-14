@@ -1,6 +1,7 @@
 import cors from 'cors';
 import express from 'express';
 import authRouter from './routes/auth';
+import clientErrorsRouter from './routes/clientErrors';
 import { getLocalPosDeviceId, getLocalPosTerminalId, isLocalPosBackendMode } from './localMode';
 import posRouter from './routes/pos';
 import prisma from './prisma';
@@ -14,6 +15,7 @@ const app = express();
 const PORT = Number(process.env.PORT || 3001);
 
 app.use(cors());
+app.use('/api/pos/client-errors', express.json({ limit: '32kb' }), clientErrorsRouter);
 app.use(express.json({ limit: '2mb' }));
 
 app.get('/health', async (_req, res) => {

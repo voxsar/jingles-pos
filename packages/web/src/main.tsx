@@ -3,7 +3,10 @@ import ReactDOM from 'react-dom/client';
 import { HashRouter } from 'react-router-dom';
 import App from './App';
 import { AuthProvider } from './auth/AuthContext';
+import { installGlobalClientErrorReporting } from './clientErrorReporter';
 import './index.css';
+
+installGlobalClientErrorReporting();
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
