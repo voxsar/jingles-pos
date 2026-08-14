@@ -64,15 +64,30 @@ export function popupNumberIndex(event: Pick<KeyboardEvent, 'code' | 'ctrlKey' |
   return match ? Number(match[1]) - 1 : null;
 }
 
-/** Till denomination shortcuts shared by open/close shift and cash in/out. */
-export function denominationShortcutValue(event: Pick<KeyboardEvent, 'code' | 'ctrlKey' | 'altKey' | 'shiftKey' | 'metaKey'>): number | null {
-  if (event.shiftKey || event.metaKey || (event.ctrlKey && event.altKey)) return null;
-  const match = /^(?:Numpad|Digit)([125])$/.exec(event.code);
-  if (!match) return null;
-  const digit = match[1];
-  if (event.altKey) return ({ '5': 5000, '2': 2000, '1': 1000 } as const)[digit as '5' | '2' | '1'];
-  if (event.ctrlKey) return ({ '5': 5, '2': 2, '1': 1 } as const)[digit as '5' | '2' | '1'];
-  return ({ '5': 500, '2': 100, '1': 50 } as const)[digit as '5' | '2' | '1'];
+/**
+ * Single-key cash denomination shortcuts shared by the payment window, the
+ * open/close shift declaration, and cash in/out. Digit1 is the largest note in
+ * use and Digit9 the smallest, so the key order reads the same as the
+ * denomination list on screen (largest to smallest, left to right).
+ */
+export const CASH_DENOMINATION_SHORTCUTS = [
+  { code: 'Digit1', value: 5000, label: '1' },
+  { code: 'Digit2', value: 500, label: '2' },
+  { code: 'Digit3', value: 100, label: '3' },
+  { code: 'Digit4', value: 50, label: '4' },
+  { code: 'Digit5', value: 20, label: '5' },
+  { code: 'Digit6', value: 10, label: '6' },
+  { code: 'Digit7', value: 5, label: '7' },
+  { code: 'Digit8', value: 2, label: '8' },
+  { code: 'Digit9', value: 1, label: '9' },
+] as const;
+
+/** Looks up the cash shortcut for a keydown event; modified key presses don't match. */
+export function cashDenominationShortcut(
+  event: Pick<KeyboardEvent, 'code' | 'ctrlKey' | 'altKey' | 'shiftKey' | 'metaKey'>,
+): (typeof CASH_DENOMINATION_SHORTCUTS)[number] | null {
+  if (event.ctrlKey || event.altKey || event.metaKey) return null;
+  return CASH_DENOMINATION_SHORTCUTS.find((entry) => entry.code === event.code) ?? null;
 }
 
 /**

@@ -12,7 +12,7 @@ import {
   normalizeShiftReconciliation,
 } from '@jingles/shared';
 import {
-  denominationShortcutValue,
+  cashDenominationShortcut,
   findShortcutConflicts,
   popupNumberIndex,
 } from '../utils/shortcuts';
@@ -181,25 +181,28 @@ describe('popupNumberIndex', () => {
   });
 });
 
-describe('denominationShortcutValue', () => {
-  it('maps plain 5, 2 and 1 to the requested common notes', () => {
-    expect(denominationShortcutValue(keyEvent('Numpad5'))).toBe(500);
-    expect(denominationShortcutValue(keyEvent('Digit2'))).toBe(100);
-    expect(denominationShortcutValue(keyEvent('Numpad1'))).toBe(50);
+describe('cashDenominationShortcut', () => {
+  it('maps Digit1 through Digit9 to the notes and coins in use, largest first', () => {
+    expect(cashDenominationShortcut(keyEvent('Digit1'))?.value).toBe(5000);
+    expect(cashDenominationShortcut(keyEvent('Digit2'))?.value).toBe(500);
+    expect(cashDenominationShortcut(keyEvent('Digit3'))?.value).toBe(100);
+    expect(cashDenominationShortcut(keyEvent('Digit4'))?.value).toBe(50);
+    expect(cashDenominationShortcut(keyEvent('Digit5'))?.value).toBe(20);
+    expect(cashDenominationShortcut(keyEvent('Digit6'))?.value).toBe(10);
+    expect(cashDenominationShortcut(keyEvent('Digit7'))?.value).toBe(5);
+    expect(cashDenominationShortcut(keyEvent('Digit8'))?.value).toBe(2);
+    expect(cashDenominationShortcut(keyEvent('Digit9'))?.value).toBe(1);
   });
 
-  it('maps Alt to large notes and Ctrl to small denominations', () => {
-    expect(denominationShortcutValue(keyEvent('Digit5', { altKey: true }))).toBe(5000);
-    expect(denominationShortcutValue(keyEvent('Numpad2', { altKey: true }))).toBe(2000);
-    expect(denominationShortcutValue(keyEvent('Digit1', { altKey: true }))).toBe(1000);
-    expect(denominationShortcutValue(keyEvent('Numpad5', { ctrlKey: true }))).toBe(5);
-    expect(denominationShortcutValue(keyEvent('Digit2', { ctrlKey: true }))).toBe(2);
-    expect(denominationShortcutValue(keyEvent('Numpad1', { ctrlKey: true }))).toBe(1);
+  it('does not match the numpad or unrelated keys', () => {
+    expect(cashDenominationShortcut(keyEvent('Numpad1'))).toBeNull();
+    expect(cashDenominationShortcut(keyEvent('KeyA'))).toBeNull();
   });
 
-  it('ignores unrelated and ambiguous modifier combinations', () => {
-    expect(denominationShortcutValue(keyEvent('Digit9'))).toBeNull();
-    expect(denominationShortcutValue(keyEvent('Digit5', { ctrlKey: true, altKey: true }))).toBeNull();
+  it('ignores modified key presses', () => {
+    expect(cashDenominationShortcut(keyEvent('Digit1', { ctrlKey: true }))).toBeNull();
+    expect(cashDenominationShortcut(keyEvent('Digit1', { altKey: true }))).toBeNull();
+    expect(cashDenominationShortcut(keyEvent('Digit1', { metaKey: true }))).toBeNull();
   });
 });
 

@@ -3094,6 +3094,7 @@ button {
 }
 
 .currency-image-button {
+  position: relative;
   border: 0;
   border-radius: 7px;
   padding: 0;

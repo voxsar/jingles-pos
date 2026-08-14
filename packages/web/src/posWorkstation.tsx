@@ -162,7 +162,8 @@ import {
 import {
   ACTION_SHORTCUT_HINTS,
   ACTION_SHORTCUT_LABELS,
-  denominationShortcutValue,
+  CASH_DENOMINATION_SHORTCUTS,
+  cashDenominationShortcut,
   findShortcutConflicts,
   popupNumberIndex,
 } from './utils/shortcuts';
@@ -249,18 +250,6 @@ const PAYMENT_OPTIONS: Array<{ method: PaymentMethod; label: string; short: stri
   { method: PaymentMethod.CHEQUE, label: 'Cheque', short: 'CH', keyCode: 'KeyH', keyLabel: 'H' },
   { method: PaymentMethod.BANK_TRANSFER, label: 'Online bank transfer', short: 'BT', keyCode: 'KeyB', keyLabel: 'B' },
 ];
-
-const PAYMENT_CASH_SHORTCUTS = [
-  { code: 'Digit1', value: 1, label: '1' },
-  { code: 'Digit2', value: 2, label: '2' },
-  { code: 'Digit3', value: 5, label: '3' },
-  { code: 'Digit4', value: 10, label: '4' },
-  { code: 'Digit5', value: 20, label: '5' },
-  { code: 'Digit6', value: 50, label: '6' },
-  { code: 'Digit7', value: 100, label: '7' },
-  { code: 'Digit8', value: 500, label: '8' },
-  { code: 'Digit9', value: 5000, label: '9' },
-] as const;
 
 const PAYMENT_SUGGESTION_KEYS = [
   { code: 'KeyQ', label: 'Q' },
@@ -2512,6 +2501,11 @@ export default function PosWorkstation() {
           }}
           onLineConfirm={(lineId, discountPercent) => {
             updateCartLineById(lineId, (line) => recalculateCartLine({ ...line, discountPercent }));
+            setIsDiscountOpen(false);
+          }}
+          onClearAll={() => {
+            setBillDiscount(0);
+            setCart((previous) => previous.map((line) => recalculateCartLine({ ...line, discountPercent: 0 })));
             setIsDiscountOpen(false);
           }}
         />
@@ -5372,6 +5366,7 @@ function DiscountModal(props: {
   onClose: () => void;
   onConfirm: (amount: number) => void;
   onLineConfirm: (lineId: string, discountPercent: number) => void;
+  onClearAll: () => void;
 }) {
   const [mode, setMode] = useState<'value' | 'percent'>('value');
   const [scope, setScope] = useState<'all' | 'line'>('all');
@@ -5450,6 +5445,10 @@ function DiscountModal(props: {
         event.preventDefault();
         event.stopPropagation();
         chooseScope('line');
+      } else if (!event.ctrlKey && !event.altKey && !event.shiftKey && !event.metaKey && event.code === 'KeyR') {
+        event.preventDefault();
+        event.stopPropagation();
+        props.onClearAll();
       } else if (event.altKey) {
         const digitMatch = /^(?:Digit|Numpad)([0-9])$/.exec(event.code);
         if (digitMatch) {
@@ -5525,6 +5524,7 @@ function DiscountModal(props: {
         <div className="cash-total-bar"><span>Discount applied</span><b>{formatCurrency(Math.min(props.subtotal, amount))}</b></div>
         <div className="modal-actions">
           <button className="ghost-button" onClick={props.onClose}>{formatBinding(props.shortcuts.closePopup)} Close</button>
+          <button className="ghost-button" onClick={props.onClearAll}>R - Remove all discounts</button>
           <button className="btn-primary" disabled={scope === 'line' && selectedLine == null} onClick={confirmDiscount}>Enter - Apply</button>
         </div>
       </div>
@@ -6077,7 +6077,7 @@ function PaymentModal(
       }
 
       if (method === PaymentMethod.CASH) {
-        const cashShortcut = PAYMENT_CASH_SHORTCUTS.find((shortcut) => shortcut.code === event.code);
+        const cashShortcut = CASH_DENOMINATION_SHORTCUTS.find((shortcut) => shortcut.code === event.code);
         if (cashShortcut) {
           event.preventDefault();
           event.stopPropagation();
@@ -6274,7 +6274,7 @@ function PaymentModal(
               <div className="meta-label">Cash denomination shortcuts</div>
               <div className="cash-denomination-list">
                 {DENOMINATIONS.map((denomination) => {
-                  const shortcut = PAYMENT_CASH_SHORTCUTS.find((entry) => entry.value === denomination.value);
+                  const shortcut = CASH_DENOMINATION_SHORTCUTS.find((entry) => entry.value === denomination.value);
                   return (
                   <button
                     key={denomination.value}
@@ -6578,12 +6578,12 @@ function MoneyDeclareModal(
 
   useEffect(() => {
     const handleCashKey = (event: KeyboardEvent) => {
-      const denomination = denominationShortcutValue(event);
-      if (denomination != null) {
+      const shortcut = cashDenominationShortcut(event);
+      if (shortcut != null) {
         event.preventDefault();
         setCounts((previous) => ({
           ...previous,
-          [String(denomination)]: (previous[String(denomination)] ?? 0) + 1,
+          [String(shortcut.value)]: (previous[String(shortcut.value)] ?? 0) + 1,
         }));
         return;
       }
@@ -6823,18 +6823,33 @@ function CashMovementModal(
 
   useEffect(() => {
     const handleCashKey = (event: KeyboardEvent) => {
-      const denomination = denominationShortcutValue(event);
-      if (denomination != null) {
+      const shortcut = cashDenominationShortcut(event);
+      if (shortcut != null) {
         event.preventDefault();
         setCounts((previous) => ({
           ...previous,
-          [String(denomination)]: (previous[String(denomination)] ?? 0) + 1,
+          [String(shortcut.value)]: (previous[String(shortcut.value)] ?? 0) + 1,
         }));
         return;
       }
       if (event.key === 'Enter' && canSubmit) {
         event.preventDefault();
         props.onSubmit({ direction, counts, reason: trimmedReason });
+        return;
+      }
+      // I/O flip the direction tab, same as the shift-open denomination keys —
+      // but only when the reason box isn't the one taking the keystroke, since
+      // both "Petty cash returned" and "Banking" type through I and O.
+      const target = event.target as HTMLElement | null;
+      const isTyping = target != null && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA');
+      if (!isTyping && !event.ctrlKey && !event.altKey && !event.metaKey) {
+        if (event.code === 'KeyI') {
+          event.preventDefault();
+          setDirection('in');
+        } else if (event.code === 'KeyO') {
+          event.preventDefault();
+          setDirection('out');
+        }
       }
     };
     window.addEventListener('keydown', handleCashKey, true);
@@ -6972,6 +6987,7 @@ function DenominationRow(
     onChange: (nextCount: number) => void;
   },
 ) {
+  const shortcut = CASH_DENOMINATION_SHORTCUTS.find((entry) => entry.value === props.denomination.value);
   return (
     <div className="denomination-row">
       <div className="denomination-visual">
@@ -6982,6 +6998,7 @@ function DenominationRow(
           title={`Add one ${props.denomination.label}`}
           type="button"
         >
+          {shortcut && <kbd className="cash-denomination-key">{shortcut.label}</kbd>}
           <img
             className={`currency-image ${props.denomination.kind === 'coin' ? 'coin-image' : ''}`}
             src={`./currency/${props.denomination.value}.png`}
