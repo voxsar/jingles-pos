@@ -44,6 +44,42 @@ export interface Customer {
   tier: string;
   phone?: string;
   email?: string;
+  notes?: string;
+  creditLimit: number;
+}
+
+export interface CreditPayment {
+  id: string;
+  customerId: string;
+  amount: number;
+  method: string;
+  note?: string;
+  terminalId?: string;
+  userId?: string;
+  userName?: string;
+  createdAt: string;
+}
+
+export interface CustomerAccountDetail {
+  customer: Customer;
+  creditBalance: number;
+  availableCredit: number;
+  creditPayments: CreditPayment[];
+}
+
+export interface UpdateCustomerInput {
+  creditLimit?: number;
+  phone?: string;
+  email?: string;
+  notes?: string;
+  tier?: string;
+}
+
+export interface RecordCreditPaymentInput {
+  amount: number;
+  method?: string;
+  note?: string;
+  terminalId?: string;
 }
 
 export interface Category {
@@ -822,20 +858,34 @@ export interface POSDesktopSettings {
   customerDisplay: POSCustomerDisplaySettings;
 }
 
+/**
+ * Defaults line up with the legacy MaxSoft till's key sheet wherever this app
+ * has a matching action (F3 Search, F5 Bill Hold, F6 Hold Recall, F7 Drawer
+ * Open, F9 Refund, F11 Cancel, F12 Paid In/Out), so an operator moving over
+ * keeps their muscle memory. The legacy sheet's bare symbol keys (~ for
+ * Customer, [ ] \ for Discount) move to Alt+letter instead of an unmodified
+ * key, matching this app's own scanner-safety rule (see
+ * `isValidQuickKeyBinding`): an unmodified key is indistinguishable from the
+ * first character of a barcode scan. Two legacy keys have no equivalent
+ * action yet and so aren't bound: F8 Select Printer (printers are configured
+ * in Settings, not a runtime action) and F10 Money Declare (folded into
+ * `cashDrawer`, which already opens the money-declare view before a shift is
+ * open and the drawer once one is).
+ */
 export const DEFAULT_POS_ACTION_SHORTCUTS: POSActionShortcuts = {
   help: 'F1',
   orders: 'F2',
   search: 'F3',
-  hold: 'F4',
-  recall: 'F5',
-  discount: 'F6',
-  customer: 'F7',
-  pay: 'F8',
-  quote: 'F9',
-  refund: 'F10',
-  void: 'Escape',
-  cashDrawer: 'F11',
-  cashMovement: 'Ctrl+F11',
+  quote: 'F4',
+  hold: 'F5',
+  recall: 'F6',
+  cashDrawer: 'F7',
+  refund: 'F9',
+  void: 'F11',
+  cashMovement: 'F12',
+  customer: 'Alt+KeyC',
+  discount: 'Alt+KeyD',
+  pay: 'NumpadAdd',
 };
 
 export const DEFAULT_POS_SHORTCUT_SETTINGS: POSShortcutSettings = {

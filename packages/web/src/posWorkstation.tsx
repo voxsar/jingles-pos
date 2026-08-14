@@ -3096,11 +3096,11 @@ function CartPanel(props: CartPanelProps) {
         <div className="cart-actions">
           <button className="ghost-button" onClick={props.onHold} disabled={props.cart.length === 0}>
             Hold
-            <kbd className="kbd inline">F4</kbd>
+            <kbd className="kbd inline">F5</kbd>
           </button>
           <button className="btn-primary flex" onClick={props.onPay} disabled={props.cart.length === 0}>
             Pay - {formatCurrency(props.totals.total)}
-            <kbd className="kbd inline light">F8</kbd>
+            <kbd className="kbd inline light">Num +</kbd>
           </button>
         </div>
       </div>

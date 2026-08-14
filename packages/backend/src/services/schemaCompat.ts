@@ -52,6 +52,7 @@ export async function ensureLocalSchemaCompat() {
   await ensureColumn('ShiftCashCount', 'tenders', 'TEXT');
   await ensureColumn('ShiftCashCount', 'tenderMode', 'TEXT');
   await ensureColumn('ShiftCashCount', 'reason', 'TEXT');
+  await ensureColumn('Customer', 'creditLimit', 'REAL NOT NULL DEFAULT 0');
 
   if (!(await hasTable('ConfigEntry'))) {
     await prisma.$executeRawUnsafe(`
@@ -61,6 +62,28 @@ export async function ensureLocalSchemaCompat() {
         "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
         "updatedAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
       )
+    `);
+  }
+
+  if (!(await hasTable('CreditPayment'))) {
+    await prisma.$executeRawUnsafe(`
+      CREATE TABLE "CreditPayment" (
+        "id" TEXT NOT NULL PRIMARY KEY,
+        "customerId" TEXT NOT NULL,
+        "amount" REAL NOT NULL,
+        "method" TEXT NOT NULL DEFAULT 'CASH',
+        "note" TEXT,
+        "terminalId" TEXT,
+        "userId" TEXT,
+        "sourceDeviceId" TEXT,
+        "sourceSequenceNum" INTEGER,
+        "lastVectorClock" TEXT NOT NULL DEFAULT '{}',
+        "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        CONSTRAINT "CreditPayment_customerId_fkey" FOREIGN KEY ("customerId") REFERENCES "Customer" ("id") ON DELETE CASCADE ON UPDATE CASCADE
+      )
+    `);
+    await prisma.$executeRawUnsafe(`
+      CREATE INDEX "CreditPayment_customerId_idx" ON "CreditPayment"("customerId")
     `);
   }
 }

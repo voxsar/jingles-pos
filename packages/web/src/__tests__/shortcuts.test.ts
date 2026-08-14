@@ -111,7 +111,7 @@ describe('normalizeActionShortcuts', () => {
 
     expect(result.pay).toBe('Ctrl+Enter');
     expect(result.customer).toBe(DEFAULT_POS_ACTION_SHORTCUTS.customer);
-    expect(result.void).toBe('Escape');
+    expect(result.void).toBe('F11');
   });
 });
 
@@ -150,7 +150,7 @@ describe('findShortcutConflicts', () => {
       [{ id: 'a', binding: 'F9', productId: 'p1', sku: 'SKU1', label: 'Gold lace' }],
     );
 
-    expect(conflicts.get('F9')).toEqual(['Quotation', 'Gold lace']);
+    expect(conflicts.get('F9')).toEqual(['Refund', 'Gold lace']);
   });
 
   it('reports nothing when every binding is unique', () => {

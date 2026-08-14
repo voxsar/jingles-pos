@@ -101,16 +101,35 @@ model InventoryEvent {
 }
 
 model Customer {
-  id        String   @id
-  code      String?  @unique
-  name      String
-  tier      String   @default("Retail")
-  email     String?  @unique
-  phone     String?
-  notes     String?
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-  sales     Sale[]
+  id             String   @id
+  code           String?  @unique
+  name           String
+  tier           String   @default("Retail")
+  email          String?  @unique
+  phone          String?
+  notes          String?
+  creditLimit    Float    @default(0)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  sales          Sale[]
+  creditPayments CreditPayment[]
+}
+
+model CreditPayment {
+  id                String   @id
+  customerId        String
+  amount            Float
+  method            String   @default("CASH")
+  note              String?
+  terminalId        String?
+  userId            String?
+  sourceDeviceId    String?
+  sourceSequenceNum Int?
+  lastVectorClock   String   @default("{}")
+  createdAt         DateTime @default(now())
+  customer          Customer @relation(fields: [customerId], references: [id])
+
+  @@index([customerId])
 }
 
 model POSShift {
