@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   DEFAULT_POS_ACTION_SHORTCUTS,
+  DECLARABLE_TENDER_METHODS,
   bindingFromEvent,
   bindingMatchesEvent,
   formatBinding,
@@ -10,7 +11,11 @@ import {
   normalizeQuickKeys,
   normalizeShiftReconciliation,
 } from '@jingles/shared';
-import { findShortcutConflicts } from '../utils/shortcuts';
+import {
+  denominationShortcutValue,
+  findShortcutConflicts,
+  popupNumberIndex,
+} from '../utils/shortcuts';
 
 function keyEvent(
   code: string,
@@ -163,6 +168,41 @@ describe('findShortcutConflicts', () => {
   });
 });
 
+describe('popupNumberIndex', () => {
+  it('maps visible picker numbers to zero-based items', () => {
+    expect(popupNumberIndex(keyEvent('Numpad1'))).toBe(0);
+    expect(popupNumberIndex(keyEvent('Numpad9'))).toBe(8);
+    expect(popupNumberIndex(keyEvent('Digit4'))).toBe(3);
+  });
+
+  it('does not steal modified numbers', () => {
+    expect(popupNumberIndex(keyEvent('Numpad1', { altKey: true }))).toBeNull();
+    expect(popupNumberIndex(keyEvent('Digit5', { ctrlKey: true }))).toBeNull();
+  });
+});
+
+describe('denominationShortcutValue', () => {
+  it('maps plain 5, 2 and 1 to the requested common notes', () => {
+    expect(denominationShortcutValue(keyEvent('Numpad5'))).toBe(500);
+    expect(denominationShortcutValue(keyEvent('Digit2'))).toBe(100);
+    expect(denominationShortcutValue(keyEvent('Numpad1'))).toBe(50);
+  });
+
+  it('maps Alt to large notes and Ctrl to small denominations', () => {
+    expect(denominationShortcutValue(keyEvent('Digit5', { altKey: true }))).toBe(5000);
+    expect(denominationShortcutValue(keyEvent('Numpad2', { altKey: true }))).toBe(2000);
+    expect(denominationShortcutValue(keyEvent('Digit1', { altKey: true }))).toBe(1000);
+    expect(denominationShortcutValue(keyEvent('Numpad5', { ctrlKey: true }))).toBe(5);
+    expect(denominationShortcutValue(keyEvent('Digit2', { ctrlKey: true }))).toBe(2);
+    expect(denominationShortcutValue(keyEvent('Numpad1', { ctrlKey: true }))).toBe(1);
+  });
+
+  it('ignores unrelated and ambiguous modifier combinations', () => {
+    expect(denominationShortcutValue(keyEvent('Digit9'))).toBeNull();
+    expect(denominationShortcutValue(keyEvent('Digit5', { ctrlKey: true, altKey: true }))).toBeNull();
+  });
+});
+
 describe('normalizeShiftReconciliation', () => {
   it('keeps any combination of tenders the operator selected', () => {
     expect(normalizeShiftReconciliation({ declaredTenders: ['VISA', 'MASTER'] }).declaredTenders)
@@ -189,7 +229,7 @@ describe('normalizeShiftReconciliation', () => {
   it('migrates the older single-mode setting so an upgrade keeps behaving the same', () => {
     expect(normalizeShiftReconciliation({ tenderDeclarationMode: 'total' }).declaredTenders).toEqual(['TOTAL']);
     expect(normalizeShiftReconciliation({ tenderDeclarationMode: 'category' }).declaredTenders)
-      .toEqual(['VISA', 'MASTER', 'AMEX', 'CREDIT', 'GIFT', 'INSTALLMENT']);
+      .toEqual([...DECLARABLE_TENDER_METHODS]);
     expect(normalizeShiftReconciliation({ tenderDeclarationMode: 'off' }).declaredTenders).toEqual([]);
     expect(normalizeShiftReconciliation({ tenderDeclarationMode: 'nonsense' }).declaredTenders).toEqual([]);
   });

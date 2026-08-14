@@ -62,6 +62,11 @@ export const ACTION_SHORTCUT_IDS: POSActionShortcutId[] = [
   'void',
   'cashDrawer',
   'cashMovement',
+  'staff',
+  'unit',
+  'discountValue',
+  'discountPercent',
+  'closePopup',
 ];
 
 function splitBinding(binding: POSKeyBinding): { modifiers: string[]; code: string } {

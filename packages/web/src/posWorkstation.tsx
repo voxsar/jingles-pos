@@ -117,6 +117,7 @@ import {
 import {
   buildProductLabelDocument,
   buildQuotationDocument,
+  buildRefundReceiptDocument,
   buildReceiptDocument,
   buildZReportDocument,
   DEFAULT_RECEIPT_BRANDING,
@@ -158,7 +159,13 @@ import {
   summarizeShiftReconciliation,
   type ShiftReconciliation,
 } from './utils/pos';
-import { ACTION_SHORTCUT_HINTS, ACTION_SHORTCUT_LABELS, findShortcutConflicts } from './utils/shortcuts';
+import {
+  ACTION_SHORTCUT_HINTS,
+  ACTION_SHORTCUT_LABELS,
+  denominationShortcutValue,
+  findShortcutConflicts,
+  popupNumberIndex,
+} from './utils/shortcuts';
 import { useNavigate } from 'react-router-dom';
 
 type Notice = {
@@ -194,6 +201,11 @@ type VariantSelectionRequest = {
   initialVariantId?: string | null;
   lineId?: string | null;
   product: Product;
+};
+
+type UnitSelectionRequest = {
+  product: Product;
+  variant?: ProductVariant;
 };
 
 const DEFAULT_CATALOG_PANE_WIDTH = 62;
@@ -302,6 +314,10 @@ export default function PosWorkstation() {
   const [isSearchOpen, setIsSearchOpen] = useState(false);
   const [isHelpOpen, setIsHelpOpen] = useState(false);
   const [variantSelection, setVariantSelection] = useState<VariantSelectionRequest | null>(null);
+  const [unitSelection, setUnitSelection] = useState<UnitSelectionRequest | null>(null);
+  const [isStaffPickerOpen, setIsStaffPickerOpen] = useState(false);
+  const [isCustomerPickerOpen, setIsCustomerPickerOpen] = useState(false);
+  const [isDiscountOpen, setIsDiscountOpen] = useState(false);
   const [isPaymentOpen, setIsPaymentOpen] = useState(false);
   const [isHoldOpen, setIsHoldOpen] = useState(false);
   const [holdMode, setHoldMode] = useState<HoldMode>('hold');
@@ -345,6 +361,7 @@ export default function PosWorkstation() {
   const [billStartedAt, setBillStartedAt] = useState<string | null>(null);
 
   const discountInputRef = useRef<HTMLInputElement>(null);
+  const barcodeInputRef = useRef<HTMLInputElement>(null);
   const customerSelectRef = useRef<SearchableSelectHandle>(null);
   const headerBarRef = useRef<HTMLElement>(null);
   const actionBarRef = useRef<HTMLDivElement>(null);
@@ -1087,6 +1104,10 @@ export default function PosWorkstation() {
   const closeOverlayStack = useCallback(() => {
     setIsSearchOpen(false);
     setVariantSelection(null);
+    setUnitSelection(null);
+    setIsStaffPickerOpen(false);
+    setIsCustomerPickerOpen(false);
+    setIsDiscountOpen(false);
     setIsPaymentOpen(false);
     setIsHoldOpen(false);
     setMoneyMode(null);
@@ -1095,6 +1116,7 @@ export default function PosWorkstation() {
     setIsOrdersOpen(false);
     setIsVoidOpen(false);
     setIsCashMovementOpen(false);
+    setIsCustomersOpen(false);
     setReceiptSale(null);
     setIsSettingsOpen(false);
     setSettingsDraft(desktopSettings);
@@ -1200,7 +1222,7 @@ export default function PosWorkstation() {
     'Retail',
   ].filter(Boolean)), [defaultTierLabel, selectedCustomer?.tier]);
 
-  const addProductToCart = useCallback((product: Product, variant?: ProductVariant) => {
+  const addProductToCart = useCallback((product: Product, variant?: ProductVariant, requestedQuantity = 1) => {
     const salesperson = salespeople[0] ?? users[0];
     if (salesperson == null) {
       showNotice('error', 'No cashier or salesperson is configured for the workstation.');
@@ -1215,30 +1237,40 @@ export default function PosWorkstation() {
       }
       const effectivePriceTiers = variant?.priceTiers?.length ? variant.priceTiers : product.priceTiers;
       const tier = pickPriceTier(effectivePriceTiers, preferredTierLabels);
+      const quantityToAdd = Math.max(1, Math.floor(requestedQuantity));
       const existing = previous.find((line) => (
         line.productId === product.id
         && (line.variantId ?? null) === (variant?.id ?? null)
         && line.tierLabel === tier.label
       ));
       if (existing) {
-        if (existing.quantity >= availableStock) {
+        if (existing.quantity + quantityToAdd > availableStock) {
           showNotice('error', `Only ${formatInteger(availableStock)} unit(s) are available.`);
-          return previous;
         }
+        const nextQuantity = Math.min(availableStock, existing.quantity + quantityToAdd);
+        if (nextQuantity === existing.quantity) return previous;
         return previous.map((line) => (
           line.uid === existing.uid
             ? recalculateCartLine({
               ...line,
-              quantity: line.quantity + 1,
+              quantity: nextQuantity,
               stockOnHand: variant?.stockOnHand ?? product.stockOnHand,
             })
             : line
         ));
       }
 
-      return [...previous, createCartLine(product, salesperson, preferredTierLabels, variant)];
+      if (quantityToAdd > availableStock) {
+        showNotice('error', `Only ${formatInteger(availableStock)} unit(s) are available.`);
+      }
+      const created = createCartLine(product, salesperson, preferredTierLabels, variant);
+      return [...previous, recalculateCartLine({ ...created, quantity: Math.min(quantityToAdd, availableStock) })];
     });
   }, [preferredTierLabels, salespeople, showNotice, users]);
+
+  const addProductQuantityToCart = useCallback((product: Product, variant: ProductVariant | undefined, quantity: number) => {
+    addProductToCart(product, variant, quantity);
+  }, [addProductToCart]);
 
   const updateCartLineById = useCallback((lineId: string, updater: (line: CartLine) => CartLine | null) => {
     setCart((previous) => previous.flatMap((line) => {
@@ -1288,8 +1320,8 @@ export default function PosWorkstation() {
       return;
     }
 
-    addProductToCart(product);
-  }, [addProductToCart]);
+    setUnitSelection({ product });
+  }, []);
 
   /**
    * Lookup table for scanned codes. Variant codes are registered too, so a
@@ -1412,11 +1444,11 @@ export default function PosWorkstation() {
     if (variantSelection.lineId) {
       applyVariantToCartLine(variantSelection.lineId, variantSelection.product, variant);
     } else {
-      addProductToCart(variantSelection.product, variant);
+      setUnitSelection({ product: variantSelection.product, variant });
     }
 
     setVariantSelection(null);
-  }, [addProductToCart, applyVariantToCartLine, variantSelection]);
+  }, [applyVariantToCartLine, variantSelection]);
 
   const handleOpenShift = useCallback(async (submission: MoneyDeclareSubmission) => {
     if (session == null) {
@@ -1714,15 +1746,33 @@ export default function PosWorkstation() {
     };
 
     try {
-      await createReturn(payload);
+      const refund = await createReturn(payload);
       setIsReturnOpen(false);
       showNotice('success', `Refund created for ${draft.sale.receiptNumber}.`);
+
+      if (hasReceiptPrinterRef.current) {
+        const printResult = await printReceiptDocument(
+          buildRefundReceiptDocument({
+            id: refund.id,
+            sale: draft.sale,
+            cashierName: session.user.name,
+            reason: draft.reason,
+            lines,
+          }, resolveTerminalCode(terminals, session.terminalId)),
+          { allowBrowserFallback: false },
+        );
+
+        if (!printResult.ok) {
+          showNotice('error', `Refund saved, but the refund receipt did not print: ${printResult.message ?? 'unknown error'}`);
+        }
+      }
+
       await refreshWorkspace({ includeSales: true });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to create return';
       showNotice('error', message);
     }
-  }, [refreshWorkspace, session, showNotice]);
+  }, [refreshWorkspace, session, showNotice, terminals]);
 
   const handleSyncNow = useCallback(async () => {
     setIsSyncing(true);
@@ -1911,9 +1961,36 @@ export default function PosWorkstation() {
     || isVoidOpen
     || isSettingsOpen
     || isCashMovementOpen
+    || isCustomersOpen
+    || isCustomerPickerOpen
+    || isStaffPickerOpen
+    || isDiscountOpen
     || moneyMode != null
     || variantSelection != null
+    || unitSelection != null
     || receiptSale != null;
+
+  const focusBarcodeInput = useCallback(() => {
+    if (session != null && !isOverlayOpen) {
+      window.requestAnimationFrame(() => barcodeInputRef.current?.focus());
+    }
+  }, [isOverlayOpen, session]);
+
+  useEffect(() => {
+    focusBarcodeInput();
+  }, [focusBarcodeInput]);
+
+  useEffect(() => {
+    const restore = () => {
+      if (document.visibilityState === 'visible') focusBarcodeInput();
+    };
+    window.addEventListener('focus', restore);
+    document.addEventListener('visibilitychange', restore);
+    return () => {
+      window.removeEventListener('focus', restore);
+      document.removeEventListener('visibilitychange', restore);
+    };
+  }, [focusBarcodeInput]);
 
   /** Single entry point for every action bar button and its key binding. */
   const runAction = useCallback((action: POSActionShortcutId) => {
@@ -1938,13 +2015,17 @@ export default function PosWorkstation() {
         handleOpenHoldModal('recall');
         return;
       case 'discount':
-        discountInputRef.current?.focus();
-        discountInputRef.current?.select();
+        setIsDiscountOpen(true);
         return;
       case 'customer':
-        // Focusing the trigger alone reads as a dead button; the operator
-        // pressed this to pick a customer, so open the list on the search box.
-        customerSelectRef.current?.open();
+        setIsCustomerPickerOpen(true);
+        return;
+      case 'staff':
+        if (cart.length === 0) {
+          showNotice('error', 'Add a product before changing staff.');
+          return;
+        }
+        setIsStaffPickerOpen(true);
         return;
       case 'pay':
         if (cart.length === 0) {
@@ -1977,6 +2058,12 @@ export default function PosWorkstation() {
       case 'cashMovement':
         handleOpenCashMovement();
         return;
+      case 'unit':
+      case 'discountValue':
+      case 'discountPercent':
+      case 'closePopup':
+        // These bindings are intentionally handled only by their open popup.
+        return;
       default:
         return;
     }
@@ -2004,6 +2091,7 @@ export default function PosWorkstation() {
 
     const isPlainKey = !event.ctrlKey && !event.altKey && !event.metaKey && !/^F\d{1,2}$/.test(event.code);
     const target = event.target as HTMLElement | null;
+    const isBarcodeField = target === barcodeInputRef.current;
     const isTyping = target instanceof HTMLInputElement
       || target instanceof HTMLTextAreaElement
       || target?.isContentEditable === true;
@@ -2016,7 +2104,7 @@ export default function PosWorkstation() {
         closeOverlayStack();
         return;
       }
-    } else if (isPlainKey && isTyping) {
+    } else if (isPlainKey && isTyping && !isBarcodeField) {
       // An unmodified key rebound onto an action must not hijack typing.
       return;
     }
@@ -2031,6 +2119,7 @@ export default function PosWorkstation() {
 
     for (const action of ACTION_SHORTCUT_IDS) {
       if (action === 'help') continue;
+      if (action === 'unit' || action === 'discountValue' || action === 'discountPercent' || action === 'closePopup') continue;
       if (!bindingMatchesEvent(actionShortcuts[action], event)) continue;
       event.preventDefault();
       runAction(action);
@@ -2179,6 +2268,8 @@ export default function PosWorkstation() {
           activeSubcategory={activeSubcategory}
           categories={categoryTiles}
           hideOutOfStock={hideOutOfStock}
+          barcodeInputRef={barcodeInputRef}
+          onBarcodeSubmit={handleBarcodeScan}
           onAddProduct={handleProductPick}
           onCategoryChange={(nextCategory) => {
             setActiveCategoryId(nextCategory);
@@ -2224,6 +2315,7 @@ export default function PosWorkstation() {
             setIsVoidOpen(true);
           }}
           onCustomerChange={handleCustomerChange}
+          onOpenCustomerPicker={() => setIsCustomerPickerOpen(true)}
           onDefaultTierChange={setDefaultTierLabel}
           onHold={() => handleOpenHoldModal('hold')}
           onViewCustomer={() => {
@@ -2292,6 +2384,7 @@ export default function PosWorkstation() {
           canPrintLabels={hasLabelPrinter}
           hideOutOfStock={hideOutOfStock}
           products={products}
+          shortcuts={actionShortcuts}
           onClose={() => setIsSearchOpen(false)}
           onPick={(product) => {
             setIsSearchOpen(false);
@@ -2309,6 +2402,66 @@ export default function PosWorkstation() {
           onClose={() => setVariantSelection(null)}
           onConfirm={handleVariantSelectionComplete}
           product={variantSelection.product}
+          shortcuts={actionShortcuts}
+        />
+      )}
+
+      {unitSelection != null && (
+        <UnitSelectionModal
+          product={unitSelection.product}
+          variant={unitSelection.variant}
+          shortcuts={actionShortcuts}
+          onClose={() => setUnitSelection(null)}
+          onConfirm={(quantity) => {
+            addProductQuantityToCart(unitSelection.product, unitSelection.variant, quantity);
+            setUnitSelection(null);
+          }}
+        />
+      )}
+
+      {isStaffPickerOpen && cart.length > 0 && (
+        <StaffSelectionModal
+          salespeople={salespeople}
+          shortcuts={actionShortcuts}
+          onClose={() => setIsStaffPickerOpen(false)}
+          onSelect={(salesperson) => {
+            const lineId = cart[cart.length - 1]?.uid;
+            if (lineId) {
+              updateCartLineById(lineId, (line) => ({
+                ...line,
+                salespersonId: salesperson.id,
+                salespersonName: salesperson.name,
+                salespersonInitials: salesperson.initials,
+              }));
+            }
+            setIsStaffPickerOpen(false);
+          }}
+        />
+      )}
+
+      {isCustomerPickerOpen && (
+        <CustomerSelectionModal
+          customers={customers}
+          selectedCustomerId={selectedCustomer?.id ?? ''}
+          shortcuts={actionShortcuts}
+          onClose={() => setIsCustomerPickerOpen(false)}
+          onSelect={(customer) => {
+            handleCustomerChange(customer.id);
+            setIsCustomerPickerOpen(false);
+          }}
+        />
+      )}
+
+      {isDiscountOpen && (
+        <DiscountModal
+          currentAmount={billDiscount}
+          subtotal={Math.max(0, totals.rawSubtotal - totals.lineDiscountTotal)}
+          shortcuts={actionShortcuts}
+          onClose={() => setIsDiscountOpen(false)}
+          onConfirm={(amount) => {
+            setBillDiscount(Math.max(0, amount));
+            setIsDiscountOpen(false);
+          }}
         />
       )}
 
@@ -2785,6 +2938,8 @@ type ProductPanelProps = {
   activeSubcategory: string | null;
   categories: CatalogCategoryTile[];
   hideOutOfStock: boolean;
+  barcodeInputRef: React.RefObject<HTMLInputElement>;
+  onBarcodeSubmit: (code: string) => void;
   onAddProduct: (product: Product) => void;
   onCategoryChange: (nextCategory: string) => void;
   onHideOutOfStockChange: (hideOutOfStock: boolean) => void;
@@ -2817,10 +2972,27 @@ function ProductPanel(props: ProductPanelProps) {
   return (
     <section className="glass-panel product-panel">
       <div className="panel-head">
-        <button className="search-trigger" onClick={props.onOpenSearch}>
-          <span className="search-copy">Search products, SKU, or barcode</span>
-          <kbd className="kbd">F3</kbd>
-        </button>
+        <div className="barcode-focus-row">
+          <input
+            ref={props.barcodeInputRef}
+            className="glass-input barcode-focus-input"
+            data-scanner-passthrough
+            aria-label="Barcode entry"
+            placeholder="Scan or enter barcode"
+            onKeyDown={(event) => {
+              if (event.key !== 'Enter') return;
+              event.preventDefault();
+              const code = event.currentTarget.value.trim();
+              if (!code) return;
+              props.onBarcodeSubmit(code);
+              event.currentTarget.value = '';
+            }}
+          />
+          <button className="search-trigger" onClick={props.onOpenSearch}>
+            <span className="search-copy">Product search</span>
+            <kbd className="kbd">F3</kbd>
+          </button>
+        </div>
         <label className="stock-filter-toggle">
           <input
             checked={props.hideOutOfStock}
@@ -2999,6 +3171,7 @@ type CartPanelProps = {
   onBillDiscountChange: (value: number) => void;
   onClearCart: () => void;
   onCustomerChange: (value: string) => void;
+  onOpenCustomerPicker: () => void;
   onDefaultTierChange: (value: string) => void;
   onHold: () => void;
   onLineDiscountChange: (lineId: string, discountPercent: number) => void;
@@ -3038,6 +3211,14 @@ function CartPanel(props: CartPanelProps) {
               options={props.customers.map((customer) => ({ value: customer.id, label: `${customer.name} - ${customer.tier}` }))}
               ariaLabel="Customer"
             />
+            <button
+              className="ghost-button small"
+              onClick={props.onOpenCustomerPicker}
+              title="Open the numbered customer picker"
+              type="button"
+            >
+              Pick
+            </button>
             <button
               className="ghost-button small"
               disabled={!props.customerId}
@@ -4693,6 +4874,7 @@ function SearchOverlay(
     canPrintLabels: boolean;
     hideOutOfStock: boolean;
     products: Product[];
+    shortcuts: POSActionShortcuts;
     onClose: () => void;
     onPick: (product: Product) => void;
     onPrintLabel: (product: Product) => void;
@@ -4779,6 +4961,22 @@ function SearchOverlay(
     };
   }, [props.hideOutOfStock, props.products, query, scope]);
 
+  useEffect(() => {
+    const handlePickerKey = (event: KeyboardEvent) => {
+      if (bindingMatchesEvent(props.shortcuts.closePopup, event)) {
+        event.preventDefault();
+        props.onClose();
+        return;
+      }
+      const index = popupNumberIndex(event);
+      if (index == null || !results[index]) return;
+      event.preventDefault();
+      props.onPick(results[index]);
+    };
+    window.addEventListener('keydown', handlePickerKey, true);
+    return () => window.removeEventListener('keydown', handlePickerKey, true);
+  }, [props, results]);
+
   return (
     <ModalShell onClose={props.onClose} title="Search products" width="wide">
       <div className="search-panel">
@@ -4819,9 +5017,10 @@ function SearchOverlay(
               Searching local SQLite index...
             </div>
           )}
-          {results.map((product) => (
+          {results.map((product, index) => (
             <div key={product.id} className="search-result-row">
               <button className="search-result-main" onClick={() => props.onPick(product)}>
+                {index < 9 && <kbd className="picker-number">{index + 1}</kbd>}
                 <div className="product-thumb compact">{getCategoryToken(product.subcategory || product.name)}</div>
                 <div className="search-result-copy">
                   <div>{product.name}</div>
@@ -4848,6 +5047,220 @@ function SearchOverlay(
               <div className="empty-title">No products matched "{query}"</div>
             </div>
           )}
+        </div>
+      </div>
+    </ModalShell>
+  );
+}
+
+function UnitSelectionModal(props: {
+  product: Product;
+  variant?: ProductVariant;
+  shortcuts: POSActionShortcuts;
+  onClose: () => void;
+  onConfirm: (quantity: number) => void;
+}) {
+  const [quantity, setQuantity] = useState(1);
+  const quantityRef = useRef<HTMLInputElement>(null);
+  const unitLabel = props.product.unitLabel || 'unit';
+
+  useEffect(() => {
+    const handleKey = (event: KeyboardEvent) => {
+      if (bindingMatchesEvent(props.shortcuts.closePopup, event)) {
+        event.preventDefault();
+        props.onClose();
+        return;
+      }
+      if (bindingMatchesEvent(props.shortcuts.unit, event)) {
+        event.preventDefault();
+        quantityRef.current?.focus();
+        quantityRef.current?.select();
+        return;
+      }
+      const index = popupNumberIndex(event);
+      if (index != null) {
+        event.preventDefault();
+        props.onConfirm(index + 1);
+        return;
+      }
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        props.onConfirm(quantity);
+      }
+    };
+    window.addEventListener('keydown', handleKey, true);
+    return () => window.removeEventListener('keydown', handleKey, true);
+  }, [props, quantity]);
+
+  return (
+    <ModalShell onClose={props.onClose} title={`Choose units - ${props.product.name}`} width="wide">
+      <div className="quick-picker-stack">
+        <div className="quick-picker-grid">
+          {Array.from({ length: 9 }, (_, index) => index + 1).map((count) => (
+            <button className="quick-picker-card" key={count} onClick={() => props.onConfirm(count)}>
+              <kbd className="picker-number">{count}</kbd>
+              <b>{count} {unitLabel}</b>
+              <span>{formatCurrency((props.variant?.priceTiers?.[0]?.price ?? props.product.priceTiers[0]?.price ?? 0) * count)}</span>
+            </button>
+          ))}
+        </div>
+        <LabelBlock label={`Other quantity (${formatBinding(props.shortcuts.unit)})`}>
+          <input
+            ref={quantityRef}
+            className="glass-input quick-quantity-input"
+            type="number"
+            min={1}
+            max={Math.max(1, props.variant?.stockOnHand ?? props.product.stockOnHand)}
+            value={quantity}
+            onChange={(event) => setQuantity(Math.max(1, Number(event.target.value) || 1))}
+          />
+        </LabelBlock>
+        <div className="quick-picker-help">Numpad 1-9 selects immediately. {formatBinding(props.shortcuts.closePopup)} closes.</div>
+      </div>
+    </ModalShell>
+  );
+}
+
+function StaffSelectionModal(props: {
+  salespeople: POSUser[];
+  shortcuts: POSActionShortcuts;
+  onClose: () => void;
+  onSelect: (salesperson: POSUser) => void;
+}) {
+  const [query, setQuery] = useState('');
+  const visible = props.salespeople.filter((person) => `${person.name} ${person.initials}`.toLowerCase().includes(query.toLowerCase())).slice(0, 9);
+
+  useEffect(() => {
+    const handleKey = (event: KeyboardEvent) => {
+      if (bindingMatchesEvent(props.shortcuts.closePopup, event)) {
+        event.preventDefault();
+        props.onClose();
+        return;
+      }
+      const index = popupNumberIndex(event);
+      if (index == null || !visible[index]) return;
+      event.preventDefault();
+      props.onSelect(visible[index]);
+    };
+    window.addEventListener('keydown', handleKey, true);
+    return () => window.removeEventListener('keydown', handleKey, true);
+  }, [props, visible]);
+
+  return (
+    <ModalShell onClose={props.onClose} title="Choose staff for last product" width="wide">
+      <div className="quick-picker-stack">
+        <input autoFocus className="glass-input" placeholder="Search staff" value={query} onChange={(event) => setQuery(event.target.value)} />
+        <div className="quick-picker-grid">
+          {visible.map((person, index) => (
+            <button className="quick-picker-card" key={person.id} onClick={() => props.onSelect(person)}>
+              <kbd className="picker-number">{index + 1}</kbd>
+              <b>{person.name}</b><span>{person.initials}</span>
+            </button>
+          ))}
+        </div>
+      </div>
+    </ModalShell>
+  );
+}
+
+function CustomerSelectionModal(props: {
+  customers: Customer[];
+  selectedCustomerId: string;
+  shortcuts: POSActionShortcuts;
+  onClose: () => void;
+  onSelect: (customer: Customer) => void;
+}) {
+  const [query, setQuery] = useState('');
+  const visible = props.customers.filter((customer) => (
+    `${customer.name} ${customer.code} ${customer.phone ?? ''}`.toLowerCase().includes(query.toLowerCase())
+  )).slice(0, 9);
+
+  useEffect(() => {
+    const handleKey = (event: KeyboardEvent) => {
+      if (bindingMatchesEvent(props.shortcuts.closePopup, event)) {
+        event.preventDefault();
+        props.onClose();
+        return;
+      }
+      const index = popupNumberIndex(event);
+      if (index == null || !visible[index]) return;
+      event.preventDefault();
+      props.onSelect(visible[index]);
+    };
+    window.addEventListener('keydown', handleKey, true);
+    return () => window.removeEventListener('keydown', handleKey, true);
+  }, [props, visible]);
+
+  return (
+    <ModalShell onClose={props.onClose} title="Choose customer" width="wide">
+      <div className="quick-picker-stack">
+        <input autoFocus className="glass-input" placeholder="Search name, code or phone" value={query} onChange={(event) => setQuery(event.target.value)} />
+        <div className="quick-picker-grid">
+          {visible.map((customer, index) => (
+            <button className={`quick-picker-card ${customer.id === props.selectedCustomerId ? 'active' : ''}`} key={customer.id} onClick={() => props.onSelect(customer)}>
+              <kbd className="picker-number">{index + 1}</kbd>
+              <b>{customer.name}</b><span>{customer.code} - {customer.tier}</span>
+            </button>
+          ))}
+        </div>
+      </div>
+    </ModalShell>
+  );
+}
+
+function DiscountModal(props: {
+  currentAmount: number;
+  subtotal: number;
+  shortcuts: POSActionShortcuts;
+  onClose: () => void;
+  onConfirm: (amount: number) => void;
+}) {
+  const [mode, setMode] = useState<'value' | 'percent'>('value');
+  const [value, setValue] = useState(props.currentAmount);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const amount = mode === 'percent' ? props.subtotal * Math.max(0, value) / 100 : Math.max(0, value);
+
+  useEffect(() => {
+    inputRef.current?.focus();
+    inputRef.current?.select();
+  }, [mode]);
+
+  useEffect(() => {
+    const handleKey = (event: KeyboardEvent) => {
+      if (bindingMatchesEvent(props.shortcuts.closePopup, event)) {
+        event.preventDefault();
+        props.onClose();
+      } else if (bindingMatchesEvent(props.shortcuts.discountValue, event)) {
+        event.preventDefault();
+        setMode('value');
+      } else if (bindingMatchesEvent(props.shortcuts.discountPercent, event)) {
+        event.preventDefault();
+        setMode('percent');
+      } else if (event.key === 'Enter') {
+        event.preventDefault();
+        props.onConfirm(Math.min(props.subtotal, amount));
+      }
+    };
+    window.addEventListener('keydown', handleKey, true);
+    return () => window.removeEventListener('keydown', handleKey, true);
+  }, [amount, props]);
+
+  return (
+    <ModalShell onClose={props.onClose} title="Bill discount" width="wide">
+      <div className="discount-popup">
+        <div className="theme-option-row">
+          <button className={`theme-option ${mode === 'value' ? 'active' : ''}`} onClick={() => setMode('value')}>
+            <span className="theme-option-title">Value</span><kbd>{formatBinding(props.shortcuts.discountValue)}</kbd>
+          </button>
+          <button className={`theme-option ${mode === 'percent' ? 'active' : ''}`} onClick={() => setMode('percent')}>
+            <span className="theme-option-title">Percent</span><kbd>{formatBinding(props.shortcuts.discountPercent)}</kbd>
+          </button>
+        </div>
+        <input ref={inputRef} className="glass-input discount-popup-input" type="number" min={0} max={mode === 'percent' ? 100 : props.subtotal} value={value} onChange={(event) => setValue(Number(event.target.value) || 0)} />
+        <div className="cash-total-bar"><span>Discount applied</span><b>{formatCurrency(Math.min(props.subtotal, amount))}</b></div>
+        <div className="modal-actions">
+          <button className="ghost-button" onClick={props.onClose}>{formatBinding(props.shortcuts.closePopup)} Close</button>
+          <button className="btn-primary" onClick={() => props.onConfirm(Math.min(props.subtotal, amount))}>Enter - Apply</button>
         </div>
       </div>
     </ModalShell>
@@ -4946,6 +5359,7 @@ function VariantSelectionModal(
     onClose: () => void;
     onConfirm: (variant: ProductVariant) => void;
     product: Product;
+    shortcuts: POSActionShortcuts;
   },
 ) {
   const variants = useMemo(() => props.product.variants ?? [], [props.product.variants]);
@@ -4978,6 +5392,22 @@ function VariantSelectionModal(
     setSelectedValues(buildVariantSelectionMap(variant));
   }, []);
 
+  useEffect(() => {
+    const handleKey = (event: KeyboardEvent) => {
+      if (bindingMatchesEvent(props.shortcuts.closePopup, event)) {
+        event.preventDefault();
+        props.onClose();
+        return;
+      }
+      const index = popupNumberIndex(event);
+      if (index == null || !variants[index]) return;
+      event.preventDefault();
+      props.onConfirm(variants[index]);
+    };
+    window.addEventListener('keydown', handleKey, true);
+    return () => window.removeEventListener('keydown', handleKey, true);
+  }, [props, variants]);
+
   const handleAttributePick = useCallback((attributeId: string, valueId: string) => {
     const nextSelection = {
       ...selectedValues,
@@ -5009,7 +5439,7 @@ function VariantSelectionModal(
 
             {isSingleAxis ? (
               <div className="variant-tile-grid">
-                {variants.map((variant) => {
+                {variants.map((variant, index) => {
                   const label = getProductVariantLabel(variant);
                   return (
                     <button
@@ -5017,6 +5447,7 @@ function VariantSelectionModal(
                       className={`variant-choice-tile ${selectedVariant?.id === variant.id ? 'active' : ''}`}
                       onClick={() => handleDirectVariantPick(variant)}
                     >
+                      {index < 9 && <kbd className="picker-number">{index + 1}</kbd>}
                       <div className="variant-choice-head">
                         <span>{label}</span>
                         <span className="variant-choice-stock">Stock {formatInteger(variant.stockOnHand)}</span>
@@ -5742,6 +6173,26 @@ function MoneyDeclareModal(
     });
   };
 
+  useEffect(() => {
+    const handleCashKey = (event: KeyboardEvent) => {
+      const denomination = denominationShortcutValue(event);
+      if (denomination != null) {
+        event.preventDefault();
+        setCounts((previous) => ({
+          ...previous,
+          [String(denomination)]: (previous[String(denomination)] ?? 0) + 1,
+        }));
+        return;
+      }
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        handleSubmit();
+      }
+    };
+    window.addEventListener('keydown', handleCashKey, true);
+    return () => window.removeEventListener('keydown', handleCashKey, true);
+  });
+
   const varianceClass = (variance: number, flagged: boolean) => {
     if (flagged) return 'variance-alert';
     return variance === 0 ? 'variance-ok' : 'variance-warn';
@@ -5966,6 +6417,26 @@ function CashMovementModal(
     || (direction === 'out' && props.drawer == null && props.expectedDrawer != null && total > props.expectedDrawer);
   const blocked = exceedsDrawer && !props.allowOverdraw;
   const canSubmit = total > 0 && trimmedReason !== '' && !props.isSaving && !blocked;
+
+  useEffect(() => {
+    const handleCashKey = (event: KeyboardEvent) => {
+      const denomination = denominationShortcutValue(event);
+      if (denomination != null) {
+        event.preventDefault();
+        setCounts((previous) => ({
+          ...previous,
+          [String(denomination)]: (previous[String(denomination)] ?? 0) + 1,
+        }));
+        return;
+      }
+      if (event.key === 'Enter' && canSubmit) {
+        event.preventDefault();
+        props.onSubmit({ direction, counts, reason: trimmedReason });
+      }
+    };
+    window.addEventListener('keydown', handleCashKey, true);
+    return () => window.removeEventListener('keydown', handleCashKey, true);
+  }, [canSubmit, counts, direction, props, trimmedReason]);
 
   return (
     <ModalShell onClose={props.onClose} title="Cash in / cash out" width="wide">

@@ -14,6 +14,7 @@ import type {
   POSPrinterConfig,
   POSPrinterDiscoveryResult,
   Product,
+  ReturnInput,
   SaleSummary,
   ShiftSummary,
   ZReportSummary,
@@ -243,6 +244,79 @@ export function buildReceiptDocument(
     blocks,
     // Cash on the bill is the signal to pop the drawer.
     openDrawer: sale.payments.some((payment) => payment.method === 'CASH'),
+    cut: true,
+    copies: 1,
+  };
+}
+
+export function buildRefundReceiptDocument(
+  refund: {
+    id: string;
+    sale: SaleSummary;
+    cashierName: string;
+    reason?: string;
+    lines: ReturnInput['lines'];
+    createdAt?: string;
+  },
+  terminalCode: string,
+  branding: ReceiptBranding = DEFAULT_RECEIPT_BRANDING,
+): POSPrintDocument {
+  const totalRefund = refund.lines.reduce((sum, line) => sum + line.refundAmount, 0);
+  const itemCount = refund.lines.reduce((sum, line) => sum + line.quantity, 0);
+  const saleLines = new Map(refund.sale.lines.map((line) => [line.id, line]));
+  const createdAt = refund.createdAt ?? new Date().toISOString();
+
+  const blocks: POSPrintBlock[] = [
+    { type: 'text', value: branding.name, align: 'center', bold: true, wide: true },
+    ...branding.addressLines.map((line): POSPrintBlock => ({ type: 'text', value: line, align: 'center' })),
+    { type: 'text', value: 'REFUND RECEIPT', align: 'center', bold: true, wide: true },
+    { type: 'text', value: 'REFUNDED', align: 'center', bold: true },
+    { type: 'divider' },
+    { type: 'columns', left: 'Original receipt', right: refund.sale.receiptNumber },
+    { type: 'columns', left: 'Refund reference', right: refund.id },
+    { type: 'columns', left: 'Date', right: formatDateTime(createdAt) },
+    { type: 'columns', left: 'Terminal', right: terminalCode },
+    { type: 'columns', left: 'Cashier', right: refund.cashierName },
+    { type: 'columns', left: 'Customer', right: refund.sale.customerName ?? 'Walk-in customer' },
+    { type: 'columns', left: 'Reason', right: refund.reason?.trim() || 'Customer return' },
+    { type: 'columns', left: 'Items refunded', right: formatInteger(itemCount) },
+    { type: 'divider' },
+  ];
+
+  for (const returnedLine of refund.lines) {
+    const saleLine = saleLines.get(returnedLine.saleLineId);
+    blocks.push({ type: 'text', value: saleLine?.name ?? `Product ${returnedLine.productId}` });
+
+    if (saleLine != null) {
+      const variantSummary = getLineVariantSummary(saleLine);
+      if (variantSummary != null) {
+        blocks.push({ type: 'text', value: `  ${variantSummary}` });
+      }
+      blocks.push({ type: 'text', value: `  SKU ${saleLine.sku}` });
+    }
+
+    blocks.push({
+      type: 'columns',
+      left: `Refunded qty ${formatInteger(returnedLine.quantity)}`,
+      right: `-${formatCurrency(returnedLine.refundAmount)}`,
+      indent: 2,
+    });
+  }
+
+  blocks.push(
+    { type: 'divider' },
+    { type: 'columns', left: 'TOTAL REFUNDED', right: formatCurrency(totalRefund), bold: true },
+    { type: 'feed', lines: 1 },
+    { type: 'qr', value: refund.id, size: 6 },
+    { type: 'text', value: refund.id, align: 'center' },
+    { type: 'text', value: `Original receipt ${refund.sale.receiptNumber}`, align: 'center' },
+    ...branding.footerLines.map((line): POSPrintBlock => ({ type: 'text', value: line, align: 'center' })),
+  );
+
+  return {
+    title: `Refund ${refund.sale.receiptNumber}`,
+    blocks,
+    openDrawer: false,
     cut: true,
     copies: 1,
   };

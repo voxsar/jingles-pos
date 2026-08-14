@@ -727,7 +727,12 @@ export type POSActionShortcutId =
   | 'refund'
   | 'void'
   | 'cashDrawer'
-  | 'cashMovement';
+  | 'cashMovement'
+  | 'staff'
+  | 'unit'
+  | 'discountValue'
+  | 'discountPercent'
+  | 'closePopup';
 
 /**
  * A key binding, serialised as ordered modifiers followed by a `KeyboardEvent.code`,
@@ -922,6 +927,11 @@ export const DEFAULT_POS_ACTION_SHORTCUTS: POSActionShortcuts = {
   cashMovement: 'F12',
   customer: 'Alt+KeyC',
   discount: 'Alt+KeyD',
+  staff: 'KeyS',
+  unit: 'KeyU',
+  discountValue: 'BracketLeft',
+  discountPercent: 'BracketRight',
+  closePopup: 'Backslash',
   pay: 'NumpadAdd',
 };
 
@@ -947,6 +957,8 @@ export const DECLARABLE_TENDER_METHODS: PaymentMethod[] = [
   PaymentMethod.CREDIT,
   PaymentMethod.GIFT,
   PaymentMethod.INSTALLMENT,
+  PaymentMethod.CHEQUE,
+  PaymentMethod.BANK_TRANSFER,
 ];
 
 export const DEFAULT_POS_CUSTOMER_DISPLAY: POSCustomerDisplaySettings = {
@@ -957,8 +969,6 @@ export const DEFAULT_POS_CUSTOMER_DISPLAY: POSCustomerDisplaySettings = {
   storeName: '',
   showCashierName: true,
   completedSaleTimeoutSeconds: 20,
-  PaymentMethod.CHEQUE,
-  PaymentMethod.BANK_TRANSFER,
 };
 
 export const DEFAULT_POS_SCANNER_SETTINGS: POSScannerSettings = {

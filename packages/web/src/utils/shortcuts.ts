@@ -29,6 +29,11 @@ export const ACTION_SHORTCUT_LABELS: Record<POSActionShortcutId, string> = {
   void: 'Void',
   cashDrawer: 'Cash drawer',
   cashMovement: 'Cash in / out',
+  staff: 'Change line staff',
+  unit: 'Choose unit quantity',
+  discountValue: 'Discount by value',
+  discountPercent: 'Discount by percent',
+  closePopup: 'Close quick popup',
 };
 
 export const ACTION_SHORTCUT_HINTS: Record<POSActionShortcutId, string> = {
@@ -45,7 +50,30 @@ export const ACTION_SHORTCUT_HINTS: Record<POSActionShortcutId, string> = {
   void: 'Voids the current bill. When an overlay is open this key closes it first.',
   cashDrawer: 'Opens the shift money declare window, or the cash drawer once a shift is open.',
   cashMovement: 'Records cash added to or taken out of the drawer mid-shift, so the close still reconciles.',
+  staff: 'Opens the staff picker for the most recently added cart line.',
+  unit: 'Works only in the unit popup and returns to the quantity choices.',
+  discountValue: 'Works only in the discount popup and selects value mode.',
+  discountPercent: 'Works only in the discount popup and selects percentage mode.',
+  closePopup: 'Works only in unit, staff, customer and discount quick popups.',
 };
+
+/** Numeric item keys are deliberately scoped to an open picker. */
+export function popupNumberIndex(event: Pick<KeyboardEvent, 'code' | 'ctrlKey' | 'altKey' | 'shiftKey' | 'metaKey'>): number | null {
+  if (event.ctrlKey || event.altKey || event.shiftKey || event.metaKey) return null;
+  const match = /^(?:Numpad|Digit)([1-9])$/.exec(event.code);
+  return match ? Number(match[1]) - 1 : null;
+}
+
+/** Till denomination shortcuts shared by open/close shift and cash in/out. */
+export function denominationShortcutValue(event: Pick<KeyboardEvent, 'code' | 'ctrlKey' | 'altKey' | 'shiftKey' | 'metaKey'>): number | null {
+  if (event.shiftKey || event.metaKey || (event.ctrlKey && event.altKey)) return null;
+  const match = /^(?:Numpad|Digit)([125])$/.exec(event.code);
+  if (!match) return null;
+  const digit = match[1];
+  if (event.altKey) return ({ '5': 5000, '2': 2000, '1': 1000 } as const)[digit as '5' | '2' | '1'];
+  if (event.ctrlKey) return ({ '5': 5, '2': 2, '1': 1 } as const)[digit as '5' | '2' | '1'];
+  return ({ '5': 500, '2': 100, '1': 50 } as const)[digit as '5' | '2' | '1'];
+}
 
 /**
  * Reports every binding claimed more than once, mapped to the things claiming

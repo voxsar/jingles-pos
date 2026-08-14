@@ -301,7 +301,9 @@ function initSchema(db: Database.Database): void {
       name TEXT NOT NULL,
       tier TEXT NOT NULL,
       phone TEXT,
-      email TEXT
+      email TEXT,
+      notes TEXT,
+      credit_limit REAL NOT NULL DEFAULT 0
     );
 
     CREATE TABLE IF NOT EXISTS categories (
@@ -572,6 +574,8 @@ function initSchema(db: Database.Database): void {
   `);
 
   ensureColumn(db, 'users', 'email', 'TEXT');
+  ensureColumn(db, 'customers', 'notes', 'TEXT');
+  ensureColumn(db, 'customers', 'credit_limit', 'REAL NOT NULL DEFAULT 0');
   ensureColumn(db, 'products', 'variants_json', 'TEXT');
   ensureColumn(db, 'held_sale_lines', 'variant_id', 'TEXT');
   ensureColumn(db, 'held_sale_lines', 'variant_code', 'TEXT');
@@ -637,15 +641,26 @@ function seedReferenceData(db: Database.Database): void {
 
     for (const customer of SAMPLE_CUSTOMERS) {
       db.prepare(`
-        INSERT INTO customers (id, code, name, tier, phone, email)
-        VALUES (?, ?, ?, ?, ?, ?)
+        INSERT INTO customers (id, code, name, tier, phone, email, notes, credit_limit)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
           code = excluded.code,
           name = excluded.name,
           tier = excluded.tier,
           phone = excluded.phone,
-          email = excluded.email
-      `).run(customer.id, customer.code, customer.name, customer.tier, customer.phone ?? null, customer.email ?? null);
+          email = excluded.email,
+          notes = excluded.notes,
+          credit_limit = excluded.credit_limit
+      `).run(
+        customer.id,
+        customer.code,
+        customer.name,
+        customer.tier,
+        customer.phone ?? null,
+        customer.email ?? null,
+        customer.notes ?? null,
+        customer.creditLimit,
+      );
     }
   });
 
@@ -804,6 +819,8 @@ function getCustomers(db: Database.Database): Customer[] {
     tier: row.tier,
     phone: row.phone ?? undefined,
     email: row.email ?? undefined,
+    notes: row.notes ?? undefined,
+    creditLimit: Number(row.credit_limit ?? 0),
   }));
 }
 
@@ -2332,8 +2349,6 @@ export function buildLocalZReport(shiftId: string): ZReportSummary {
     paymentCounts,
     discountedLineCount: Number(lineTotals?.discounted_line_count ?? 0),
     productCount: Number(lineTotals?.product_count ?? 0),
-  };
-}
     paymentDetails: paymentRows
       .filter((row) => row.method === 'CHEQUE' || row.method === 'BANK_TRANSFER')
       .map((row) => {
@@ -2367,3 +2382,5 @@ export function buildLocalZReport(shiftId: string): ZReportSummary {
         };
       }),
     customerCollections: [],
+  };
+}
