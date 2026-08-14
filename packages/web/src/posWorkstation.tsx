@@ -360,6 +360,7 @@ export default function PosWorkstation() {
   const [variantSelection, setVariantSelection] = useState<VariantSelectionRequest | null>(null);
   const [unitSelection, setUnitSelection] = useState<UnitSelectionRequest | null>(null);
   const [isStaffPickerOpen, setIsStaffPickerOpen] = useState(false);
+  const [isStaffDirectoryOpen, setIsStaffDirectoryOpen] = useState(false);
   const [isCustomerPickerOpen, setIsCustomerPickerOpen] = useState(false);
   const [isDiscountOpen, setIsDiscountOpen] = useState(false);
   const [isPaymentOpen, setIsPaymentOpen] = useState(false);
@@ -2006,6 +2007,7 @@ export default function PosWorkstation() {
     || isSettingsOpen
     || isCashMovementOpen
     || isCustomersOpen
+    || isStaffDirectoryOpen
     || isCustomerPickerOpen
     || isStaffPickerOpen
     || isDiscountOpen
@@ -2275,6 +2277,7 @@ export default function PosWorkstation() {
         onCashAction={handleOpenMoneyModal}
         onOpenHelp={() => setIsHelpOpen(true)}
         onOpenOrders={() => setIsOrdersOpen(true)}
+        onOpenStaff={() => setIsStaffDirectoryOpen(true)}
         onOpenCustomers={() => {
           setCustomersModalInitialId(null);
           setIsCustomersOpen(true);
@@ -2650,6 +2653,13 @@ export default function PosWorkstation() {
         />
       )}
 
+      {isStaffDirectoryOpen && (
+        <StaffDirectoryModal
+          onClose={() => setIsStaffDirectoryOpen(false)}
+          users={users}
+        />
+      )}
+
       {isReturnOpen && (
         <ReturnModal
           isLoading={salesLoading}
@@ -2813,6 +2823,7 @@ type HeaderBarProps = {
   onCashAction: () => void;
   onOpenHelp: () => void;
   onOpenCustomers: () => void;
+  onOpenStaff: () => void;
   onOpenOrders: () => void;
   onCashMovement: () => void;
   shortcuts: POSActionShortcuts;
@@ -2899,6 +2910,9 @@ function HeaderBar(props: HeaderBarProps) {
         </button>
         <button className="ghost-button" onClick={props.onOpenCustomers} title="Search customers and view their accounts">
           Customers
+        </button>
+        <button className="ghost-button" onClick={props.onOpenStaff} title="View and search POS staff">
+          Staff
         </button>
         <button className="ghost-button" onClick={props.onOpenHelp} title={`Help & user guide (${formatBinding(props.shortcuts.help)})`}>
           Help
@@ -5267,6 +5281,39 @@ function StaffSelectionModal(props: {
             </button>
           ))}
         </div>
+      </div>
+    </ModalShell>
+  );
+}
+
+function StaffDirectoryModal(props: { users: POSUser[]; onClose: () => void }) {
+  const [query, setQuery] = useState('');
+  const visible = props.users.filter((person) => (
+    `${person.code} ${person.name} ${person.initials} ${person.email ?? ''} ${person.role}`
+      .toLowerCase()
+      .includes(query.trim().toLowerCase())
+  ));
+
+  return (
+    <ModalShell onClose={props.onClose} title={`Staff (${props.users.length})`} width="wide">
+      <div className="quick-picker-stack">
+        <input
+          autoFocus
+          className="glass-input"
+          placeholder="Search staff by name, code, email, or role"
+          value={query}
+          onChange={(event) => setQuery(event.target.value)}
+        />
+        <div className="quick-picker-grid">
+          {visible.map((person) => (
+            <div className="quick-picker-card" key={person.id}>
+              <b>{person.name}</b>
+              <span>{person.code} · {person.role}</span>
+              <span>{person.email ?? 'No email'} · {person.initials}</span>
+            </div>
+          ))}
+        </div>
+        {visible.length === 0 && <div className="orders-empty">No staff match this search.</div>}
       </div>
     </ModalShell>
   );
