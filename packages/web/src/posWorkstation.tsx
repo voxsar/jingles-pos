@@ -5308,8 +5308,8 @@ function StaffDirectoryModal(props: { users: POSUser[]; onClose: () => void }) {
           {visible.map((person) => (
             <div className="quick-picker-card" key={person.id}>
               <b>{person.name}</b>
-              <span>{person.code} · {person.role}</span>
-              <span>{person.email ?? 'No email'} · {person.initials}</span>
+              <span>{person.code} - {person.role}</span>
+              <span>{person.email ?? 'No email'} - {person.initials}</span>
             </div>
           ))}
         </div>

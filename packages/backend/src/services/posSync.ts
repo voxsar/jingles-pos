@@ -1159,6 +1159,7 @@ export async function appendEvent(
   options?: {
     preservePendingState?: boolean;
     skipInventoryProjection?: boolean;
+    ignoreProjectionErrors?: boolean;
   },
 ): Promise<{ storedEvent: SyncEvent; applied: boolean; conflict?: SyncConflict }> {
   const duplicate = await tx.syncEvent.findFirst({
@@ -1212,7 +1213,17 @@ export async function appendEvent(
   });
 
   if (applyEvent) {
-    await applyProjectionEvent(tx, event, options);
+    try {
+      await applyProjectionEvent(tx, event, options);
+    } catch (error) {
+      if (!options?.ignoreProjectionErrors) throw error;
+      console.warn('[POS sync] Remote event projection was skipped without stopping sync', {
+        eventId: event.id,
+        eventType: event.eventType,
+        aggregateId: event.aggregateId,
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
   }
 
   await updateDeviceState(tx, event.deviceId, stored.terminalId, event.sequenceNum, event.vectorClock, undefined, {
@@ -1584,7 +1595,7 @@ export async function appendRemoteEventsFromServer(
           ...event,
           state: SyncEventState.CONFIRMED,
         },
-        { skipInventoryProjection: true },
+        { skipInventoryProjection: true, ignoreProjectionErrors: true },
       );
 
       if (result.conflict) {
@@ -1798,6 +1809,14 @@ async function runSyncWithUpstream(options?: {
         })),
       },
     });
+    updateSyncProgress({
+      running: true,
+      phase: 'catalog',
+      label: 'Preparing staff, customers, and products',
+      detail: 'Refreshing reference data before replaying remote transactions.',
+      percent: 18,
+    });
+    await refreshLocalCatalogFromUpstream();
     updateSyncProgress({
       running: true,
       phase: 'pushing',
