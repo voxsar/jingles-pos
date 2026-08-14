@@ -46,8 +46,18 @@ export interface ReceiptBranding {
 export const DEFAULT_RECEIPT_BRANDING: ReceiptBranding = {
   name: 'JINGLES',
   addressLines: ['42 Main Street, Colombo'],
-  footerLines: ['Thank you for shopping with Jingles.', 'Please retain this receipt for returns.'],
+  footerLines: ['System by The Red Sun', 'Live Long and Prosper', 'theredsun.org'],
 };
+
+/** Distinct salespeople credited across a sale's lines, in first-seen order. */
+function saleSalespeople(lines: Array<{ salespersonName?: string }>): string {
+  const seen = new Set<string>();
+  for (const line of lines) {
+    const name = line.salespersonName?.trim();
+    if (name) seen.add(name);
+  }
+  return seen.size ? [...seen].join(', ') : 'N/A';
+}
 
 function getPrintingBridge() {
   return typeof window !== 'undefined' ? window.electronAPI?.printing : undefined;
@@ -146,11 +156,12 @@ export function buildReceiptDocument(
   const blocks: POSPrintBlock[] = [
     { type: 'text', value: branding.name, align: 'center', bold: true, wide: true },
     ...branding.addressLines.map((line): POSPrintBlock => ({ type: 'text', value: line, align: 'center' })),
-    { type: 'text', value: terminalCode, align: 'center' },
     { type: 'divider' },
-    { type: 'columns', left: 'Receipt', right: sale.receiptNumber },
+    // Cashier + terminal on the left half of each line, salesman(s) + receipt
+    // number on the right half — same pairing a two-column paper till uses.
+    { type: 'columns', left: `Cashier ${sale.cashierName}`, right: `Salesman ${saleSalespeople(sale.lines)}` },
+    { type: 'columns', left: `Terminal ${terminalCode}`, right: `Receipt ${sale.receiptNumber}` },
     { type: 'columns', left: 'Date', right: formatDateTime(sale.createdAt) },
-    { type: 'columns', left: 'Cashier', right: sale.cashierName },
     { type: 'columns', left: 'Customer', right: sale.customerName ?? 'Walk-in customer' },
     { type: 'columns', left: 'Items', right: formatInteger(itemCount) },
     { type: 'divider' },
@@ -220,7 +231,10 @@ export function buildReceiptDocument(
     { type: 'columns', left: 'Balance due', right: formatCurrency(balanceDue) },
     { type: 'columns', left: 'Change', right: formatCurrency(changeDue), bold: true },
     { type: 'feed', lines: 1 },
-    { type: 'barcode', value: sale.receiptNumber, symbology: 'CODE128', height: 50 },
+    // A QR code packs the receipt number into a fraction of the vertical
+    // space a CODE128 barcode wide enough to stay scannable would need.
+    { type: 'qr', value: sale.receiptNumber, size: 6 },
+    { type: 'text', value: sale.receiptNumber, align: 'center' },
     ...branding.footerLines.map((line): POSPrintBlock => ({ type: 'text', value: line, align: 'center' })),
   );
 

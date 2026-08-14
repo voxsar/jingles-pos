@@ -113,12 +113,14 @@ import {
   buildQuotationDocument,
   buildReceiptDocument,
   buildZReportDocument,
+  DEFAULT_RECEIPT_BRANDING,
   discoverPrinters,
   hasPrintingBridge,
   printLabelDocument,
   printReceiptDocument,
   testPrinter,
 } from './printing';
+import { receiptQrSvg } from './utils/receiptQrCode';
 import { useBarcodeScanner } from './useBarcodeScanner';
 import {
   addCounts,
@@ -6470,27 +6472,40 @@ function ReceiptModal(
   )));
   const balanceDue = Math.max(0, roundToMoney(props.sale.total - paidAmount));
   const itemCount = props.sale.lines.reduce((sum, line) => sum + line.quantity, 0);
+  const salespeople = [...new Set(props.sale.lines.map((line) => line.salespersonName?.trim()).filter(Boolean))];
+  const salespersonLabel = salespeople.length ? salespeople.join(', ') : 'N/A';
 
   return (
     <ModalShell onClose={props.onClose} title="Receipt" width="narrow">
       <div className="receipt-paper">
         <div className="receipt-header">
-          <div className="receipt-brand">JINGLES</div>
-          <div>42 Main Street, Colombo</div>
-          <div>{props.terminalCode}</div>
+          <div className="receipt-brand">{DEFAULT_RECEIPT_BRANDING.name}</div>
+          {DEFAULT_RECEIPT_BRANDING.addressLines.map((line) => <div key={line}>{line}</div>)}
         </div>
         <div className="receipt-divider" />
-        <div className="receipt-meta">
-          <span>Receipt</span>
-          <span>{props.sale.receiptNumber}</span>
+        {/* Cashier + terminal on the left, salesman(s) + receipt number on the
+            right — mirrors the two-column layout of a paper till receipt. */}
+        <div className="receipt-meta-grid">
+          <div className="receipt-meta-cell">
+            <span className="receipt-meta-label">Cashier</span>
+            <span className="receipt-meta-value">{props.sale.cashierName}</span>
+          </div>
+          <div className="receipt-meta-cell receipt-meta-cell-end">
+            <span className="receipt-meta-label">Salesman</span>
+            <span className="receipt-meta-value">{salespersonLabel}</span>
+          </div>
+          <div className="receipt-meta-cell">
+            <span className="receipt-meta-label">Terminal</span>
+            <span className="receipt-meta-value">{props.terminalCode}</span>
+          </div>
+          <div className="receipt-meta-cell receipt-meta-cell-end">
+            <span className="receipt-meta-label">Receipt</span>
+            <span className="receipt-meta-value">{props.sale.receiptNumber}</span>
+          </div>
         </div>
         <div className="receipt-meta">
           <span>Date</span>
           <span>{formatDateTime(props.sale.createdAt)}</span>
-        </div>
-        <div className="receipt-meta">
-          <span>Cashier</span>
-          <span>{props.sale.cashierName}</span>
         </div>
         <div className="receipt-meta">
           <span>Customer</span>
@@ -6574,9 +6589,13 @@ function ReceiptModal(
             <span>{formatCurrency(changeDue)}</span>
           </div>
         </div>
+        <div
+          className="receipt-qr"
+          dangerouslySetInnerHTML={{ __html: receiptQrSvg(props.sale.receiptNumber) }}
+        />
         <div className="receipt-footer">
-          <div>Thank you for shopping with Jingles.</div>
-          <div>Please retain this receipt for returns.</div>
+          <div>{props.sale.receiptNumber}</div>
+          {DEFAULT_RECEIPT_BRANDING.footerLines.map((line) => <div key={line}>{line}</div>)}
         </div>
       </div>
 

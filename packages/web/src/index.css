@@ -3174,6 +3174,50 @@ button {
   font-size: 12px;
 }
 
+/* Cashier/terminal on the left, salesman(s)/receipt on the right — a strict
+   2-column grid so both sides stay aligned regardless of value length. */
+.receipt-meta-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  row-gap: 4px;
+  column-gap: 12px;
+  padding: 2px 0 6px;
+  font-size: 12px;
+}
+
+.receipt-meta-cell {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.receipt-meta-cell-end {
+  text-align: right;
+  align-items: flex-end;
+}
+
+.receipt-meta-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--ink-2);
+}
+
+.receipt-meta-value {
+  font-weight: 600;
+  overflow-wrap: break-word;
+}
+
+.receipt-qr {
+  display: flex;
+  justify-content: center;
+  margin: 14px 0 4px;
+}
+
+.receipt-qr svg {
+  display: block;
+}
+
 .receipt-meta span:first-child,
 .receipt-payment-detail span:first-child {
   color: var(--ink-2);
@@ -3555,6 +3599,21 @@ button {
   .z-slot-list { display: none; }
   .z-slot-layout { display: block; }
   .z-reading-paper { border: 0; width: 80mm; padding: 4mm; }
+}
+
+@media print {
+  /* Size the browser-print fallback (no ESC/POS bridge) to an actual 80mm
+     roll instead of printing the on-screen modal card at its default width. */
+  @page { size: 80mm auto; margin: 0; }
+  .receipt-paper {
+    width: 76mm;
+    margin: 0 auto;
+    border: 0;
+    border-radius: 0;
+    padding: 3mm 2mm;
+    background: #fff;
+    color: #111;
+  }
 }
 
 /* ---------------------------------------------------------------------------
