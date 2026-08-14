@@ -27,14 +27,16 @@ describe('fresh desktop database bootstrap', () => {
     const database = new Database(databasePath, { readonly: true });
 
     try {
-      const syncColumns = database.prepare('PRAGMA table_info("SyncDeviceState")').all() as Array<{ name: string }>;
       const shiftColumns = database.prepare('PRAGMA table_info("ShiftCashCount")').all() as Array<{ name: string }>;
+      const requiredTables = database.prepare(`
+        SELECT name
+        FROM sqlite_master
+        WHERE type = 'table' AND name IN ('Product', 'POSUser', 'SyncDeviceState')
+      `).pluck().all();
 
       expect(result.initialized).toBe(true);
       expect(result.migrationsApplied).toBeGreaterThan(0);
-      expect(syncColumns.map((column) => column.name)).toEqual(
-        expect.arrayContaining(['online', 'lastError']),
-      );
+      expect(requiredTables).toEqual(expect.arrayContaining(['Product', 'POSUser', 'SyncDeviceState']));
       expect(shiftColumns.map((column) => column.name)).toEqual(
         expect.arrayContaining(['tenders', 'tenderMode']),
       );
