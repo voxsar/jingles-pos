@@ -12,6 +12,7 @@ import {
   getDesktopSqliteDatabaseUrl,
 } from './runtimePaths';
 import { bootstrapFreshDesktopDatabase } from './freshDatabaseBootstrap';
+import { ServiceSupervisor } from './serviceSupervisor';
 import { readDesktopSettings } from '../desktopSettings';
 import { getLanSyncTargetPath } from '../network/lanSyncTarget';
 
@@ -20,7 +21,14 @@ export type LocalApiServer = {
   close: () => Promise<void>;
 };
 
+export type LocalApiServerOptions = {
+  onDiagnostic?: (message: string, error?: unknown) => void;
+};
+
 type LocalBackendChild = ReturnType<typeof spawn>;
+type LocalBackendService = {
+  child: LocalBackendChild | null;
+};
 
 const LOCAL_API_PORT = Number(process.env.JINGLES_POS_LOCAL_API_PORT ?? 3631);
 const LOCAL_API_URL = `http://127.0.0.1:${LOCAL_API_PORT}`;
@@ -184,7 +192,7 @@ export function getDesktopLocalApiUrl() {
   return LOCAL_API_URL;
 }
 
-export async function startLocalApiServer(): Promise<LocalApiServer> {
+export async function startLocalApiServer(options: LocalApiServerOptions = {}): Promise<LocalApiServer> {
   const localBackendEntryPath = getDesktopBackendEntryPath();
   if (!fs.existsSync(localBackendEntryPath)) {
     throw new Error(
@@ -202,34 +210,83 @@ export async function startLocalApiServer(): Promise<LocalApiServer> {
       `[POSBackend] Initialized a fresh desktop database with ${bootstrapResult.migrationsApplied} migrations.`,
     );
   }
-  const desktopSettings = readDesktopSettings();
-  const fileEnv = readDesktopEnvOverrides(runtimeRoot);
-  const baseEnv = { ...fileEnv, ...process.env };
-  const child = spawn(process.execPath, [localBackendEntryPath], {
-    cwd: runtimeRoot,
-    env: {
-      ...baseEnv,
-      NODE_PATH: [path.join(app.getAppPath(), 'node_modules'), baseEnv.NODE_PATH ?? '']
-        .filter(Boolean)
-        .join(path.delimiter),
-      ELECTRON_RUN_AS_NODE: '1',
-      PORT: String(LOCAL_API_PORT),
-      DATABASE_URL: getDesktopSqliteDatabaseUrl(),
-      JINGLES_POS_LOCAL_MODE: 'true',
-      JINGLES_POS_DEVICE_ID: baseEnv.JINGLES_POS_DEVICE_ID?.trim() || DEFAULT_DEVICE_ID,
-      JINGLES_POS_TERMINAL_ID: baseEnv.JINGLES_POS_TERMINAL_ID?.trim() || DEFAULT_TERMINAL_ID,
-      JINGLES_POS_UPSTREAM_URL: desktopSettings.syncUrl,
-      JINGLES_POS_LAN_UPSTREAM_FILE: getLanSyncTargetPath(),
+  const diagnose = (message: string, error?: unknown) => {
+    if (typeof error === 'undefined') {
+      console.warn(`[POSBackend] ${message}`);
+    } else {
+      console.error(`[POSBackend] ${message}`, error);
+    }
+    options.onDiagnostic?.(message, error);
+  };
+
+  const supervisor = new ServiceSupervisor<LocalBackendService>({
+    name: 'POS desktop backend',
+    start: async (onUnexpectedExit) => {
+      const existingHealth = await probeBackendHealth(LOCAL_API_URL);
+      if (existingHealth.ok) {
+        diagnose(`Reusing the healthy backend already listening at ${LOCAL_API_URL}.`);
+        return { child: null };
+      }
+
+      const desktopSettings = readDesktopSettings();
+      const fileEnv = readDesktopEnvOverrides(runtimeRoot);
+      const baseEnv = { ...fileEnv, ...process.env };
+      const child = spawn(process.execPath, [localBackendEntryPath], {
+        cwd: runtimeRoot,
+        env: {
+          ...baseEnv,
+          NODE_PATH: [path.join(app.getAppPath(), 'node_modules'), baseEnv.NODE_PATH ?? '']
+            .filter(Boolean)
+            .join(path.delimiter),
+          ELECTRON_RUN_AS_NODE: '1',
+          PORT: String(LOCAL_API_PORT),
+          DATABASE_URL: getDesktopSqliteDatabaseUrl(),
+          JINGLES_POS_LOCAL_MODE: 'true',
+          JINGLES_POS_DEVICE_ID: baseEnv.JINGLES_POS_DEVICE_ID?.trim() || DEFAULT_DEVICE_ID,
+          JINGLES_POS_TERMINAL_ID: baseEnv.JINGLES_POS_TERMINAL_ID?.trim() || DEFAULT_TERMINAL_ID,
+          JINGLES_POS_UPSTREAM_URL: desktopSettings.syncUrl,
+          JINGLES_POS_LAN_UPSTREAM_FILE: getLanSyncTargetPath(),
+        },
+        stdio: ['ignore', 'pipe', 'pipe'],
+        windowsHide: true,
+      });
+
+      let ready = false;
+      child.once('exit', (code, signal) => {
+        if (ready) {
+          onUnexpectedExit(`code ${code ?? 'unknown'}, signal ${signal ?? 'none'}`);
+        }
+      });
+
+      const getOutputTail = pipeChildLogs(child);
+      try {
+        await waitForBackendReady(child, getOutputTail);
+        ready = true;
+        if (child.exitCode !== null) {
+          throw new Error(`POS desktop backend exited with code ${child.exitCode} immediately after startup.`);
+        }
+        return { child };
+      } catch (error) {
+        await stopChildProcess(child);
+        throw error;
+      }
     },
-    stdio: ['ignore', 'pipe', 'pipe'],
-    windowsHide: true,
+    stop: async (service) => {
+      if (service.child) {
+        await stopChildProcess(service.child);
+      }
+    },
+    probe: () => probeBackendHealth(LOCAL_API_URL),
+    healthIntervalMs: 3_000,
+    healthFailureThreshold: 2,
+    restartDelaysMs: [500, 1_000, 2_000, 5_000, 10_000, 30_000],
+    onDiagnostic: diagnose,
   });
 
-  const getOutputTail = pipeChildLogs(child);
-  const readyUrl = await waitForBackendReady(child, getOutputTail);
+  await supervisor.start();
 
   return {
-    url: readyUrl,
-    close: () => stopChildProcess(child),
+    url: LOCAL_API_URL,
+    close: () => supervisor.close(),
   };
 }

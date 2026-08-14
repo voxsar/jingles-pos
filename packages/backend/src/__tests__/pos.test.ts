@@ -16,7 +16,11 @@ const mockTx = {
     findUnique: jest.fn(),
   },
   pOSShift: {
+    findFirst: jest.fn(),
     findUnique: jest.fn(),
+  },
+  pOSUser: {
+    findMany: jest.fn(),
   },
 };
 
@@ -29,11 +33,13 @@ jest.mock('../prisma', () => ({
     syncConflict: mockTx.syncConflict,
     configEntry: mockTx.configEntry,
     pOSShift: mockTx.pOSShift,
+    pOSUser: mockTx.pOSUser,
   },
 }));
 
 const { buildDrawerContents, buildZReport, confirmPlayback, getLocalSyncStatus, getServerVectorClock } = require('../services/posSync') as typeof import('../services/posSync');
 const { authenticate, resolveUnlockMode } = require('../routes/auth') as typeof import('../routes/auth');
+const { respondWithExistingOpenShift } = require('../routes/pos') as typeof import('../routes/pos');
 const { buildFtsQuery } = require('../services/localCatalog') as typeof import('../services/localCatalog');
 const originalPosSyncAppToken = process.env.JINGLES_POS_SYNC_APP_TOKEN;
 const originalLegacyPosSyncAppToken = process.env.POS_SYNC_APP_TOKEN;
@@ -66,6 +72,69 @@ describe('event sourced POS backend services', () => {
     expect(status).toHaveBeenCalledWith(401);
     expect(json).toHaveBeenCalledWith({ error: 'Missing authorization token' });
     expect(next).not.toHaveBeenCalled();
+  });
+
+  it('recovers an existing shift for the same cashier instead of opening a duplicate', async () => {
+    const shift = {
+      id: 'shift-existing',
+      terminalId: 'terminal-live',
+      branchId: 'branch-live',
+      userId: 'cashier-live',
+      status: 'OPEN',
+      openingFloat: 500,
+      closingFloat: null,
+      openedAt: new Date('2026-08-12T00:45:19+05:30'),
+      closedAt: null,
+      notes: null,
+    };
+    mockTx.pOSShift.findFirst.mockResolvedValue(shift);
+    mockTx.pOSUser.findMany.mockResolvedValue([{
+      id: 'cashier-live',
+      name: 'Live Cashier',
+    }]);
+    const response = {
+      status: jest.fn(),
+      json: jest.fn(),
+    };
+    response.status.mockReturnValue(response);
+    response.json.mockReturnValue(response);
+
+    const result = await respondWithExistingOpenShift(
+      response as never,
+      'terminal-live',
+      'cashier-live',
+    );
+
+    expect(response.status).toHaveBeenCalledWith(200);
+    expect(response.json).toHaveBeenCalledWith(expect.objectContaining({
+      id: 'shift-existing',
+      terminalId: 'terminal-live',
+      cashierId: 'cashier-live',
+    }));
+    expect(result).toBe(response);
+  });
+
+  it('reports a shift conflict when another cashier owns the terminal', async () => {
+    mockTx.pOSShift.findFirst.mockResolvedValue({
+      id: 'shift-existing',
+      terminalId: 'terminal-live',
+      userId: 'cashier-other',
+      status: 'OPEN',
+      openedAt: new Date('2026-08-12T00:45:19+05:30'),
+    });
+    const response = {
+      status: jest.fn(),
+      json: jest.fn(),
+    };
+    response.status.mockReturnValue(response);
+    response.json.mockReturnValue(response);
+
+    await respondWithExistingOpenShift(response as never, 'terminal-live', 'cashier-live');
+
+    expect(response.status).toHaveBeenCalledWith(409);
+    expect(response.json).toHaveBeenCalledWith({
+      error: 'Terminal terminal-live already has an open shift',
+    });
   });
 
   it('builds the server vector clock from device state rows', async () => {

@@ -416,6 +416,33 @@ async function getUserMap(): Promise<Map<string, any>> {
   return new Map(users.map((user) => [user.id, user]));
 }
 
+export async function respondWithExistingOpenShift(
+  res: Response,
+  terminalId: unknown,
+  cashierId: unknown,
+) {
+  if (typeof terminalId !== 'string' || !terminalId.trim()) {
+    return null;
+  }
+
+  const existingShift = await prisma.pOSShift.findFirst({
+    where: { terminalId, status: ShiftStatus.OPEN },
+    orderBy: { openedAt: 'desc' },
+  });
+  if (!existingShift) {
+    return null;
+  }
+
+  if (existingShift.userId !== cashierId) {
+    return res.status(409).json({
+      error: `Terminal ${terminalId} already has an open shift`,
+    });
+  }
+
+  const userMap = await getUserMap();
+  return res.status(200).json(mapShift(existingShift, userMap));
+}
+
 router.get('/bootstrap', async (req: Request, res: Response) => {
   try {
     const terminalId = typeof req.query.terminalId === 'string' ? req.query.terminalId : undefined;
@@ -545,6 +572,15 @@ router.get('/products/barcode/:barcode', async (req: Request, res: Response) => 
 router.post('/shifts/open', async (req: Request, res: Response) => {
   try {
     await ensureSeedData();
+    const existingShiftResponse = await respondWithExistingOpenShift(
+      res,
+      req.body.terminalId,
+      req.body.cashierId,
+    );
+    if (existingShiftResponse) {
+      return existingShiftResponse;
+    }
+
     const shiftId = req.body.shiftId ?? uuidv4();
     await applyWorkstationEvent(req, {
       aggregateType: 'shift',
@@ -566,6 +602,21 @@ router.post('/shifts/open', async (req: Request, res: Response) => {
     const shift = await prisma.pOSShift.findUnique({ where: { id: shiftId } });
     return res.status(201).json(shift ? mapShift(shift, userMap) : null);
   } catch (error) {
+    if (error instanceof Error && error.message.includes('already has an open shift')) {
+      try {
+        const existingShiftResponse = await respondWithExistingOpenShift(
+          res,
+          req.body.terminalId,
+          req.body.cashierId,
+        );
+        if (existingShiftResponse) {
+          return existingShiftResponse;
+        }
+      } catch (recoveryError) {
+        console.error('Failed to recover an existing open shift', recoveryError);
+      }
+    }
+
     console.error(error);
     return res.status(500).json({ error: 'Failed to open shift' });
   }

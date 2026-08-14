@@ -167,7 +167,9 @@ async function stopLocalApiServer() {
 
 async function restartLocalApiServer() {
   await stopLocalApiServer();
-  localApiServer = await startLocalApiServer();
+  localApiServer = await startLocalApiServer({
+    onDiagnostic: (message, error) => appendStartupLog(message, error),
+  });
   return localApiServer;
 }
 

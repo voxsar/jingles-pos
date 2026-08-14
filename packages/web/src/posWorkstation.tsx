@@ -79,6 +79,7 @@ import {
 import { useAuth } from './auth/AuthContext';
 import HelpGuide from './help/HelpGuide';
 import SearchableSelect, { type SearchableSelectHandle } from './components/SearchableSelect';
+import { resolveBootstrapTerminal } from './terminalBootstrap';
 import {
   closeCustomerDisplay,
   hasCustomerDisplayBridge,
@@ -226,11 +227,12 @@ export default function PosWorkstation() {
   const { logout, user: authUser } = useAuth();
   const [bootstrapData, setBootstrapData] = useState<POSBootstrap | null>(null);
   const [bootError, setBootError] = useState('');
-  const [loadedTerminalId, setLoadedTerminalId] = useState(DEFAULT_TERMINAL_ID);
+  const [loadedTerminalId, setLoadedTerminalId] = useState('');
   const [isLoading, setIsLoading] = useState(true);
 
   const [selectedBranchId, setSelectedBranchId] = useState('');
-  const [selectedTerminalId, setSelectedTerminalId] = useState(DEFAULT_TERMINAL_ID);
+  const [selectedTerminalId, setSelectedTerminalId] = useState('');
+  const bootstrapRequestIdRef = useRef(0);
   const [session, setSession] = useState<SessionState | null>(null);
 
   const [activeShift, setActiveShift] = useState<ShiftSummary | null>(null);
@@ -468,7 +470,7 @@ export default function PosWorkstation() {
     };
   }, []);
 
-  const currentTerminalId = session?.terminalId ?? selectedTerminalId ?? loadedTerminalId ?? DEFAULT_TERMINAL_ID;
+  const currentTerminalId = session?.terminalId || selectedTerminalId || loadedTerminalId || DEFAULT_TERMINAL_ID;
 
   const branches = bootstrapData?.branches ?? [];
   const terminals = bootstrapData?.terminals ?? [];
@@ -722,32 +724,44 @@ export default function PosWorkstation() {
   const syncBadge = useMemo(() => formatSyncBadge(syncStatus), [syncStatus]);
 
   const reloadBootstrap = useCallback(
-    async (terminalId: string, options: { silent?: boolean } = {}) => {
+    async (terminalId?: string, options: { silent?: boolean } = {}) => {
+      const requestedTerminalId = terminalId?.trim() || undefined;
+      const requestId = ++bootstrapRequestIdRef.current;
       if (!options.silent) {
         setIsLoading(true);
       }
       setBootError('');
 
       try {
-        const data = await bootstrapPOS({ terminalId });
-        const resolvedTerminal = data.terminals.find((item) => item.id === terminalId) ?? data.terminals[0] ?? null;
+        const data = await bootstrapPOS(requestedTerminalId ? { terminalId: requestedTerminalId } : undefined);
+        if (requestId !== bootstrapRequestIdRef.current) {
+          return;
+        }
+
+        const resolvedTerminal = resolveBootstrapTerminal(data, requestedTerminalId);
         const resolvedBranchId = resolvedTerminal?.branchId ?? data.branches[0]?.id ?? '';
 
         setBootstrapData(data);
-        setLoadedTerminalId(resolvedTerminal?.id ?? terminalId);
-        setSelectedTerminalId((previous) => previous || resolvedTerminal?.id || terminalId);
-        setSelectedBranchId((previous) => previous || resolvedBranchId);
+        setLoadedTerminalId(resolvedTerminal?.id ?? '');
+        setSelectedTerminalId(resolvedTerminal?.id ?? '');
+        setSelectedBranchId(resolvedBranchId);
         const walkInId = resolveDefaultCustomerId(data.customers);
         const walkIn = data.customers.find((customer) => customer.id === walkInId);
         setCustomerId((previous) => previous || walkInId);
         setDefaultTierLabel((previous) => previous || walkIn?.tier || 'Retail');
-        setActiveShift(data.activeShift ?? null);
+        const resolvedActiveShift = data.activeShift ?? null;
+        setActiveShift(
+          resolvedActiveShift?.terminalId === resolvedTerminal?.id ? resolvedActiveShift : null,
+        );
         setSyncStatus(data.syncStatus);
       } catch (error) {
+        if (requestId !== bootstrapRequestIdRef.current) {
+          return;
+        }
         const message = error instanceof Error ? error.message : 'Failed to load POS workstation';
         setBootError(message);
       } finally {
-        if (!options.silent) {
+        if (!options.silent && requestId === bootstrapRequestIdRef.current) {
           setIsLoading(false);
         }
       }
@@ -906,7 +920,7 @@ export default function PosWorkstation() {
   }, [showNotice]);
 
   useEffect(() => {
-    void reloadBootstrap(DEFAULT_TERMINAL_ID);
+    void reloadBootstrap();
   }, [reloadBootstrap]);
 
   useEffect(() => {
