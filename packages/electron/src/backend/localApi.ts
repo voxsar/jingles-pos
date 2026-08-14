@@ -6,9 +6,12 @@ import { app } from 'electron';
 import { DEFAULT_DEVICE_ID, DEFAULT_TERMINAL_ID } from '@jingles/shared';
 import {
   getDesktopBackendEntryPath,
+  getDesktopBackendResourcePath,
+  getDesktopDatabasePath,
   getDesktopRuntimeRoot,
   getDesktopSqliteDatabaseUrl,
 } from './runtimePaths';
+import { bootstrapFreshDesktopDatabase } from './freshDatabaseBootstrap';
 import { readDesktopSettings } from '../desktopSettings';
 import { getLanSyncTargetPath } from '../network/lanSyncTarget';
 
@@ -78,7 +81,14 @@ function readDesktopEnvOverrides(runtimeRoot: string) {
 }
 
 function pipeChildLogs(child: LocalBackendChild) {
+  let outputTail = '';
+  const appendOutput = (stream: 'stdout' | 'stderr', chunk: unknown) => {
+    outputTail += `[${stream}] ${String(chunk)}`;
+    outputTail = outputTail.slice(-32_000);
+  };
+
   child.stdout?.on('data', (chunk) => {
+    appendOutput('stdout', chunk);
     const message = String(chunk).trim();
     if (message) {
       console.log(`[POSBackend] ${message}`);
@@ -86,11 +96,14 @@ function pipeChildLogs(child: LocalBackendChild) {
   });
 
   child.stderr?.on('data', (chunk) => {
+    appendOutput('stderr', chunk);
     const message = String(chunk).trim();
     if (message) {
       console.error(`[POSBackend] ${message}`);
     }
   });
+
+  return () => outputTail.trim();
 }
 
 function probeBackendHealth(url: string, timeoutMs = 1000) {
@@ -123,13 +136,22 @@ function probeBackendHealth(url: string, timeoutMs = 1000) {
   });
 }
 
-async function waitForBackendReady(child: LocalBackendChild, timeoutMs = 30000) {
+async function waitForBackendReady(
+  child: LocalBackendChild,
+  getOutputTail: () => string,
+  timeoutMs = 30000,
+) {
   const startedAt = Date.now();
   let lastProbeError = 'No probe attempts completed.';
 
   while (Date.now() - startedAt < timeoutMs) {
     if (child.exitCode !== null) {
-      throw new Error(`POS desktop backend exited with code ${child.exitCode} before becoming ready.`);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      const outputTail = getOutputTail();
+      throw new Error(
+        `POS desktop backend exited with code ${child.exitCode} before becoming ready.`
+        + (outputTail ? `\n\nBackend output:\n${outputTail}` : ''),
+      );
     }
 
     const result = await probeBackendHealth(LOCAL_API_URL);
@@ -171,6 +193,15 @@ export async function startLocalApiServer(): Promise<LocalApiServer> {
   }
 
   const runtimeRoot = getDesktopRuntimeRoot();
+  const bootstrapResult = bootstrapFreshDesktopDatabase(
+    getDesktopDatabasePath(),
+    getDesktopBackendResourcePath('prisma', 'migrations'),
+  );
+  if (bootstrapResult.initialized) {
+    console.log(
+      `[POSBackend] Initialized a fresh desktop database with ${bootstrapResult.migrationsApplied} migrations.`,
+    );
+  }
   const desktopSettings = readDesktopSettings();
   const fileEnv = readDesktopEnvOverrides(runtimeRoot);
   const baseEnv = { ...fileEnv, ...process.env };
@@ -194,8 +225,8 @@ export async function startLocalApiServer(): Promise<LocalApiServer> {
     windowsHide: true,
   });
 
-  pipeChildLogs(child);
-  const readyUrl = await waitForBackendReady(child);
+  const getOutputTail = pipeChildLogs(child);
+  const readyUrl = await waitForBackendReady(child, getOutputTail);
 
   return {
     url: readyUrl,
