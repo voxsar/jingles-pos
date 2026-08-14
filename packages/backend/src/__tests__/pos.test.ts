@@ -1,4 +1,4 @@
-import { CashCountMode } from '@jingles/shared';
+import { CashCountMode, UserRole } from '@jingles/shared';
 
 const mockTx = {
   syncDeviceState: {
@@ -151,7 +151,7 @@ describe('event sourced POS backend services', () => {
     mockTx.customer.findFirst.mockResolvedValue(null);
 
     await mergeHandshakeReferenceData(
-      [{ id: 'local-user', code: 'ST-1', email: 'staff@example.com', name: 'Staff One', initials: 'SO', role: 'Staff' }],
+      [{ id: 'local-user', code: 'ST-1', email: 'staff@example.com', name: 'Staff One', initials: 'SO', role: UserRole.CASHIER }],
       [{ id: 'customer-1', code: 'C-1', name: 'Customer One', tier: 'Retail', creditLimit: 10_000 }],
     );
 

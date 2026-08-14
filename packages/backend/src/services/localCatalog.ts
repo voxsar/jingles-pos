@@ -1,6 +1,6 @@
 import path from 'path';
 import { createHash } from 'crypto';
-import type { ProductPriceTier, Product, ProductVariant, SharedCatalogSnapshot } from '@jingles/shared';
+import type { POSUser, ProductPriceTier, Product, ProductVariant, SharedCatalogSnapshot } from '@jingles/shared';
 import prisma from '../prisma';
 import { isLocalPosBackendMode } from '../localMode';
 
@@ -447,16 +447,25 @@ function replaceLocalCatalogSnapshotDirect(snapshot: SharedCatalogSnapshot) {
           : undefined;
         const oldId = duplicate?.id ?? emailDuplicate?.id;
         if (oldId) {
+          // Free the unique business keys, create the server identity, and only
+          // then repoint historical foreign keys so SQLite FK checks stay valid.
+          db.prepare('UPDATE "Customer" SET code=NULL, email=NULL WHERE id=?').run(oldId);
+          upsertCustomer.run(
+            customer.id, customer.code || null, customer.name, customer.tier,
+            customer.email ?? null, customer.phone ?? null, customer.notes ?? null,
+            customer.creditLimit ?? 0,
+          );
           db.prepare('UPDATE "Sale" SET customerId=? WHERE customerId=?').run(customer.id, oldId);
           db.prepare('UPDATE "HeldSale" SET customerId=? WHERE customerId=?').run(customer.id, oldId);
           db.prepare('UPDATE "CreditPayment" SET customerId=? WHERE customerId=?').run(customer.id, oldId);
           db.prepare('DELETE FROM "Customer" WHERE id=?').run(oldId);
+        } else {
+          upsertCustomer.run(
+            customer.id, customer.code || null, customer.name, customer.tier,
+            customer.email ?? null, customer.phone ?? null, customer.notes ?? null,
+            customer.creditLimit ?? 0,
+          );
         }
-        upsertCustomer.run(
-          customer.id, customer.code || null, customer.name, customer.tier,
-          customer.email ?? null, customer.phone ?? null, customer.notes ?? null,
-          customer.creditLimit ?? 0,
-        );
       }
       if (snapshot.branches?.length) {
         const ids = snapshot.branches.map((branch) => `'${branch.id.replace(/'/g, "''")}'`).join(',');
@@ -561,7 +570,7 @@ export async function getLocalCatalogSnapshot(): Promise<SharedCatalogSnapshot> 
       email: user.email ?? undefined,
       name: user.name,
       initials: user.initials,
-      role: user.role as SharedCatalogSnapshot['users'][number]['role'],
+      role: user.role as POSUser['role'],
     })),
     customers: customers.map((customer) => ({
       id: customer.id,
