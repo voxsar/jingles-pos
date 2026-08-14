@@ -49,6 +49,9 @@ export async function ensureLocalSchemaCompat() {
   await ensureColumn('SaleLine', 'variantName', 'TEXT');
   await ensureColumn('SaleLine', 'variant_attributes_json', 'TEXT');
   await ensureColumn('ReturnLine', 'variantId', 'TEXT');
+  await ensureColumn('ShiftCashCount', 'tenders', 'TEXT');
+  await ensureColumn('ShiftCashCount', 'tenderMode', 'TEXT');
+  await ensureColumn('ShiftCashCount', 'reason', 'TEXT');
 
   if (!(await hasTable('ConfigEntry'))) {
     await prisma.$executeRawUnsafe(`
