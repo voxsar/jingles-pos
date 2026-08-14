@@ -554,7 +554,11 @@ async function applyHeldSaleRecalledEvent(
   });
 }
 
-async function applySaleCompletedEvent(tx: Tx, event: SyncEvent<CompleteSaleInput>): Promise<void> {
+async function applySaleCompletedEvent(
+  tx: Tx,
+  event: SyncEvent<CompleteSaleInput>,
+  options?: { adjustCachedStock?: boolean },
+): Promise<void> {
   const payload = event.payload;
   const existingSale = await tx.sale.findUnique({ where: { id: event.aggregateId } });
   if (existingSale) {
@@ -571,25 +575,27 @@ async function applySaleCompletedEvent(tx: Tx, event: SyncEvent<CompleteSaleInpu
     throw new Error('Payment total does not match the sale total');
   }
 
-  for (const line of payload.lines) {
-    await updateProductStock(tx, {
-      productId: line.productId,
-      variantId: line.variantId,
-      delta: -line.quantity,
-      branchId: payload.branchId,
-      vectorClock: event.vectorClock,
-    });
-
-    await tx.inventoryEvent.create({
-      data: {
-        id: `${event.id}-inventory-${line.productId}`,
+  if (options?.adjustCachedStock !== false) {
+    for (const line of payload.lines) {
+      await updateProductStock(tx, {
         productId: line.productId,
-        eventType: 'SALE_DEDUCTED',
-        quantity: line.quantity,
-        reference: payload.receiptNumber,
-        notes: `Sale ${payload.receiptNumber}`,
-      },
-    });
+        variantId: line.variantId,
+        delta: -line.quantity,
+        branchId: payload.branchId,
+        vectorClock: event.vectorClock,
+      });
+
+      await tx.inventoryEvent.create({
+        data: {
+          id: `${event.id}-inventory-${line.productId}`,
+          productId: line.productId,
+          eventType: 'SALE_DEDUCTED',
+          quantity: line.quantity,
+          reference: payload.receiptNumber,
+          notes: `Sale ${payload.receiptNumber}`,
+        },
+      });
+    }
   }
 
   await tx.sale.create({
@@ -1065,7 +1071,11 @@ async function applyCreditPaymentRecordedEvent(
   });
 }
 
-async function applyProjectionEvent(tx: Tx, event: SyncEvent): Promise<void> {
+async function applyProjectionEvent(
+  tx: Tx,
+  event: SyncEvent,
+  options?: { skipInventoryProjection?: boolean },
+): Promise<void> {
   switch (event.eventType) {
     case SyncEventType.SHIFT_OPENED:
       await applyShiftOpenedEvent(tx, event as SyncEvent<ShiftOpenInput>);
@@ -1086,7 +1096,9 @@ async function applyProjectionEvent(tx: Tx, event: SyncEvent): Promise<void> {
       await applyHeldSaleRecalledEvent(tx, event as SyncEvent<{ heldSaleId: string }>);
       return;
     case SyncEventType.SALE_COMPLETED:
-      await applySaleCompletedEvent(tx, event as SyncEvent<CompleteSaleInput>);
+      await applySaleCompletedEvent(tx, event as SyncEvent<CompleteSaleInput>, {
+        adjustCachedStock: !options?.skipInventoryProjection,
+      });
       return;
     case SyncEventType.SALE_VOIDED:
       await applySaleVoidedEvent(tx, event as SyncEvent<{ saleId: string; reason?: string; managerId?: string }>);
@@ -1146,6 +1158,7 @@ export async function appendEvent(
   event: SyncEvent,
   options?: {
     preservePendingState?: boolean;
+    skipInventoryProjection?: boolean;
   },
 ): Promise<{ storedEvent: SyncEvent; applied: boolean; conflict?: SyncConflict }> {
   const duplicate = await tx.syncEvent.findFirst({
@@ -1199,7 +1212,7 @@ export async function appendEvent(
   });
 
   if (applyEvent) {
-    await applyProjectionEvent(tx, event);
+    await applyProjectionEvent(tx, event, options);
   }
 
   await updateDeviceState(tx, event.deviceId, stored.terminalId, event.sequenceNum, event.vectorClock, undefined, {
@@ -1571,6 +1584,7 @@ export async function appendRemoteEventsFromServer(
           ...event,
           state: SyncEventState.CONFIRMED,
         },
+        { skipInventoryProjection: true },
       );
 
       if (result.conflict) {
