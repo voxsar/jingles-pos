@@ -1630,7 +1630,11 @@ async function fetchUpstreamJson<T>(
             ? { [POS_SYNC_APP_TOKEN_HEADER]: appToken }
             : { Authorization: `Bearer ${syncAuth!.token}` }),
         },
-        signal: AbortSignal.timeout(candidate.mode === 'lan' ? 2500 : 15_000),
+        signal: AbortSignal.timeout(
+          candidate.mode === 'lan'
+            ? (path === '/api/pos/catalog/snapshot' ? 20_000 : 2_500)
+            : (path === '/api/pos/catalog/snapshot' ? 120_000 : 60_000),
+        ),
         ...(typeof options?.body === 'undefined'
           ? {}
           : { body: JSON.stringify(options.body) }),
