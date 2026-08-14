@@ -3509,6 +3509,22 @@ button {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
+  .customers-workspace {
+    flex-direction: column;
+  }
+
+  .customers-list-pane {
+    width: 100%;
+  }
+
+  .customers-list {
+    max-height: 220px;
+  }
+
+  .customers-profile-grid {
+    grid-template-columns: 1fr;
+  }
+
   .split-payment-main {
     display: flex;
   }
