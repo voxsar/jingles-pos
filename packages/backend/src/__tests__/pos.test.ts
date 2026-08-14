@@ -21,6 +21,14 @@ const mockTx = {
   },
   pOSUser: {
     findMany: jest.fn(),
+    findFirst: jest.fn(),
+    update: jest.fn(),
+    create: jest.fn(),
+  },
+  customer: {
+    findFirst: jest.fn(),
+    update: jest.fn(),
+    create: jest.fn(),
   },
 };
 
@@ -34,12 +42,13 @@ jest.mock('../prisma', () => ({
     configEntry: mockTx.configEntry,
     pOSShift: mockTx.pOSShift,
     pOSUser: mockTx.pOSUser,
+    customer: mockTx.customer,
   },
 }));
 
 const { buildDrawerContents, buildZReport, confirmPlayback, getLocalSyncStatus, getServerVectorClock } = require('../services/posSync') as typeof import('../services/posSync');
 const { authenticate, resolveUnlockMode } = require('../routes/auth') as typeof import('../routes/auth');
-const { respondWithExistingOpenShift } = require('../routes/pos') as typeof import('../routes/pos');
+const { mergeHandshakeReferenceData, respondWithExistingOpenShift } = require('../routes/pos') as typeof import('../routes/pos');
 const { buildFtsQuery } = require('../services/localCatalog') as typeof import('../services/localCatalog');
 const originalPosSyncAppToken = process.env.JINGLES_POS_SYNC_APP_TOKEN;
 const originalLegacyPosSyncAppToken = process.env.POS_SYNC_APP_TOKEN;
@@ -135,6 +144,24 @@ describe('event sourced POS backend services', () => {
     expect(response.json).toHaveBeenCalledWith({
       error: 'Terminal terminal-live already has an open shift',
     });
+  });
+
+  it('merges the complete workstation staff and customer lists during sync handshake', async () => {
+    mockTx.pOSUser.findFirst.mockResolvedValue({ id: 'server-user' });
+    mockTx.customer.findFirst.mockResolvedValue(null);
+
+    await mergeHandshakeReferenceData(
+      [{ id: 'local-user', code: 'ST-1', email: 'staff@example.com', name: 'Staff One', initials: 'SO', role: 'Staff' }],
+      [{ id: 'customer-1', code: 'C-1', name: 'Customer One', tier: 'Retail', creditLimit: 10_000 }],
+    );
+
+    expect(mockTx.pOSUser.update).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: 'server-user' },
+      data: expect.objectContaining({ code: 'ST-1', name: 'Staff One' }),
+    }));
+    expect(mockTx.customer.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ id: 'customer-1', code: 'C-1', creditLimit: 10_000 }),
+    }));
   });
 
   it('builds the server vector clock from device state rows', async () => {

@@ -2724,6 +2724,20 @@ button {
   font-family: var(--mono);
 }
 
+.product-list-price {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 3px;
+  white-space: nowrap;
+}
+
+.product-list-currency {
+  font-size: 0.68em;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  opacity: 0.78;
+}
+
 .payment-layout {
   display: grid;
   grid-template-columns: 220px minmax(0, 1fr);
@@ -2745,7 +2759,8 @@ button {
 }
 
 .payment-method-key,
-.cash-denomination-key {
+.cash-denomination-key,
+.payment-complete-key {
   display: inline-grid;
   place-items: center;
   min-width: 26px;
@@ -2756,6 +2771,13 @@ button {
   background: rgba(13, 122, 91, 0.1);
   color: var(--accent);
   font: 800 12px var(--mono);
+}
+
+.payment-complete-key {
+  margin-left: 8px;
+  border-color: rgba(255, 255, 255, 0.45);
+  background: rgba(255, 255, 255, 0.16);
+  color: inherit;
 }
 
 .quick-cash {

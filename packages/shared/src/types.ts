@@ -163,6 +163,7 @@ export interface SharedCatalogSnapshot {
   generatedAt: string;
   branches?: Branch[];
   users?: POSUser[];
+  customers?: Customer[];
   categories: Category[];
   products: Product[];
 }
@@ -1013,6 +1014,8 @@ export interface SyncHandshakeRequest {
   deviceId: string;
   terminalId: string;
   vectorClock: VectorClock;
+  users?: POSUser[];
+  customers?: Customer[];
 }
 
 export interface SyncPlaybackRequest {

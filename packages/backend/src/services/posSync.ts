@@ -1764,6 +1764,24 @@ async function runSyncWithUpstream(options?: {
         deviceId,
         terminalId,
         vectorClock: currentStatus.localVectorClock,
+        users: (await prisma.pOSUser.findMany({ orderBy: { code: 'asc' } })).map((user) => ({
+          id: user.id,
+          code: user.code,
+          email: user.email ?? undefined,
+          name: user.name,
+          initials: user.initials,
+          role: user.role,
+        })),
+        customers: (await prisma.customer.findMany({ orderBy: { name: 'asc' } })).map((customer) => ({
+          id: customer.id,
+          code: customer.code ?? customer.id,
+          name: customer.name,
+          tier: customer.tier,
+          phone: customer.phone ?? undefined,
+          email: customer.email ?? undefined,
+          notes: customer.notes ?? undefined,
+          creditLimit: customer.creditLimit ?? 0,
+        })),
       },
     });
     updateSyncProgress({
@@ -1823,7 +1841,7 @@ async function runSyncWithUpstream(options?: {
         running: true,
         phase: 'catalog',
         label: 'Refreshing product catalog',
-        detail: 'Downloading current products, prices, branches, and users from cloud.',
+        detail: 'Downloading current products, prices, branches, staff, and customers from cloud.',
         percent: 82,
       });
       await refreshLocalCatalogFromUpstream();

@@ -327,6 +327,7 @@ function replaceLocalCatalogSnapshotDirect(snapshot: SharedCatalogSnapshot) {
       .update(JSON.stringify({
         branches: snapshot.branches ?? [],
         users: snapshot.users ?? [],
+        customers: snapshot.customers ?? [],
         categories: snapshot.categories,
         products: snapshot.products,
       }))
@@ -377,6 +378,13 @@ function replaceLocalCatalogSnapshotDirect(snapshot: SharedCatalogSnapshot) {
       VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
       ON CONFLICT(id) DO UPDATE SET code=excluded.code, email=excluded.email, name=excluded.name,
         initials=excluded.initials, role=excluded.role, updatedAt=CURRENT_TIMESTAMP
+    `);
+    const upsertCustomer = db.prepare(`
+      INSERT INTO "Customer" (id, code, name, tier, email, phone, notes, creditLimit, createdAt, updatedAt)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+      ON CONFLICT(id) DO UPDATE SET code=excluded.code, name=excluded.name, tier=excluded.tier,
+        email=excluded.email, phone=excluded.phone, notes=excluded.notes,
+        creditLimit=excluded.creditLimit, updatedAt=CURRENT_TIMESTAMP
     `);
     const userReferenceTables = [
       ['POSShift', 'userId'],
@@ -429,6 +437,26 @@ function replaceLocalCatalogSnapshotDirect(snapshot: SharedCatalogSnapshot) {
           db.prepare('DELETE FROM "POSUser" WHERE email=? AND id<>?').run(user.email, user.id);
         }
         upsertUser.run(user.id, user.code, user.email ?? null, user.name, user.initials, user.role);
+      }
+      for (const customer of snapshot.customers ?? []) {
+        const duplicate = customer.code
+          ? db.prepare('SELECT id FROM "Customer" WHERE code=? AND id<>?').get(customer.code, customer.id) as { id: string } | undefined
+          : undefined;
+        const emailDuplicate = !duplicate && customer.email
+          ? db.prepare('SELECT id FROM "Customer" WHERE email=? AND id<>?').get(customer.email, customer.id) as { id: string } | undefined
+          : undefined;
+        const oldId = duplicate?.id ?? emailDuplicate?.id;
+        if (oldId) {
+          db.prepare('UPDATE "Sale" SET customerId=? WHERE customerId=?').run(customer.id, oldId);
+          db.prepare('UPDATE "HeldSale" SET customerId=? WHERE customerId=?').run(customer.id, oldId);
+          db.prepare('UPDATE "CreditPayment" SET customerId=? WHERE customerId=?').run(customer.id, oldId);
+          db.prepare('DELETE FROM "Customer" WHERE id=?').run(oldId);
+        }
+        upsertCustomer.run(
+          customer.id, customer.code || null, customer.name, customer.tier,
+          customer.email ?? null, customer.phone ?? null, customer.notes ?? null,
+          customer.creditLimit ?? 0,
+        );
       }
       if (snapshot.branches?.length) {
         const ids = snapshot.branches.map((branch) => `'${branch.id.replace(/'/g, "''")}'`).join(',');
@@ -507,7 +535,10 @@ function replaceLocalCatalogSnapshotDirect(snapshot: SharedCatalogSnapshot) {
 }
 
 export async function getLocalCatalogSnapshot(): Promise<SharedCatalogSnapshot> {
-  const [categories, products] = await Promise.all([
+  const [branches, users, customers, categories, products] = await Promise.all([
+    prisma.branch.findMany({ orderBy: { code: 'asc' } }),
+    prisma.pOSUser.findMany({ orderBy: { code: 'asc' } }),
+    prisma.customer.findMany({ orderBy: { name: 'asc' } }),
     prisma.category.findMany({
       orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }],
     }),
@@ -523,6 +554,25 @@ export async function getLocalCatalogSnapshot(): Promise<SharedCatalogSnapshot> 
 
   return {
     generatedAt: new Date().toISOString(),
+    branches,
+    users: users.map((user) => ({
+      id: user.id,
+      code: user.code,
+      email: user.email ?? undefined,
+      name: user.name,
+      initials: user.initials,
+      role: user.role as SharedCatalogSnapshot['users'][number]['role'],
+    })),
+    customers: customers.map((customer) => ({
+      id: customer.id,
+      code: customer.code ?? customer.id,
+      name: customer.name,
+      tier: customer.tier,
+      phone: customer.phone ?? undefined,
+      email: customer.email ?? undefined,
+      notes: customer.notes ?? undefined,
+      creditLimit: customer.creditLimit ?? 0,
+    })),
     categories: categories.map((category) => ({
       id: category.id,
       name: category.name,
@@ -583,6 +633,28 @@ export async function replaceLocalCatalogSnapshot(snapshot: SharedCatalogSnapsho
         create: user,
         update: { code: user.code, email: user.email, name: user.name, initials: user.initials, role: user.role },
       });
+    }
+    for (const customer of snapshot.customers ?? []) {
+      const existing = await tx.customer.findFirst({
+        where: {
+          OR: [
+            { id: customer.id },
+            ...(customer.code ? [{ code: customer.code }] : []),
+            ...(customer.email ? [{ email: customer.email }] : []),
+          ],
+        },
+      });
+      const data = {
+        code: customer.code || null,
+        name: customer.name,
+        tier: customer.tier,
+        email: customer.email ?? null,
+        phone: customer.phone ?? null,
+        notes: customer.notes ?? null,
+        creditLimit: customer.creditLimit ?? 0,
+      };
+      if (existing) await tx.customer.update({ where: { id: existing.id }, data });
+      else await tx.customer.create({ data: { id: customer.id, ...data } });
     }
     if (snapshot.branches?.length) {
       await tx.terminal.updateMany({ where: { branchId: { notIn: snapshot.branches.map((branch) => branch.id) } }, data: { branchId: snapshot.branches[0]!.id } });

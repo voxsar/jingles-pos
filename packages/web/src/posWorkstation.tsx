@@ -223,6 +223,21 @@ function formatStockQuantity(value: number): string {
   }).format(value);
 }
 
+function ProductListPrice({ value }: { value: number }) {
+  const hasDecimal = Math.abs(value - Math.trunc(value)) > 0.000001;
+  const amount = new Intl.NumberFormat('en-LK', {
+    minimumFractionDigits: hasDecimal ? 2 : 0,
+    maximumFractionDigits: hasDecimal ? 2 : 0,
+  }).format(value);
+
+  return (
+    <span className="product-list-price">
+      <span className="product-list-currency">Rs</span>
+      <span>{amount}</span>
+    </span>
+  );
+}
+
 const PAYMENT_OPTIONS: Array<{ method: PaymentMethod; label: string; short: string; keyCode: string; keyLabel: string }> = [
   { method: PaymentMethod.CASH, label: 'Cash', short: 'CA', keyCode: 'KeyC', keyLabel: 'C' },
   { method: PaymentMethod.VISA, label: 'Visa', short: 'VI', keyCode: 'KeyV', keyLabel: 'V' },
@@ -3177,7 +3192,7 @@ function ProductPanel(props: ProductPanelProps) {
                       </div>
                       <div className="product-tile-footer">
                         <div className="product-stock">Stock {formatStockQuantity(product.stockOnHand)}</div>
-                        <div className="product-price">{formatCurrency(product.priceTiers[0]?.price ?? 0)}</div>
+                        <div className="product-price"><ProductListPrice value={product.priceTiers[0]?.price ?? 0} /></div>
                       </div>
                     </button>
                   ))}
@@ -5114,7 +5129,7 @@ function SearchOverlay(
                     {(product.variants?.length ?? 0) > 0 ? ` - ${formatInteger(product.variants?.length ?? 0)} variants` : ''}
                   </div>
                 </div>
-                <div className="search-result-price">{formatCurrency(product.priceTiers[0]?.price ?? 0)}</div>
+                <div className="search-result-price"><ProductListPrice value={product.priceTiers[0]?.price ?? 0} /></div>
               </button>
               {props.canPrintLabels && (
                 <button
@@ -5767,6 +5782,7 @@ function PaymentModal(
   const [denominationCounts, setDenominationCounts] = useState<Record<string, number>>({});
   const [isTenderedManuallyEdited, setIsTenderedManuallyEdited] = useState(false);
   const [isUnderpaymentWarning, setIsUnderpaymentWarning] = useState(false);
+  const [completeAfterAdd, setCompleteAfterAdd] = useState(false);
   const tenderedInputRef = useRef<HTMLInputElement>(null);
   const splitPaid = roundToMoney(splitPayments.reduce((sum, payment) => sum + payment.amount, 0));
   const splitRemaining = Math.max(0, roundToMoney(props.total - splitPaid));
@@ -5999,6 +6015,20 @@ function PaymentModal(
         && target !== tenderedInputRef.current;
       if (isOtherTextEntry || event.ctrlKey || event.altKey || event.metaKey) return;
 
+      if (event.code === 'NumpadSubtract' || event.code === 'Minus') {
+        event.preventDefault();
+        event.stopPropagation();
+        if (splitRemaining <= 0 || (props.allowShortPayments && splitPaid > 0 && tendered <= 0)) {
+          completeSplitPayment();
+        } else if (method === PaymentMethod.CASH && tendered >= splitRemaining) {
+          setCompleteAfterAdd(true);
+          addSplitPayment();
+        } else {
+          rejectUnderpayment();
+        }
+        return;
+      }
+
       if (method === PaymentMethod.CASH) {
         const cashShortcut = PAYMENT_CASH_SHORTCUTS.find((shortcut) => shortcut.code === event.code);
         if (cashShortcut) {
@@ -6067,6 +6097,12 @@ function PaymentModal(
       : splitPayments;
     props.onComplete(completedPayments);
   };
+
+  useEffect(() => {
+    if (!completeAfterAdd || splitRemaining > 0 || splitPayments.length === 0) return;
+    setCompleteAfterAdd(false);
+    props.onComplete(splitPayments);
+  }, [completeAfterAdd, props, splitPayments, splitRemaining]);
 
   return (
     <ModalShell initialFocusRef={tenderedInputRef} trapFocus onClose={handleClose} title="Payment" width="payment">
@@ -6361,7 +6397,7 @@ function PaymentModal(
                 {method === PaymentMethod.INSTALLMENT ? 'Add installment plan' : 'Add payment source'}
               </button>
               <button className="btn-primary full-width" disabled={splitPaid <= 0 || (!props.allowShortPayments && splitRemaining > 0)} onClick={completeSplitPayment}>
-                Complete sale
+                Complete sale <kbd className="payment-complete-key">Num −</kbd>
               </button>
             </div>
           ) : (

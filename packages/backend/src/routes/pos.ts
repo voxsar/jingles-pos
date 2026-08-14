@@ -6,8 +6,10 @@ import {
   DEFAULT_DEVICE_ID,
   DEFAULT_TERMINAL_ID,
   CompleteSaleInput,
+  Customer,
   HeldSaleSummary,
   POSBootstrap,
+  POSUser,
   SaleStatus,
   SharedCatalogSnapshot,
   ShiftStatus,
@@ -221,7 +223,64 @@ async function getCatalogSnapshot(res: Response) {
     return getLocalCatalogSnapshot();
   }
 
-  return res.locals.sharedCatalog as SharedCatalogSnapshot;
+  const sharedCatalog = res.locals.sharedCatalog as SharedCatalogSnapshot;
+  const [users, customers] = await Promise.all([
+    prisma.pOSUser.findMany({ orderBy: { code: 'asc' } }),
+    prisma.customer.findMany({ orderBy: { name: 'asc' } }),
+  ]);
+  return {
+    ...sharedCatalog,
+    users: users.map(mapUser),
+    customers: customers.map(mapCustomer),
+  };
+}
+
+export async function mergeHandshakeReferenceData(users: POSUser[], customers: Customer[]) {
+  await prisma.$transaction(async (tx) => {
+    for (const user of users) {
+      const existing = await tx.pOSUser.findFirst({
+        where: {
+          OR: [
+            { id: user.id },
+            { code: user.code },
+            ...(user.email ? [{ email: user.email }] : []),
+          ],
+        },
+      });
+      const data = {
+        code: user.code,
+        email: user.email ?? null,
+        name: user.name,
+        initials: user.initials,
+        role: user.role,
+      };
+      if (existing) await tx.pOSUser.update({ where: { id: existing.id }, data });
+      else await tx.pOSUser.create({ data: { id: user.id, ...data } });
+    }
+
+    for (const customer of customers) {
+      const existing = await tx.customer.findFirst({
+        where: {
+          OR: [
+            { id: customer.id },
+            ...(customer.code ? [{ code: customer.code }] : []),
+            ...(customer.email ? [{ email: customer.email }] : []),
+          ],
+        },
+      });
+      const data = {
+        code: customer.code || null,
+        name: customer.name,
+        tier: customer.tier,
+        phone: customer.phone ?? null,
+        email: customer.email ?? null,
+        notes: customer.notes ?? null,
+        creditLimit: customer.creditLimit ?? 0,
+      };
+      if (existing) await tx.customer.update({ where: { id: existing.id }, data });
+      else await tx.customer.create({ data: { id: customer.id, ...data } });
+    }
+  });
 }
 
 async function getWorkstationProducts(
@@ -1381,6 +1440,10 @@ router.post('/local/sync/now', async (req: Request, res: Response) => {
 router.post('/sync/handshake', async (req: Request, res: Response) => {
   try {
     await ensureSeedData();
+    await mergeHandshakeReferenceData(
+      Array.isArray(req.body.users) ? req.body.users : [],
+      Array.isArray(req.body.customers) ? req.body.customers : [],
+    );
     const serverClock = await getServerVectorClock();
     const allEvents = await prisma.syncEvent.findMany();
     const clientClock = typeof req.body.vectorClock === 'object' && req.body.vectorClock != null
