@@ -2642,6 +2642,48 @@ button {
   text-align: center;
 }
 
+.discount-line-list {
+  display: flex;
+  max-height: 340px;
+  flex-direction: column;
+  gap: 10px;
+  overflow: auto;
+  padding: 4px;
+}
+
+.discount-line-choice {
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid rgba(77, 59, 38, 0.12);
+  border-radius: 16px;
+  background: var(--surface-card);
+  color: var(--ink-0);
+  text-align: left;
+}
+
+.discount-line-choice.active {
+  border-color: rgba(13, 122, 91, 0.4);
+  background: rgba(13, 122, 91, 0.1);
+}
+
+.discount-line-choice > span {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.discount-line-choice small {
+  color: var(--ink-2);
+}
+
+.discount-line-choice strong {
+  font-family: var(--mono);
+}
+
 .scope-row button,
 .quick-cash,
 .payment-method {

@@ -2454,12 +2454,17 @@ export default function PosWorkstation() {
 
       {isDiscountOpen && (
         <DiscountModal
+          cart={cart}
           currentAmount={billDiscount}
           subtotal={Math.max(0, totals.rawSubtotal - totals.lineDiscountTotal)}
           shortcuts={actionShortcuts}
           onClose={() => setIsDiscountOpen(false)}
           onConfirm={(amount) => {
             setBillDiscount(Math.max(0, amount));
+            setIsDiscountOpen(false);
+          }}
+          onLineConfirm={(lineId, discountPercent) => {
+            updateCartLineById(lineId, (line) => recalculateCartLine({ ...line, discountPercent }));
             setIsDiscountOpen(false);
           }}
         />
@@ -5065,6 +5070,11 @@ function UnitSelectionModal(props: {
   const unitLabel = props.product.unitLabel || 'unit';
 
   useEffect(() => {
+    quantityRef.current?.focus();
+    quantityRef.current?.select();
+  }, []);
+
+  useEffect(() => {
     const handleKey = (event: KeyboardEvent) => {
       if (bindingMatchesEvent(props.shortcuts.closePopup, event)) {
         event.preventDefault();
@@ -5077,10 +5087,14 @@ function UnitSelectionModal(props: {
         quantityRef.current?.select();
         return;
       }
-      const index = popupNumberIndex(event);
-      if (index != null) {
+      // The number row beside the backtick chooses a suggestion. Numpad digits
+      // remain ordinary input so a cashier can type any custom quantity.
+      const suggestionMatch = !event.ctrlKey && !event.altKey && !event.shiftKey && !event.metaKey
+        ? /^Digit([1-9])$/.exec(event.code)
+        : null;
+      if (suggestionMatch != null) {
         event.preventDefault();
-        props.onConfirm(index + 1);
+        props.onConfirm(Number(suggestionMatch[1]));
         return;
       }
       if (event.key === 'Enter') {
@@ -5115,7 +5129,7 @@ function UnitSelectionModal(props: {
             onChange={(event) => setQuantity(Math.max(1, Number(event.target.value) || 1))}
           />
         </LabelBlock>
-        <div className="quick-picker-help">Numpad 1-9 selects immediately. {formatBinding(props.shortcuts.closePopup)} closes.</div>
+        <div className="quick-picker-help">Top number row 1-9 selects a suggestion. Use the numpad for a custom quantity. {formatBinding(props.shortcuts.closePopup)} closes.</div>
       </div>
     </ModalShell>
   );
@@ -5209,16 +5223,63 @@ function CustomerSelectionModal(props: {
 }
 
 function DiscountModal(props: {
+  cart: CartLine[];
   currentAmount: number;
   subtotal: number;
   shortcuts: POSActionShortcuts;
   onClose: () => void;
   onConfirm: (amount: number) => void;
+  onLineConfirm: (lineId: string, discountPercent: number) => void;
 }) {
   const [mode, setMode] = useState<'value' | 'percent'>('value');
+  const [scope, setScope] = useState<'all' | 'line'>('all');
+  const [selectedLineId, setSelectedLineId] = useState(props.cart[0]?.uid ?? '');
   const [value, setValue] = useState(props.currentAmount);
   const inputRef = useRef<HTMLInputElement>(null);
-  const amount = mode === 'percent' ? props.subtotal * Math.max(0, value) / 100 : Math.max(0, value);
+  const altLineNumberRef = useRef('');
+  const selectedLine = props.cart.find((line) => line.uid === selectedLineId) ?? null;
+  const selectedGross = selectedLine == null ? 0 : selectedLine.unitPrice * selectedLine.quantity;
+  const discountBase = scope === 'all' ? props.subtotal : selectedGross;
+  const amount = mode === 'percent' ? discountBase * Math.max(0, value) / 100 : Math.max(0, value);
+
+  const currentValue = useCallback((nextScope: 'all' | 'line', nextMode: 'value' | 'percent', lineId = selectedLineId) => {
+    if (nextScope === 'all') {
+      return nextMode === 'value'
+        ? props.currentAmount
+        : props.subtotal > 0 ? props.currentAmount / props.subtotal * 100 : 0;
+    }
+    const line = props.cart.find((entry) => entry.uid === lineId);
+    if (!line) return 0;
+    return nextMode === 'value' ? line.discountAmount : line.discountPercent;
+  }, [props.cart, props.currentAmount, props.subtotal, selectedLineId]);
+
+  const chooseScope = useCallback((nextScope: 'all' | 'line') => {
+    setScope(nextScope);
+    setValue(currentValue(nextScope, mode));
+  }, [currentValue, mode]);
+
+  const chooseMode = useCallback((nextMode: 'value' | 'percent') => {
+    setMode(nextMode);
+    setValue(currentValue(scope, nextMode));
+  }, [currentValue, scope]);
+
+  const chooseLineByNumber = useCallback((lineNumber: number) => {
+    const line = props.cart[lineNumber - 1];
+    if (!line) return;
+    setScope('line');
+    setSelectedLineId(line.uid);
+    setValue(currentValue('line', mode, line.uid));
+  }, [currentValue, mode, props.cart]);
+
+  const confirmDiscount = useCallback(() => {
+    if (scope === 'all') {
+      props.onConfirm(Math.min(props.subtotal, amount));
+      return;
+    }
+    if (!selectedLine || selectedGross <= 0) return;
+    const percent = mode === 'percent' ? value : amount / selectedGross * 100;
+    props.onLineConfirm(selectedLine.uid, Math.min(100, Math.max(0, percent)));
+  }, [amount, mode, props, scope, selectedGross, selectedLine, value]);
 
   useEffect(() => {
     inputRef.current?.focus();
@@ -5229,30 +5290,92 @@ function DiscountModal(props: {
     const handleKey = (event: KeyboardEvent) => {
       if (bindingMatchesEvent(props.shortcuts.closePopup, event)) {
         event.preventDefault();
+        event.stopPropagation();
         props.onClose();
       } else if (bindingMatchesEvent(props.shortcuts.discountValue, event)) {
         event.preventDefault();
-        setMode('value');
+        event.stopPropagation();
+        chooseMode('value');
       } else if (bindingMatchesEvent(props.shortcuts.discountPercent, event)) {
         event.preventDefault();
-        setMode('percent');
+        event.stopPropagation();
+        chooseMode('percent');
+      } else if (!event.ctrlKey && !event.altKey && !event.shiftKey && !event.metaKey && event.code === 'KeyA') {
+        event.preventDefault();
+        event.stopPropagation();
+        chooseScope('all');
+      } else if (!event.ctrlKey && !event.altKey && !event.shiftKey && !event.metaKey && event.code === 'KeyS') {
+        event.preventDefault();
+        event.stopPropagation();
+        chooseScope('line');
+      } else if (event.altKey) {
+        const digitMatch = /^(?:Digit|Numpad)([0-9])$/.exec(event.code);
+        if (digitMatch) {
+          event.preventDefault();
+          event.stopPropagation();
+          altLineNumberRef.current += digitMatch[1];
+        }
       } else if (event.key === 'Enter') {
         event.preventDefault();
-        props.onConfirm(Math.min(props.subtotal, amount));
+        event.stopPropagation();
+        confirmDiscount();
+      } else {
+        const index = popupNumberIndex(event);
+        if (index != null && props.cart[index]) {
+          event.preventDefault();
+          event.stopPropagation();
+          chooseLineByNumber(index + 1);
+        }
       }
     };
+    const handleKeyUp = (event: KeyboardEvent) => {
+      if (event.key !== 'Alt' || altLineNumberRef.current === '') return;
+      event.preventDefault();
+      event.stopPropagation();
+      const lineNumber = Number(altLineNumberRef.current);
+      altLineNumberRef.current = '';
+      chooseLineByNumber(lineNumber);
+    };
     window.addEventListener('keydown', handleKey, true);
-    return () => window.removeEventListener('keydown', handleKey, true);
-  }, [amount, props]);
+    window.addEventListener('keyup', handleKeyUp, true);
+    return () => {
+      window.removeEventListener('keydown', handleKey, true);
+      window.removeEventListener('keyup', handleKeyUp, true);
+    };
+  }, [chooseLineByNumber, chooseMode, chooseScope, confirmDiscount, props]);
 
   return (
     <ModalShell onClose={props.onClose} title="Bill discount" width="wide">
       <div className="discount-popup">
         <div className="theme-option-row">
-          <button className={`theme-option ${mode === 'value' ? 'active' : ''}`} onClick={() => setMode('value')}>
+          <button className={`theme-option ${scope === 'all' ? 'active' : ''}`} onClick={() => chooseScope('all')}>
+            <span className="theme-option-title">All items / whole bill</span><kbd>A</kbd>
+          </button>
+          <button className={`theme-option ${scope === 'line' ? 'active' : ''}`} onClick={() => chooseScope('line')}>
+            <span className="theme-option-title">Select cart item</span><kbd>S</kbd>
+          </button>
+        </div>
+        {scope === 'line' && (
+          <div className="discount-line-list">
+            {props.cart.map((line, index) => (
+              <button
+                className={`discount-line-choice ${line.uid === selectedLineId ? 'active' : ''}`}
+                key={line.uid}
+                onClick={() => chooseLineByNumber(index + 1)}
+              >
+                <kbd className="picker-number">{index + 1}</kbd>
+                <span><b>{line.name}</b><small>{line.sku} - {line.quantity} × {formatCurrency(line.unitPrice)}</small></span>
+                <strong>{formatCurrency(line.lineTotal)}</strong>
+              </button>
+            ))}
+            {props.cart.length > 9 && <div className="quick-picker-help">For line 10 or higher, hold Alt, type the full line number, then release Alt.</div>}
+          </div>
+        )}
+        <div className="theme-option-row">
+          <button className={`theme-option ${mode === 'value' ? 'active' : ''}`} onClick={() => chooseMode('value')}>
             <span className="theme-option-title">Value</span><kbd>{formatBinding(props.shortcuts.discountValue)}</kbd>
           </button>
-          <button className={`theme-option ${mode === 'percent' ? 'active' : ''}`} onClick={() => setMode('percent')}>
+          <button className={`theme-option ${mode === 'percent' ? 'active' : ''}`} onClick={() => chooseMode('percent')}>
             <span className="theme-option-title">Percent</span><kbd>{formatBinding(props.shortcuts.discountPercent)}</kbd>
           </button>
         </div>
@@ -5260,7 +5383,7 @@ function DiscountModal(props: {
         <div className="cash-total-bar"><span>Discount applied</span><b>{formatCurrency(Math.min(props.subtotal, amount))}</b></div>
         <div className="modal-actions">
           <button className="ghost-button" onClick={props.onClose}>{formatBinding(props.shortcuts.closePopup)} Close</button>
-          <button className="btn-primary" onClick={() => props.onConfirm(Math.min(props.subtotal, amount))}>Enter - Apply</button>
+          <button className="btn-primary" disabled={scope === 'line' && selectedLine == null} onClick={confirmDiscount}>Enter - Apply</button>
         </div>
       </div>
     </ModalShell>
