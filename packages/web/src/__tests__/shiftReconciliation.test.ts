@@ -48,8 +48,8 @@ function buildReport(overrides: Partial<ZReportSummary> = {}): ZReportSummary {
 }
 
 describe('resolveDefaultCustomerId', () => {
-  const walkIn: Customer = { id: 'cust-walk-in', code: 'C0001', name: 'Walk-in', tier: 'Retail' };
-  const wholesale: Customer = { id: 'cust-c0411', code: 'C0411', name: 'Amila Fashions', tier: 'Wholesale' };
+  const walkIn: Customer = { id: 'cust-walk-in', code: 'C0001', name: 'Walk-in', tier: 'Retail', creditLimit: 0 };
+  const wholesale: Customer = { id: 'cust-c0411', code: 'C0411', name: 'Amila Fashions', tier: 'Wholesale', creditLimit: 0 };
 
   it('picks the walk-in account rather than whichever customer sorts first', () => {
     // Customers arrive sorted by name, so the wholesale account leads the list.
@@ -57,7 +57,7 @@ describe('resolveDefaultCustomerId', () => {
   });
 
   it('falls back to matching on name when the walk-in row came from an upstream import', () => {
-    const imported: Customer = { id: 'inv-9931', code: 'C0001', name: 'Walk In', tier: 'Retail' };
+    const imported: Customer = { id: 'inv-9931', code: 'C0001', name: 'Walk In', tier: 'Retail', creditLimit: 0 };
 
     expect(resolveDefaultCustomerId([wholesale, imported])).toBe('inv-9931');
   });

@@ -307,6 +307,22 @@ function mapCustomer(customer: any) {
     tier: customer.tier,
     phone: customer.phone ?? undefined,
     email: customer.email ?? undefined,
+    notes: customer.notes ?? undefined,
+    creditLimit: customer.creditLimit ?? 0,
+  };
+}
+
+function mapCreditPayment(payment: any, userMap: Map<string, { name: string }>) {
+  return {
+    id: payment.id,
+    customerId: payment.customerId,
+    amount: payment.amount,
+    method: payment.method,
+    note: payment.note ?? undefined,
+    terminalId: payment.terminalId ?? undefined,
+    userId: payment.userId ?? undefined,
+    userName: payment.userId ? userMap.get(payment.userId)?.name : undefined,
+    createdAt: payment.createdAt.toISOString(),
   };
 }
 
@@ -1187,6 +1203,117 @@ router.post('/returns', async (req: Request, res: Response) => {
   } catch (error) {
     console.error(error);
     return res.status(500).json({ error: 'Failed to create return' });
+  }
+});
+
+router.patch('/customers/:id', async (req: Request, res: Response) => {
+  try {
+    await ensureSeedData();
+    const customerId = req.params.id;
+    const existing = await prisma.customer.findUnique({ where: { id: customerId } });
+    if (!existing) {
+      return res.status(404).json({ error: 'Customer not found' });
+    }
+
+    const patch: Record<string, unknown> = {};
+    if (req.body.creditLimit !== undefined) patch.creditLimit = Number(req.body.creditLimit);
+    if (req.body.phone !== undefined) patch.phone = req.body.phone;
+    if (req.body.email !== undefined) patch.email = req.body.email;
+    if (req.body.notes !== undefined) patch.notes = req.body.notes;
+    if (req.body.tier !== undefined) patch.tier = req.body.tier;
+
+    await applyWorkstationEvent(req, {
+      aggregateType: 'customer',
+      aggregateId: customerId,
+      eventType: SyncEventType.CUSTOMER_UPSERTED,
+      terminalId: req.body.terminalId,
+      payload: patch,
+    });
+
+    const updated = await prisma.customer.findUnique({ where: { id: customerId } });
+    return res.json(updated ? mapCustomer(updated) : null);
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({ error: 'Failed to update customer' });
+  }
+});
+
+router.post('/customers/:id/credit-payments', async (req: Request, res: Response) => {
+  try {
+    await ensureSeedData();
+    const customerId = req.params.id;
+    const customer = await prisma.customer.findUnique({ where: { id: customerId } });
+    if (!customer) {
+      return res.status(404).json({ error: 'Customer not found' });
+    }
+
+    const amount = Number(req.body.amount);
+    if (!Number.isFinite(amount) || amount <= 0) {
+      return res.status(400).json({ error: 'A credit payment requires a positive amount' });
+    }
+
+    const paymentId = req.body.paymentId ?? uuidv4();
+    await applyWorkstationEvent(req, {
+      aggregateType: 'credit-payment',
+      aggregateId: paymentId,
+      eventType: SyncEventType.CREDIT_PAYMENT_RECORDED,
+      terminalId: req.body.terminalId,
+      payload: {
+        customerId,
+        amount,
+        method: req.body.method ?? 'CASH',
+        note: req.body.note,
+        terminalId: req.body.terminalId,
+        userId: req.body.userId,
+      },
+    });
+
+    const record = await prisma.creditPayment.findUnique({ where: { id: paymentId } });
+    const userMap = await getUserMap();
+    return res.status(201).json(record ? mapCreditPayment(record, userMap) : null);
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({ error: 'Failed to record credit payment' });
+  }
+});
+
+router.get('/customers/:id/account', async (req: Request, res: Response) => {
+  try {
+    await ensureSeedData();
+    const customerId = req.params.id;
+    const customer = await prisma.customer.findUnique({ where: { id: customerId } });
+    if (!customer) {
+      return res.status(404).json({ error: 'Customer not found' });
+    }
+
+    const [creditSales, payments] = await Promise.all([
+      prisma.sale.findMany({
+        where: { customerId, status: SaleStatus.COMPLETED },
+        include: { payments: true },
+      }),
+      prisma.creditPayment.findMany({ where: { customerId }, orderBy: { createdAt: 'desc' } }),
+    ]);
+
+    // v1 simplification: refunds/voids against a credit sale are not netted out
+    // of the owed total automatically yet.
+    const creditOwed = creditSales.reduce((sum, sale) => (
+      sum + sale.payments
+        .filter((payment) => payment.method === 'CREDIT')
+        .reduce((paymentSum, payment) => paymentSum + payment.amount, 0)
+    ), 0);
+    const creditRepaid = payments.reduce((sum, payment) => sum + payment.amount, 0);
+    const creditBalance = Math.max(0, creditOwed - creditRepaid);
+
+    const userMap = await getUserMap();
+    return res.json({
+      customer: mapCustomer(customer),
+      creditBalance,
+      availableCredit: Math.max(0, (customer.creditLimit ?? 0) - creditBalance),
+      creditPayments: payments.map((payment) => mapCreditPayment(payment, userMap)),
+    });
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({ error: 'Failed to load customer account' });
   }
 });
 

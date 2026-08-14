@@ -10,6 +10,7 @@ import {
   PaymentMethod,
   POSSyncDashboard,
   ProductVariant,
+  RecordCreditPaymentInput,
   ReturnInput,
   SaleStatus,
   SharedCatalogSnapshot,
@@ -26,6 +27,7 @@ import {
   SyncPlaybackRequest,
   SyncPlaybackResponse,
   SyncStatusSummary,
+  UpdateCustomerInput,
   VectorClock,
   ZReportSummary,
 } from '@jingles/shared';
@@ -156,6 +158,7 @@ function resolveConflictPolicy(eventType: SyncEventType): SyncConflictPolicy {
     case SyncEventType.SALE_VOIDED:
     case SyncEventType.RETURN_CREATED:
     case SyncEventType.SHIFT_CLOSED:
+    case SyncEventType.CREDIT_PAYMENT_RECORDED:
       return SyncConflictPolicy.SERVER_WINS;
     default:
       return SyncConflictPolicy.LAST_WRITE_WINS;
@@ -1007,6 +1010,60 @@ async function recordConflict(
   return toConflictDto(conflict);
 }
 
+async function applyCustomerUpsertedEvent(tx: Tx, event: SyncEvent<UpdateCustomerInput>): Promise<void> {
+  const payload = event.payload;
+  const existing = await tx.customer.findUnique({ where: { id: event.aggregateId } });
+  if (!existing) {
+    // Customers are seeded/imported, never created from this event — nothing to patch onto.
+    return;
+  }
+
+  await tx.customer.update({
+    where: { id: event.aggregateId },
+    data: {
+      ...(payload.creditLimit !== undefined ? { creditLimit: payload.creditLimit } : {}),
+      ...(payload.phone !== undefined ? { phone: payload.phone } : {}),
+      ...(payload.email !== undefined ? { email: payload.email } : {}),
+      ...(payload.notes !== undefined ? { notes: payload.notes } : {}),
+      ...(payload.tier !== undefined ? { tier: payload.tier } : {}),
+    },
+  });
+}
+
+async function applyCreditPaymentRecordedEvent(
+  tx: Tx,
+  event: SyncEvent<RecordCreditPaymentInput & { customerId: string; userId?: string }>,
+): Promise<void> {
+  const payload = event.payload;
+  const existing = await tx.creditPayment.findUnique({ where: { id: event.aggregateId } });
+  if (existing) {
+    return;
+  }
+  if (!Number.isFinite(payload.amount) || payload.amount <= 0) {
+    throw new Error('A credit payment requires a positive amount');
+  }
+
+  const customer = await tx.customer.findUnique({ where: { id: payload.customerId } });
+  if (!customer) {
+    throw new Error('Customer not found');
+  }
+
+  await tx.creditPayment.create({
+    data: {
+      id: event.aggregateId,
+      customerId: payload.customerId,
+      amount: payload.amount,
+      method: payload.method ?? 'CASH',
+      note: payload.note ?? null,
+      terminalId: payload.terminalId ?? null,
+      userId: payload.userId ?? null,
+      sourceDeviceId: event.deviceId,
+      sourceSequenceNum: event.sequenceNum,
+      lastVectorClock: json(event.vectorClock),
+    },
+  });
+}
+
 async function applyProjectionEvent(tx: Tx, event: SyncEvent): Promise<void> {
   switch (event.eventType) {
     case SyncEventType.SHIFT_OPENED:
@@ -1035,6 +1092,15 @@ async function applyProjectionEvent(tx: Tx, event: SyncEvent): Promise<void> {
       return;
     case SyncEventType.RETURN_CREATED:
       await applyReturnCreatedEvent(tx, event as SyncEvent<ReturnInput>);
+      return;
+    case SyncEventType.CUSTOMER_UPSERTED:
+      await applyCustomerUpsertedEvent(tx, event as SyncEvent<UpdateCustomerInput>);
+      return;
+    case SyncEventType.CREDIT_PAYMENT_RECORDED:
+      await applyCreditPaymentRecordedEvent(
+        tx,
+        event as SyncEvent<RecordCreditPaymentInput & { customerId: string; userId?: string }>,
+      );
       return;
     default:
       return;

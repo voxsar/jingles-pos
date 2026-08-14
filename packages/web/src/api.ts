@@ -1,6 +1,7 @@
 import {
 	CashMovementInput,
 	CompleteSaleInput,
+	CustomerAccountDetail,
 	DrawerContents,
 	POSAuthLoginInput,
 	POSAuthResult,
@@ -8,6 +9,7 @@ import {
 	POSSyncTokenResult,
 	Product,
 	POSSyncDashboard,
+	RecordCreditPaymentInput,
 	SaleSummary,
 	HeldSaleSummary,
 	HoldSaleInput,
@@ -18,6 +20,8 @@ import {
 	ShiftCloseInput,
 	ShiftOpenInput,
 	SyncStatusSummary,
+	UpdateCustomerInput,
+	Customer,
 	ZReportSummary,
 	ZReportSlot,
 } from '@jingles/shared';
@@ -103,6 +107,44 @@ async function postJson<T>(path: string, payload: unknown, options?: { token?: s
 				source: 'api.response',
 				route: path,
 				method: 'POST',
+				status: response.status,
+				context: { statusText: response.statusText },
+			});
+		}
+		throw requestError;
+	}
+	return response.json() as Promise<T>;
+}
+
+async function patchJson<T>(path: string, payload: unknown, options?: { token?: string | null }): Promise<T> {
+	let response: Response;
+	try {
+		response = await fetch(`${BASE}${path}`, {
+			method: 'PATCH',
+			headers: {
+				'Content-Type': 'application/json',
+				...buildAuthHeaders(options?.token),
+			},
+			body: JSON.stringify(payload),
+		});
+	} catch (error) {
+		console.error(`[POS API] PATCH ${path} could not reach the backend`, error);
+		reportClientError(error, { source: 'api.network', route: path, method: 'PATCH' });
+		throw error;
+	}
+	if (!response.ok) {
+		const error = await response.json().catch(() => ({ error: `HTTP ${response.status}` })) as { error?: string };
+		const requestError = new Error(error.error || `HTTP ${response.status}`);
+		console.error(`[POS API] PATCH ${path} failed`, {
+			status: response.status,
+			statusText: response.statusText,
+			message: requestError.message,
+		});
+		if (response.status >= 500) {
+			reportClientError(requestError, {
+				source: 'api.response',
+				route: path,
+				method: 'PATCH',
 				status: response.status,
 				context: { statusText: response.statusText },
 			});
@@ -265,6 +307,21 @@ export async function syncNow(options?: { deviceId?: string; terminalId?: string
 		deviceId: options?.deviceId,
 		terminalId: options?.terminalId,
 	});
+}
+
+export async function getCustomerAccount(customerId: string): Promise<CustomerAccountDetail> {
+	return getJson<CustomerAccountDetail>(`/customers/${encodeURIComponent(customerId)}/account`);
+}
+
+export async function updateCustomer(customerId: string, input: UpdateCustomerInput): Promise<Customer> {
+	return patchJson<Customer>(`/customers/${encodeURIComponent(customerId)}`, input);
+}
+
+export async function recordCreditPayment(
+	customerId: string,
+	input: RecordCreditPaymentInput,
+): Promise<void> {
+	await postJson(`/customers/${encodeURIComponent(customerId)}/credit-payments`, input);
 }
 
 export function subscribeSyncStatus(_callback: (status: SyncStatusSummary) => void): () => void {

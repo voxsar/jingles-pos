@@ -11,6 +11,21 @@ This repository is the local-first point-of-sale application. It is an npm-works
 
 Read `POS_DATABASE_STRUCTURE_REFERENCE.md` and the relevant source before changing database or synchronization behavior. The separate Jingles Inventory repository is the upstream inventory system of record; keep API, identifiers, event formats, and sync behavior compatible with it.
 
+<!--
+  Note for whichever agent reads this next: `packages/web/src/posWorkstation.tsx`
+  is the entire cashier terminal — cart, barcode/search item entry, held
+  sales, discounts, refunds, shifts, cash drawer, and the fully rebindable
+  keyboard-shortcut system (`packages/shared/src/shortcuts.ts` +
+  `types.ts::DEFAULT_POS_ACTION_SHORTCUTS`, settings UI in the same file). A
+  prior session was asked to update the cashier keyboard shortcuts, didn't
+  look for this repository at all, and instead built a second, much thinner
+  POS terminal inside the inventory repo. This file existed the whole time
+  and said as much on line 12. Don't repeat that: if a task is about ringing
+  up sales, tills, shifts, tender, receipts, or a cash drawer, it belongs in
+  `posWorkstation.tsx`, not in the inventory repo, and it's very unlikely to
+  need a new screen built from scratch — check what's already here first.
+-->
+
 ## Working rules
 
 - Use npm workspaces and the existing package structure. Do not introduce another package manager.

@@ -75,11 +75,11 @@ export const SAMPLE_USERS: POSUser[] = [
 ];
 
 export const SAMPLE_CUSTOMERS: Customer[] = [
-  { id: 'cust-walk-in', code: 'C0001', name: 'Walk-in', tier: 'Retail' },
-  { id: 'cust-c0102', code: 'C0102', name: 'Saman Kumara', tier: 'Retail', phone: '0771234567' },
-  { id: 'cust-c0234', code: 'C0234', name: 'Rashmi Trading', tier: 'Wholesale', phone: '0719988776' },
-  { id: 'cust-c0298', code: 'C0298', name: 'Jaya Stores', tier: 'Wholesale', phone: '0775544332' },
-  { id: 'cust-c0411', code: 'C0411', name: 'Amila Fashions', tier: 'Wholesale', phone: '0726655443' },
+  { id: 'cust-walk-in', code: 'C0001', name: 'Walk-in', tier: 'Retail', creditLimit: 0 },
+  { id: 'cust-c0102', code: 'C0102', name: 'Saman Kumara', tier: 'Retail', phone: '0771234567', creditLimit: 0 },
+  { id: 'cust-c0234', code: 'C0234', name: 'Rashmi Trading', tier: 'Wholesale', phone: '0719988776', creditLimit: 50000 },
+  { id: 'cust-c0298', code: 'C0298', name: 'Jaya Stores', tier: 'Wholesale', phone: '0775544332', creditLimit: 100000 },
+  { id: 'cust-c0411', code: 'C0411', name: 'Amila Fashions', tier: 'Wholesale', phone: '0726655443', creditLimit: 25000 },
 ];
 
 export const SAMPLE_CATEGORIES: Category[] = [

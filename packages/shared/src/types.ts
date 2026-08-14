@@ -80,6 +80,7 @@ export interface RecordCreditPaymentInput {
   method?: string;
   note?: string;
   terminalId?: string;
+  userId?: string;
 }
 
 export interface Category {

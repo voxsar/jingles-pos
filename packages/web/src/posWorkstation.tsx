@@ -4,6 +4,7 @@ import {
   CartLine,
   CompleteSaleInput,
   Customer,
+  CustomerAccountDetail,
   DrawerContents,
   HeldSaleSummary,
   POSCustomerDisplaySettings,
@@ -24,10 +25,12 @@ import {
   Product,
   ProductPriceTier,
   ProductVariant,
+  RecordCreditPaymentInput,
   ReturnInput,
   SaleSummary,
   ShiftSummary,
   SyncStatusSummary,
+  UpdateCustomerInput,
   UserRole,
   ZReportSummary,
   ZReportSlot,
@@ -63,6 +66,7 @@ import {
   createReturn,
   createSale,
   endActiveShift,
+  getCustomerAccount,
   getDrawerContents,
   getZReport,
   listZReportSlots,
@@ -71,10 +75,12 @@ import {
   openShift,
   recallHeldSale,
   recordCashMovement,
+  recordCreditPayment,
   saveHeldSale,
   searchProducts,
   subscribeSyncStatus,
   syncNow,
+  updateCustomer,
 } from './api';
 import { useAuth } from './auth/AuthContext';
 import HelpGuide from './help/HelpGuide';
@@ -273,6 +279,8 @@ export default function PosWorkstation() {
   const [drawer, setDrawer] = useState<DrawerContents | null>(null);
   const [isReturnOpen, setIsReturnOpen] = useState(false);
   const [isOrdersOpen, setIsOrdersOpen] = useState(false);
+  const [customersModalInitialId, setCustomersModalInitialId] = useState<string | null>(null);
+  const [isCustomersOpen, setIsCustomersOpen] = useState(false);
   const [isVoidOpen, setIsVoidOpen] = useState(false);
   const [voidLineId, setVoidLineId] = useState<string | null>(null);
   const [activeHeldSaleId, setActiveHeldSaleId] = useState<string | null>(null);
@@ -2098,6 +2106,10 @@ export default function PosWorkstation() {
         onCashAction={handleOpenMoneyModal}
         onOpenHelp={() => setIsHelpOpen(true)}
         onOpenOrders={() => setIsOrdersOpen(true)}
+        onOpenCustomers={() => {
+          setCustomersModalInitialId(null);
+          setIsCustomersOpen(true);
+        }}
         onCashMovement={handleOpenCashMovement}
         shortcuts={actionShortcuts}
         onOpenSettings={() => void handleOpenSettings()}
@@ -2178,6 +2190,11 @@ export default function PosWorkstation() {
           onCustomerChange={handleCustomerChange}
           onDefaultTierChange={setDefaultTierLabel}
           onHold={() => handleOpenHoldModal('hold')}
+          onViewCustomer={() => {
+            if (!selectedCustomer?.id) return;
+            setCustomersModalInitialId(selectedCustomer.id);
+            setIsCustomersOpen(true);
+          }}
           onLineDiscountChange={(lineId, discountPercent) => {
             updateCartLineById(lineId, (line) => recalculateCartLine({ ...line, discountPercent }));
           }}
@@ -2372,6 +2389,28 @@ export default function PosWorkstation() {
         />
       )}
 
+      {isCustomersOpen && (
+        <CustomerDirectoryModal
+          currentTerminalId={currentTerminalId}
+          currentUserId={authUser?.id}
+          customers={customers}
+          initialCustomerId={customersModalInitialId}
+          isManager={session.user.role === UserRole.MANAGER}
+          onClose={() => setIsCustomersOpen(false)}
+          onCustomerUpdated={(updated) => {
+            setBootstrapData((previous) => previous
+              ? { ...previous, customers: previous.customers.map((customer) => customer.id === updated.id ? updated : customer) }
+              : previous);
+          }}
+          onOpenReceipt={(sale) => {
+            setIsCustomersOpen(false);
+            setReceiptSale(sale);
+          }}
+          sales={visibleSales}
+          terminals={terminals}
+        />
+      )}
+
       {isReturnOpen && (
         <ReturnModal
           isLoading={salesLoading}
@@ -2534,6 +2573,7 @@ type HeaderBarProps = {
   isSyncing: boolean;
   onCashAction: () => void;
   onOpenHelp: () => void;
+  onOpenCustomers: () => void;
   onOpenOrders: () => void;
   onCashMovement: () => void;
   shortcuts: POSActionShortcuts;
@@ -2617,6 +2657,9 @@ function HeaderBar(props: HeaderBarProps) {
         <MetricCard label="Bills" value={String(props.todayBills)} />
         <button className="ghost-button" onClick={props.onOpenOrders} title={`Order history (${formatBinding(props.shortcuts.orders)})`}>
           Orders
+        </button>
+        <button className="ghost-button" onClick={props.onOpenCustomers} title="Search customers and view their accounts">
+          Customers
         </button>
         <button className="ghost-button" onClick={props.onOpenHelp} title={`Help & user guide (${formatBinding(props.shortcuts.help)})`}>
           Help
@@ -2928,6 +2971,7 @@ type CartPanelProps = {
   onLineSalespersonChange: (lineId: string, salespersonId: string) => void;
   onLineTierChange: (lineId: string, tierLabel: string) => void;
   onPay: () => void;
+  onViewCustomer: () => void;
   salespeople: POSUser[];
   totals: ReturnType<typeof calcCartTotals>;
   variantProductIds: Set<string>;
@@ -2948,14 +2992,25 @@ function CartPanel(props: CartPanelProps) {
 
       <div className="cart-select-grid">
         <LabelBlock label="Customer">
-          <SearchableSelect
-            ref={props.customerSelectRef}
-            className="glass-input compact"
-            value={props.customerId}
-            onChange={props.onCustomerChange}
-            options={props.customers.map((customer) => ({ value: customer.id, label: `${customer.name} - ${customer.tier}` }))}
-            ariaLabel="Customer"
-          />
+          <div className="customer-picker-row">
+            <SearchableSelect
+              ref={props.customerSelectRef}
+              className="glass-input compact"
+              value={props.customerId}
+              onChange={props.onCustomerChange}
+              options={props.customers.map((customer) => ({ value: customer.id, label: `${customer.name} - ${customer.tier}` }))}
+              ariaLabel="Customer"
+            />
+            <button
+              className="ghost-button small"
+              disabled={!props.customerId}
+              onClick={props.onViewCustomer}
+              title="View this customer's details, orders and credit account"
+              type="button"
+            >
+              View
+            </button>
+          </div>
         </LabelBlock>
 
         <LabelBlock label="Default tier">
@@ -6400,6 +6455,344 @@ function OrderHistoryModal(
               <div className="orders-empty">No orders match this view.</div>
             )}
           </div>
+        </div>
+      </div>
+    </ModalShell>
+  );
+}
+
+type CustomerEditDraft = {
+  creditLimit: string;
+  phone: string;
+  email: string;
+  notes: string;
+};
+
+const CREDIT_PAYMENT_METHODS = ['CASH', 'VISA', 'MASTER', 'AMEX'];
+
+function CustomerDirectoryModal(
+  props: {
+    currentTerminalId: string;
+    currentUserId?: string;
+    customers: Customer[];
+    initialCustomerId: string | null;
+    isManager: boolean;
+    onClose: () => void;
+    onCustomerUpdated: (customer: Customer) => void;
+    onOpenReceipt: (sale: SaleSummary) => void;
+    sales: SaleSummary[];
+    terminals: POSBootstrap['terminals'];
+  },
+) {
+  const terminalMap = useMemo(
+    () => new Map(props.terminals.map((terminal) => [terminal.id, terminal])),
+    [props.terminals],
+  );
+  const [query, setQuery] = useState('');
+  const [selectedId, setSelectedId] = useState<string | null>(props.initialCustomerId);
+  const [account, setAccount] = useState<CustomerAccountDetail | null>(null);
+  const [isAccountLoading, setIsAccountLoading] = useState(false);
+  const [accountError, setAccountError] = useState('');
+  const [isEditing, setIsEditing] = useState(false);
+  const [editDraft, setEditDraft] = useState<CustomerEditDraft | null>(null);
+  const [isSaving, setIsSaving] = useState(false);
+  const [paymentAmount, setPaymentAmount] = useState('');
+  const [paymentMethod, setPaymentMethod] = useState('CASH');
+  const [paymentNote, setPaymentNote] = useState('');
+  const [isRecordingPayment, setIsRecordingPayment] = useState(false);
+
+  const filteredCustomers = useMemo(() => {
+    const needle = query.trim().toLowerCase();
+    if (!needle) return props.customers;
+    return props.customers.filter((customer) => [
+      customer.name, customer.code, customer.phone ?? '', customer.email ?? '',
+    ].some((value) => value.toLowerCase().includes(needle)));
+  }, [props.customers, query]);
+
+  const selectedCustomer = useMemo(
+    () => props.customers.find((customer) => customer.id === selectedId) ?? null,
+    [props.customers, selectedId],
+  );
+
+  const customerSales = useMemo(
+    () => (selectedCustomer ? props.sales.filter((sale) => sale.customerId === selectedCustomer.id) : []),
+    [props.sales, selectedCustomer],
+  );
+
+  const loadAccount = useCallback(async (customerId: string) => {
+    setIsAccountLoading(true);
+    setAccountError('');
+    try {
+      const detail = await getCustomerAccount(customerId);
+      setAccount(detail);
+    } catch (error) {
+      setAccountError(error instanceof Error ? error.message : 'Failed to load the customer account');
+      setAccount(null);
+    } finally {
+      setIsAccountLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    setIsEditing(false);
+    if (selectedId) {
+      void loadAccount(selectedId);
+    } else {
+      setAccount(null);
+    }
+  }, [selectedId, loadAccount]);
+
+  const startEdit = () => {
+    if (!selectedCustomer) return;
+    setEditDraft({
+      creditLimit: String(selectedCustomer.creditLimit ?? 0),
+      phone: selectedCustomer.phone ?? '',
+      email: selectedCustomer.email ?? '',
+      notes: selectedCustomer.notes ?? '',
+    });
+    setIsEditing(true);
+  };
+
+  const saveEdit = async () => {
+    if (!selectedCustomer || !editDraft) return;
+    setIsSaving(true);
+    setAccountError('');
+    try {
+      const updated = await updateCustomer(selectedCustomer.id, {
+        creditLimit: Number(editDraft.creditLimit) || 0,
+        phone: editDraft.phone.trim() || undefined,
+        email: editDraft.email.trim() || undefined,
+        notes: editDraft.notes.trim() || undefined,
+      });
+      props.onCustomerUpdated(updated);
+      setIsEditing(false);
+      await loadAccount(selectedCustomer.id);
+    } catch (error) {
+      setAccountError(error instanceof Error ? error.message : 'Failed to save the changes');
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const submitPayment = async () => {
+    if (!selectedCustomer) return;
+    const amount = Number(paymentAmount);
+    if (!Number.isFinite(amount) || amount <= 0) return;
+    setIsRecordingPayment(true);
+    setAccountError('');
+    try {
+      await recordCreditPayment(selectedCustomer.id, {
+        amount,
+        method: paymentMethod,
+        note: paymentNote.trim() || undefined,
+        terminalId: props.currentTerminalId,
+        userId: props.currentUserId,
+      });
+      setPaymentAmount('');
+      setPaymentNote('');
+      await loadAccount(selectedCustomer.id);
+    } catch (error) {
+      setAccountError(error instanceof Error ? error.message : 'Failed to record the payment');
+    } finally {
+      setIsRecordingPayment(false);
+    }
+  };
+
+  return (
+    <ModalShell onClose={props.onClose} title="Customers" width="payment">
+      <div className="customers-workspace">
+        <div className="customers-list-pane">
+          <input
+            autoFocus
+            className="glass-input"
+            onChange={(event) => setQuery(event.target.value)}
+            placeholder="Name, code, phone or email"
+            value={query}
+          />
+          <div className="customers-list">
+            {filteredCustomers.map((customer) => (
+              <button
+                className={`customers-row ${customer.id === selectedId ? 'active' : ''}`}
+                key={customer.id}
+                onClick={() => setSelectedId(customer.id)}
+              >
+                <b>{customer.name}</b>
+                <span>{customer.code} - {customer.tier}</span>
+              </button>
+            ))}
+            {filteredCustomers.length === 0 && <div className="orders-empty">No customers match this search.</div>}
+          </div>
+        </div>
+
+        <div className="customers-detail-pane">
+          {!selectedCustomer && (
+            <div className="empty-state">Search and select a customer to see their details.</div>
+          )}
+
+          {selectedCustomer && (
+            <>
+              <div className="customers-detail-head">
+                <div>
+                  <div className="cart-sale-id">{selectedCustomer.name}</div>
+                  <div className="meta-label">{selectedCustomer.code} - {selectedCustomer.tier}</div>
+                </div>
+                {props.isManager && !isEditing && (
+                  <button className="ghost-button small" onClick={startEdit}>Edit</button>
+                )}
+              </div>
+
+              {!isEditing && (
+                <div className="customers-profile-grid">
+                  <LabelBlock label="Phone"><div>{selectedCustomer.phone || '-'}</div></LabelBlock>
+                  <LabelBlock label="Email"><div>{selectedCustomer.email || '-'}</div></LabelBlock>
+                  <LabelBlock label="Notes"><div>{selectedCustomer.notes || '-'}</div></LabelBlock>
+                </div>
+              )}
+
+              {isEditing && editDraft && (
+                <div className="customers-profile-grid">
+                  <LabelBlock label="Credit limit">
+                    <input
+                      className="glass-input compact"
+                      min="0"
+                      onChange={(event) => setEditDraft({ ...editDraft, creditLimit: event.target.value })}
+                      type="number"
+                      value={editDraft.creditLimit}
+                    />
+                  </LabelBlock>
+                  <LabelBlock label="Phone">
+                    <input
+                      className="glass-input compact"
+                      onChange={(event) => setEditDraft({ ...editDraft, phone: event.target.value })}
+                      value={editDraft.phone}
+                    />
+                  </LabelBlock>
+                  <LabelBlock label="Email">
+                    <input
+                      className="glass-input compact"
+                      onChange={(event) => setEditDraft({ ...editDraft, email: event.target.value })}
+                      value={editDraft.email}
+                    />
+                  </LabelBlock>
+                  <LabelBlock label="Notes">
+                    <input
+                      className="glass-input compact"
+                      onChange={(event) => setEditDraft({ ...editDraft, notes: event.target.value })}
+                      value={editDraft.notes}
+                    />
+                  </LabelBlock>
+                  <div className="customers-edit-actions">
+                    <button className="ghost-button small" disabled={isSaving} onClick={() => setIsEditing(false)}>
+                      Cancel
+                    </button>
+                    <button className="btn-primary small" disabled={isSaving} onClick={() => void saveEdit()}>
+                      {isSaving ? 'Saving...' : 'Save'}
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              <div className="orders-metrics">
+                <MetricCard label="Credit limit" value={formatCurrency(selectedCustomer.creditLimit ?? 0)} />
+                <MetricCard label="Balance owed" value={formatCurrency(account?.creditBalance ?? 0)} />
+                <MetricCard
+                  label="Available credit"
+                  value={formatCurrency(account?.availableCredit ?? (selectedCustomer.creditLimit ?? 0))}
+                />
+                <MetricCard label="Orders" value={formatInteger(customerSales.length)} />
+              </div>
+
+              {accountError && <div className="toast-banner error">{accountError}</div>}
+
+              <div className="customers-payment-form">
+                <div className="section-kicker">Record a credit payment</div>
+                <div className="customers-payment-grid">
+                  <input
+                    className="glass-input compact"
+                    min="0"
+                    onChange={(event) => setPaymentAmount(event.target.value)}
+                    placeholder="Amount"
+                    step="0.01"
+                    type="number"
+                    value={paymentAmount}
+                  />
+                  <SearchableSelect
+                    ariaLabel="Payment method"
+                    className="glass-input compact"
+                    onChange={setPaymentMethod}
+                    options={CREDIT_PAYMENT_METHODS.map((method) => ({ value: method, label: method }))}
+                    value={paymentMethod}
+                  />
+                  <input
+                    className="glass-input compact"
+                    onChange={(event) => setPaymentNote(event.target.value)}
+                    placeholder="Note (optional)"
+                    value={paymentNote}
+                  />
+                  <button
+                    className="btn-primary small"
+                    disabled={isRecordingPayment || !paymentAmount}
+                    onClick={() => void submitPayment()}
+                  >
+                    {isRecordingPayment ? 'Recording...' : 'Record payment'}
+                  </button>
+                </div>
+              </div>
+
+              <div className="section-kicker">Payment history</div>
+              <div className="orders-list-wrap">
+                <div className="credit-payment-row credit-payment-head">
+                  <span>Amount</span>
+                  <span>Method</span>
+                  <span>Date</span>
+                  <span>Recorded by</span>
+                  <span>Note</span>
+                </div>
+                <div className="orders-list">
+                  {isAccountLoading && <div className="orders-empty">Loading...</div>}
+                  {!isAccountLoading && (account?.creditPayments.length ?? 0) === 0 && (
+                    <div className="orders-empty">No credit payments recorded yet.</div>
+                  )}
+                  {!isAccountLoading && account?.creditPayments.map((payment) => (
+                    <div className="credit-payment-row" key={payment.id}>
+                      <b>{formatCurrency(payment.amount)}</b>
+                      <span>{payment.method}</span>
+                      <span>{formatDateTime(payment.createdAt)}</span>
+                      <span>{payment.userName ?? '-'}</span>
+                      <span>{payment.note ?? '-'}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <div className="section-kicker">Order history</div>
+              <div className="orders-list-wrap">
+                <div className="orders-list-head">
+                  <span>Receipt</span>
+                  <span>Date</span>
+                  <span>Terminal</span>
+                  <span>Cashier</span>
+                  <span>Payment</span>
+                  <span>Status</span>
+                  <span>Total</span>
+                </div>
+                <div className="orders-list">
+                  {customerSales.length === 0 && <div className="orders-empty">No orders yet.</div>}
+                  {customerSales.map((sale) => (
+                    <button className="orders-row" key={sale.id} onClick={() => props.onOpenReceipt(sale)}>
+                      <b>{sale.receiptNumber}</b>
+                      <span>{formatDateTime(sale.createdAt)}</span>
+                      <span>{terminalMap.get(sale.terminalId)?.code ?? sale.terminalId}</span>
+                      <span>{sale.cashierName}</span>
+                      <span>{sale.payments.map((payment) => payment.method).join(' + ') || 'Unpaid'}</span>
+                      <span className={`order-status ${sale.status.toLowerCase()}`}>{sale.status}</span>
+                      <b>{formatCurrency(sale.total)}</b>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </>
+          )}
         </div>
       </div>
     </ModalShell>

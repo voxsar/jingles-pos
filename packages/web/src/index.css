@@ -2256,6 +2256,133 @@ button {
   text-align: center;
 }
 
+.customer-picker-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.customer-picker-row > *:first-child {
+  flex: 1;
+  min-width: 0;
+}
+
+.customers-workspace {
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
+}
+
+.customers-list-pane {
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+  gap: 10px;
+  width: 260px;
+}
+
+.customers-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 560px;
+  overflow: auto;
+  border: 1px solid rgba(77, 59, 38, 0.09);
+  border-radius: 16px;
+  padding: 6px;
+}
+
+.customers-row {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  border: 0;
+  border-radius: 12px;
+  padding: 9px 10px;
+  background: transparent;
+  color: var(--ink-0);
+  text-align: left;
+}
+
+.customers-row span {
+  font-size: 11px;
+  color: var(--ink-2);
+}
+
+.customers-row:hover {
+  background: rgba(13, 122, 91, 0.07);
+}
+
+.customers-row.active {
+  background: rgba(13, 122, 91, 0.12);
+}
+
+.customers-detail-pane {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 14px;
+  min-width: 0;
+  max-height: 620px;
+  overflow: auto;
+}
+
+.customers-detail-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.customers-profile-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.customers-edit-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  grid-column: 1 / -1;
+}
+
+.customers-payment-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border: 1px solid rgba(77, 59, 38, 0.09);
+  border-radius: 16px;
+  padding: 12px;
+}
+
+.customers-payment-grid {
+  display: grid;
+  grid-template-columns: 140px 140px 1fr auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.credit-payment-row {
+  display: grid;
+  grid-template-columns: 0.9fr 0.8fr 1.1fr 1fr 1.2fr;
+  gap: 10px;
+  align-items: center;
+  padding: 11px 12px;
+  border-top: 1px solid rgba(77, 59, 38, 0.06);
+  font-size: 11px;
+}
+
+.credit-payment-head {
+  border-top: 0;
+  padding: 10px 12px;
+  background: var(--surface-soft-muted);
+  color: var(--ink-2);
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
 .search-panel,
 .payment-layout,
 .return-layout {
