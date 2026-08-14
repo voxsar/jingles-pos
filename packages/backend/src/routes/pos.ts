@@ -322,6 +322,7 @@ function mapCreditPayment(payment: any, userMap: Map<string, { name: string }>) 
     terminalId: payment.terminalId ?? undefined,
     userId: payment.userId ?? undefined,
     userName: payment.userId ? userMap.get(payment.userId)?.name : undefined,
+    shiftId: payment.shiftId ?? undefined,
     createdAt: payment.createdAt.toISOString(),
   };
 }
@@ -1277,6 +1278,7 @@ router.post('/customers/:id/credit-payments', async (req: Request, res: Response
         note: req.body.note,
         terminalId: req.body.terminalId,
         userId: req.body.userId,
+        shiftId: req.body.shiftId,
       },
     });
 

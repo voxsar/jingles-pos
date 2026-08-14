@@ -229,6 +229,11 @@ describe('event sourced POS backend services', () => {
       discountedLineCount: 1,
       productCount: 3,
       cashMovements: [],
+      declaredTenders: undefined,
+      declaredTenderMode: undefined,
+      paymentDetails: [],
+      customerCreditSales: [],
+      customerCollections: [],
     });
   });
 
@@ -265,6 +270,31 @@ describe('event sourced POS backend services', () => {
     // Numeric strings from a hand-edited settings or sync payload are coerced.
     expect(report.declaredTenders).toEqual({ VISA: 90, MASTER: 10 });
     expect(report.declaredTenderMode).toBe('category');
+  });
+
+  it('includes customer credit sales, bill collections, cheques and bank transfers in the Z report', async () => {
+    mockTx.pOSShift.findUnique.mockResolvedValue({
+      id: 'shift-credit',
+      openingFloat: 0,
+      cashCounts: [],
+      creditPayments: [{
+        id: 'collection-1', customerId: 'customer-1', amount: 75, method: 'CASH', note: 'Part payment',
+        createdAt: new Date('2026-08-14T10:05:00Z'), customer: { name: 'Acme Stores' },
+      }],
+      sales: [{
+        id: 'sale-1', receiptNumber: 'R-100', customerId: 'customer-1', customer: { name: 'Acme Stores' },
+        subtotal: 300, discountTotal: 0, total: 300, returns: [], lines: [],
+        payments: [
+          { method: 'CREDIT', amount: 100, metadata: null, reference: null, createdAt: new Date('2026-08-14T10:00:00Z') },
+          { method: 'CHEQUE', amount: 200, reference: 'CH-9', metadata: JSON.stringify({ bankName: 'People Bank', origin: 'Acme Stores', reason: 'Invoice settlement' }), createdAt: new Date('2026-08-14T10:00:00Z') },
+        ],
+      }],
+    });
+
+    const report = await buildZReport('shift-credit');
+    expect(report.customerCreditSales).toEqual([expect.objectContaining({ customerName: 'Acme Stores', amount: 100 })]);
+    expect(report.customerCollections).toEqual([expect.objectContaining({ customerName: 'Acme Stores', amount: 75 })]);
+    expect(report.paymentDetails).toEqual([expect.objectContaining({ bankName: 'People Bank', origin: 'Acme Stores', reason: 'Invoice settlement', reference: 'CH-9' })]);
   });
 
   it('ignores a malformed declared-tender blob rather than failing the Z report', async () => {

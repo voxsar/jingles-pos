@@ -75,15 +75,22 @@ export async function ensureLocalSchemaCompat() {
         "note" TEXT,
         "terminalId" TEXT,
         "userId" TEXT,
+        "shiftId" TEXT,
         "sourceDeviceId" TEXT,
         "sourceSequenceNum" INTEGER,
         "lastVectorClock" TEXT NOT NULL DEFAULT '{}',
         "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        CONSTRAINT "CreditPayment_customerId_fkey" FOREIGN KEY ("customerId") REFERENCES "Customer" ("id") ON DELETE CASCADE ON UPDATE CASCADE
+        CONSTRAINT "CreditPayment_customerId_fkey" FOREIGN KEY ("customerId") REFERENCES "Customer" ("id") ON DELETE CASCADE ON UPDATE CASCADE,
+        CONSTRAINT "CreditPayment_shiftId_fkey" FOREIGN KEY ("shiftId") REFERENCES "POSShift" ("id") ON DELETE SET NULL ON UPDATE CASCADE
       )
     `);
     await prisma.$executeRawUnsafe(`
       CREATE INDEX "CreditPayment_customerId_idx" ON "CreditPayment"("customerId")
     `);
   }
+
+  await ensureColumn('CreditPayment', 'shiftId', 'TEXT');
+  await prisma.$executeRawUnsafe(`
+    CREATE INDEX IF NOT EXISTS "CreditPayment_shiftId_idx" ON "CreditPayment"("shiftId")
+  `);
 }

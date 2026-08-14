@@ -123,13 +123,16 @@ model CreditPayment {
   note              String?
   terminalId        String?
   userId            String?
+  shiftId           String?
   sourceDeviceId    String?
   sourceSequenceNum Int?
   lastVectorClock   String   @default("{}")
   createdAt         DateTime @default(now())
   customer          Customer @relation(fields: [customerId], references: [id])
+  shift             POSShift? @relation(fields: [shiftId], references: [id])
 
   @@index([customerId])
+  @@index([shiftId])
 }
 
 model POSShift {
@@ -147,6 +150,7 @@ model POSShift {
   notes         String?
   sales         Sale[]
   cashCounts    ShiftCashCount[]
+  creditPayments CreditPayment[]
 }
 
 model ShiftCashCount {

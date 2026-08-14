@@ -2334,3 +2334,36 @@ export function buildLocalZReport(shiftId: string): ZReportSummary {
     productCount: Number(lineTotals?.product_count ?? 0),
   };
 }
+    paymentDetails: paymentRows
+      .filter((row) => row.method === 'CHEQUE' || row.method === 'BANK_TRANSFER')
+      .map((row) => {
+        const metadata = parseJson<Record<string, unknown>>(row.metadata_json, {});
+        const sale = sales.find((item) => item.id === row.sale_id);
+        return {
+          saleId: row.sale_id,
+          receiptNumber: sale?.receipt_number ?? row.sale_id,
+          customerId: sale?.customer_id ?? undefined,
+          method: row.method,
+          amount: row.amount,
+          reference: row.reference ?? undefined,
+          bankName: typeof metadata.bankName === 'string' ? metadata.bankName
+            : typeof metadata.originatingBank === 'string' ? metadata.originatingBank : undefined,
+          origin: typeof metadata.origin === 'string' ? metadata.origin : undefined,
+          reason: typeof metadata.reason === 'string' ? metadata.reason : undefined,
+          createdAt: row.created_at,
+        };
+      }),
+    customerCreditSales: paymentRows
+      .filter((row) => row.method === 'CREDIT')
+      .map((row) => {
+        const sale = sales.find((item) => item.id === row.sale_id);
+        return {
+          saleId: row.sale_id,
+          receiptNumber: sale?.receipt_number ?? row.sale_id,
+          customerId: sale?.customer_id ?? undefined,
+          customerName: sale?.customer_name ?? 'Walk-in customer',
+          amount: row.amount,
+          createdAt: row.created_at,
+        };
+      }),
+    customerCollections: [],

@@ -57,6 +57,7 @@ export interface CreditPayment {
   terminalId?: string;
   userId?: string;
   userName?: string;
+  shiftId?: string;
   createdAt: string;
 }
 
@@ -81,6 +82,7 @@ export interface RecordCreditPaymentInput {
   note?: string;
   terminalId?: string;
   userId?: string;
+  shiftId?: string;
 }
 
 export interface Category {
@@ -414,6 +416,40 @@ export interface ZReportSummary {
   declaredTenderMode?: POSTenderDeclarationMode;
   /** Mid-shift drawer movements, oldest first, so a close can be explained. */
   cashMovements: CashMovementSummary[];
+  /** Cheque and bank-transfer audit trail, including origin details captured at checkout. */
+  paymentDetails?: Array<{
+    saleId: string;
+    receiptNumber: string;
+    customerId?: string;
+    customerName?: string;
+    method: string;
+    amount: number;
+    reference?: string;
+    bankName?: string;
+    origin?: string;
+    reason?: string;
+    createdAt: string;
+  }>;
+  /** CREDIT-tender sales charged to customers during this shift. */
+  customerCreditSales?: Array<{
+    saleId: string;
+    receiptNumber: string;
+    customerId?: string;
+    customerName: string;
+    amount: number;
+    createdAt: string;
+  }>;
+  /** Customer bill collections recorded during this shift. */
+  customerCollections?: Array<{
+    paymentId: string;
+    customerId: string;
+    customerName: string;
+    amount: number;
+    method: string;
+    note?: string;
+    userName?: string;
+    createdAt: string;
+  }>;
 }
 
 export interface ZReportSlot {
@@ -921,6 +957,8 @@ export const DEFAULT_POS_CUSTOMER_DISPLAY: POSCustomerDisplaySettings = {
   storeName: '',
   showCashierName: true,
   completedSaleTimeoutSeconds: 20,
+  PaymentMethod.CHEQUE,
+  PaymentMethod.BANK_TRANSFER,
 };
 
 export const DEFAULT_POS_SCANNER_SETTINGS: POSScannerSettings = {

@@ -410,6 +410,34 @@ export function buildZReportDocument(
 
   blocks.push({ type: 'columns', left: 'Non cash total', right: formatCurrency(nonCashTotal), bold: true });
 
+  const creditSales = report.customerCreditSales ?? [];
+  const collections = report.customerCollections ?? [];
+  const sourcePayments = report.paymentDetails ?? [];
+  if (creditSales.length > 0) {
+    blocks.push({ type: 'divider' }, { type: 'text', value: 'Customer credit sales', align: 'center', bold: true });
+    for (const sale of creditSales) {
+      blocks.push(
+        { type: 'columns', left: `${sale.customerName} / ${sale.receiptNumber}`, right: formatCurrency(sale.amount) },
+      );
+    }
+  }
+  if (collections.length > 0) {
+    blocks.push({ type: 'divider' }, { type: 'text', value: 'Customer bill collections', align: 'center', bold: true });
+    for (const payment of collections) {
+      blocks.push({ type: 'columns', left: `${payment.customerName} / ${payment.method}`, right: formatCurrency(payment.amount) });
+      if (payment.note) blocks.push({ type: 'text', value: payment.note });
+    }
+  }
+  if (sourcePayments.length > 0) {
+    blocks.push({ type: 'divider' }, { type: 'text', value: 'Cheque and bank transfers', align: 'center', bold: true });
+    for (const payment of sourcePayments) {
+      blocks.push(
+        { type: 'columns', left: `${PAYMENT_LABELS[payment.method] ?? payment.method} / ${payment.receiptNumber}`, right: formatCurrency(payment.amount) },
+        { type: 'text', value: [payment.bankName, payment.origin, payment.reference, payment.reason].filter(Boolean).join(' | ') },
+      );
+    }
+  }
+
   if (!cashHidden) {
     blocks.push(
       { type: 'divider' },

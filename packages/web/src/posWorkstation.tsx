@@ -211,7 +211,43 @@ const PAYMENT_OPTIONS: Array<{ method: PaymentMethod; label: string; short: stri
   { method: PaymentMethod.CREDIT, label: 'Credit', short: 'CR' },
   { method: PaymentMethod.GIFT, label: 'Gift voucher', short: 'GV' },
   { method: PaymentMethod.INSTALLMENT, label: 'Installment plan', short: 'IN' },
+  { method: PaymentMethod.CHEQUE, label: 'Cheque', short: 'CH' },
+  { method: PaymentMethod.BANK_TRANSFER, label: 'Online bank transfer', short: 'BT' },
 ];
+
+/** CBSL licensed commercial and specialised banks operating in Sri Lanka. */
+const SRI_LANKAN_BANK_OPTIONS = [
+  'Amana Bank PLC',
+  'Bank of Ceylon',
+  'Bank of China Ltd',
+  'Cargills Bank PLC',
+  'Citibank, N.A.',
+  'Commercial Bank of Ceylon PLC',
+  'Deutsche Bank AG, Colombo Branch',
+  'DFCC Bank PLC',
+  'Habib Bank Ltd',
+  'Hatton National Bank PLC',
+  'Housing Development Finance Corporation Bank of Sri Lanka (HDFC)',
+  'Indian Bank',
+  'Indian Overseas Bank',
+  'MCB Bank Ltd',
+  'National Development Bank PLC',
+  'National Savings Bank',
+  'Nations Trust Bank PLC',
+  'Pan Asia Banking Corporation PLC',
+  "People's Bank",
+  'Pradeshiya Sanwardhana Bank',
+  'Public Bank Berhad',
+  'Sampath Bank PLC',
+  'SANASA Development Bank PLC',
+  'Seylan Bank PLC',
+  'Sri Lanka Savings Bank Ltd',
+  'Standard Chartered Bank',
+  'State Bank of India',
+  'State Mortgage and Investment Bank',
+  'The Hongkong & Shanghai Banking Corporation Ltd (HSBC)',
+  'Union Bank of Colombo PLC',
+] as const;
 
 function clampCatalogPaneWidth(nextWidth: number, containerWidth: number | undefined): number {
   if (containerWidth == null || containerWidth <= 0) {
@@ -2391,6 +2427,7 @@ export default function PosWorkstation() {
 
       {isCustomersOpen && (
         <CustomerDirectoryModal
+          currentShiftId={activeShift?.id}
           currentTerminalId={currentTerminalId}
           currentUserId={authUser?.id}
           customers={customers}
@@ -5087,6 +5124,9 @@ function PaymentModal(
   const [method, setMethod] = useState<PaymentMethod>(PaymentMethod.CASH);
   const [tendered, setTendered] = useState(0);
   const [reference, setReference] = useState('');
+  const [bankName, setBankName] = useState('');
+  const [paymentOrigin, setPaymentOrigin] = useState('');
+  const [paymentReason, setPaymentReason] = useState('');
   const [splitPayments, setSplitPayments] = useState<PaymentInput[]>([]);
   const isSplit = true;
   const [installmentCount, setInstallmentCount] = useState(3);
@@ -5189,6 +5229,9 @@ function PaymentModal(
   const hasUnsavedChanges = method !== PaymentMethod.CASH
     || tendered !== 0
     || reference.trim().length > 0
+    || bankName.trim().length > 0
+    || paymentOrigin.trim().length > 0
+    || paymentReason.trim().length > 0
     || splitPayments.length > 0
     || Object.keys(denominationCounts).length > 0
     || installmentCount !== 3;
@@ -5211,6 +5254,13 @@ function PaymentModal(
       return;
     }
     if (method === PaymentMethod.GIFT && !reference.trim()) {
+      return;
+    }
+    if (method === PaymentMethod.CHEQUE
+      && (!reference.trim() || !bankName.trim() || !paymentOrigin.trim() || !paymentReason.trim())) {
+      return;
+    }
+    if (method === PaymentMethod.BANK_TRANSFER && (!reference.trim() || !bankName.trim())) {
       return;
     }
 
@@ -5252,9 +5302,16 @@ function PaymentModal(
           ...(hasDenominations ? { denominations: denominationCounts } : {}),
           ...(changeDenominations != null ? { changeDenominations } : {}),
         }
-        : undefined,
+        : method === PaymentMethod.CHEQUE
+          ? { bankName: bankName.trim(), origin: paymentOrigin.trim(), reason: paymentReason.trim() }
+          : method === PaymentMethod.BANK_TRANSFER
+            ? { originatingBank: bankName.trim() }
+            : undefined,
     }]);
     setReference('');
+    setBankName('');
+    setPaymentOrigin('');
+    setPaymentReason('');
     setDenominationCounts({});
     setIsTenderedManuallyEdited(false);
     setTendered(0);
@@ -5504,9 +5561,38 @@ function PaymentModal(
                 className="glass-input"
                 value={reference}
                 onChange={(event) => setReference(event.target.value)}
-                placeholder={method === PaymentMethod.GIFT ? 'Voucher code (required)' : 'Auth code / last 4 digits'}
+                placeholder={method === PaymentMethod.GIFT
+                  ? 'Voucher code (required)'
+                  : method === PaymentMethod.CHEQUE
+                    ? 'Cheque number (required)'
+                    : method === PaymentMethod.BANK_TRANSFER
+                      ? 'Transfer reference (required)'
+                      : 'Auth code / last 4 digits'}
               />
             </LabelBlock>
+          )}
+
+          {(method === PaymentMethod.CHEQUE || method === PaymentMethod.BANK_TRANSFER) && (
+            <LabelBlock label={method === PaymentMethod.CHEQUE ? 'Cheque bank' : 'Originating bank'}>
+              <SearchableSelect
+                className="glass-input"
+                value={bankName}
+                onChange={setBankName}
+                options={SRI_LANKAN_BANK_OPTIONS.map((bank) => ({ value: bank, label: bank }))}
+                ariaLabel={method === PaymentMethod.CHEQUE ? 'Cheque bank' : 'Originating bank'}
+                placeholder="Search Sri Lankan banks"
+              />
+            </LabelBlock>
+          )}
+          {method === PaymentMethod.CHEQUE && (
+            <>
+              <LabelBlock label="Origin / received from">
+                <input className="glass-input" value={paymentOrigin} onChange={(event) => setPaymentOrigin(event.target.value)} placeholder="Who issued the cheque (required)" />
+              </LabelBlock>
+              <LabelBlock label="Reason">
+                <input className="glass-input" value={paymentReason} onChange={(event) => setPaymentReason(event.target.value)} placeholder="Why this cheque was received (required)" />
+              </LabelBlock>
+            </>
           )}
 
           <div className="payment-change-row">
@@ -5516,7 +5602,11 @@ function PaymentModal(
 
           {isSplit ? (
             <div className="payment-split-actions">
-              <button className="ghost-button" disabled={splitRemaining <= 0 || (method !== PaymentMethod.INSTALLMENT && tendered <= 0) || (method === PaymentMethod.GIFT && !reference.trim())} onClick={addSplitPayment}>
+              <button className="ghost-button" disabled={splitRemaining <= 0
+                || (method !== PaymentMethod.INSTALLMENT && tendered <= 0)
+                || (method === PaymentMethod.GIFT && !reference.trim())
+                || (method === PaymentMethod.CHEQUE && (!reference.trim() || !bankName.trim() || !paymentOrigin.trim() || !paymentReason.trim()))
+                || (method === PaymentMethod.BANK_TRANSFER && (!reference.trim() || !bankName.trim()))} onClick={addSplitPayment}>
                 {method === PaymentMethod.INSTALLMENT ? 'Add installment plan' : 'Add payment source'}
               </button>
               <button className="btn-primary full-width" disabled={splitPaid <= 0 || (!props.allowShortPayments && splitRemaining > 0)} onClick={completeSplitPayment}>
@@ -6152,7 +6242,14 @@ function ZReportModal(props: {
     ];
     const cell = (value: string | number) => String(value).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
     const body = rows.map((row) => `<tr>${row.map((value) => `<td>${cell(value)}</td>`).join('')}</tr>`).join('');
-    const html = `<html><head><meta charset="utf-8"></head><body><h2>JINGLES - Z Reading</h2><p>Slot: ${cell(formatShiftReference(selectedSlot.shift, props.terminalCode))}</p><p>Cashier: ${cell(selectedSlot.shift.cashierName)} | Unit: ${cell(props.terminalCode)}</p><table border="1">${body}</table></body></html>`;
+    const detailedRows = [
+      ['Type', 'Customer / Origin', 'Receipt / Reference', 'Method / Bank', 'Reason / Note', 'Amount'],
+      ...(visibleReport.customerCreditSales ?? []).map((sale) => ['Credit sale', sale.customerName, sale.receiptNumber, 'CREDIT', '', sale.amount]),
+      ...(visibleReport.customerCollections ?? []).map((payment) => ['Bill collection', payment.customerName, payment.paymentId, payment.method, payment.note ?? '', payment.amount]),
+      ...(visibleReport.paymentDetails ?? []).map((payment) => [payment.method, payment.origin ?? payment.customerName ?? '', payment.reference ?? payment.receiptNumber, payment.bankName ?? '', payment.reason ?? '', payment.amount]),
+    ];
+    const detailedBody = detailedRows.map((row) => `<tr>${row.map((value) => `<td>${cell(value)}</td>`).join('')}</tr>`).join('');
+    const html = `<html><head><meta charset="utf-8"></head><body><h2>JINGLES - Z Reading</h2><p>Slot: ${cell(formatShiftReference(selectedSlot.shift, props.terminalCode))}</p><p>Cashier: ${cell(selectedSlot.shift.cashierName)} | Unit: ${cell(props.terminalCode)}</p><table border="1">${body}</table><h3>Customer credit, collections and bank instruments</h3><table border="1">${detailedBody}</table></body></html>`;
     const url = URL.createObjectURL(new Blob([html], { type: 'application/vnd.ms-excel;charset=utf-8' }));
     const link = document.createElement('a');
     link.href = url;
@@ -6259,6 +6356,39 @@ function ZReportModal(props: {
                   />
                 );
               })}
+            </section>
+          )}
+
+          {(visibleReport.customerCreditSales ?? []).length > 0 && (
+            <section className="z-reading-noncash">
+              <h3>Customer credit sales</h3>
+              {(visibleReport.customerCreditSales ?? []).map((sale) => (
+                <ReportRow key={`${sale.saleId}-${sale.amount}`} label={`${sale.customerName} - ${sale.receiptNumber}`} value={formatCurrency(sale.amount)} />
+              ))}
+              <ReportRow label="Credit sales total" value={formatCurrency((visibleReport.customerCreditSales ?? []).reduce((sum, sale) => sum + sale.amount, 0))} strong />
+            </section>
+          )}
+
+          {(visibleReport.customerCollections ?? []).length > 0 && (
+            <section className="z-reading-noncash">
+              <h3>Customer bill collections</h3>
+              {(visibleReport.customerCollections ?? []).map((payment) => (
+                <ReportRow key={payment.paymentId} label={`${payment.customerName} - ${payment.method}${payment.note ? ` - ${payment.note}` : ''}`} value={formatCurrency(payment.amount)} />
+              ))}
+              <ReportRow label="Collections total" value={formatCurrency((visibleReport.customerCollections ?? []).reduce((sum, payment) => sum + payment.amount, 0))} strong />
+            </section>
+          )}
+
+          {(visibleReport.paymentDetails ?? []).length > 0 && (
+            <section className="z-reading-noncash">
+              <h3>Cheque and online bank transfers</h3>
+              {(visibleReport.paymentDetails ?? []).map((payment) => (
+                <ReportRow
+                  key={`${payment.saleId}-${payment.method}-${payment.reference}`}
+                  label={`${PAYMENT_METHOD_LABELS[payment.method] ?? payment.method} - ${payment.bankName ?? '-'} - ${payment.origin ?? payment.customerName ?? '-'} - ${payment.reference ?? '-'}${payment.reason ? ` - ${payment.reason}` : ''}`}
+                  value={formatCurrency(payment.amount)}
+                />
+              ))}
             </section>
           )}
 
@@ -6473,6 +6603,7 @@ const CREDIT_PAYMENT_METHODS = ['CASH', 'VISA', 'MASTER', 'AMEX'];
 function CustomerDirectoryModal(
   props: {
     currentTerminalId: string;
+    currentShiftId?: string;
     currentUserId?: string;
     customers: Customer[];
     initialCustomerId: string | null;
@@ -6500,6 +6631,7 @@ function CustomerDirectoryModal(
   const [paymentMethod, setPaymentMethod] = useState('CASH');
   const [paymentNote, setPaymentNote] = useState('');
   const [isRecordingPayment, setIsRecordingPayment] = useState(false);
+  const [collectionNotice, setCollectionNotice] = useState('');
 
   const filteredCustomers = useMemo(() => {
     const needle = query.trim().toLowerCase();
@@ -6587,9 +6719,11 @@ function CustomerDirectoryModal(
         note: paymentNote.trim() || undefined,
         terminalId: props.currentTerminalId,
         userId: props.currentUserId,
+        shiftId: props.currentShiftId,
       });
       setPaymentAmount('');
       setPaymentNote('');
+      setCollectionNotice(`Bill collection of ${formatCurrency(amount)} recorded for ${selectedCustomer.name}.`);
       await loadAccount(selectedCustomer.id);
     } catch (error) {
       setAccountError(error instanceof Error ? error.message : 'Failed to record the payment');
@@ -6703,6 +6837,7 @@ function CustomerDirectoryModal(
               </div>
 
               {accountError && <div className="toast-banner error">{accountError}</div>}
+              {collectionNotice && <div className="toast-banner success" role="status">{collectionNotice}</div>}
 
               <div className="customers-payment-form">
                 <div className="section-kicker">Record a credit payment</div>

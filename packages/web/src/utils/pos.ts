@@ -57,6 +57,8 @@ export const NON_CASH_PAYMENT_METHODS: PaymentMethod[] = [
   PaymentMethod.CREDIT,
   PaymentMethod.GIFT,
   PaymentMethod.INSTALLMENT,
+  PaymentMethod.CHEQUE,
+  PaymentMethod.BANK_TRANSFER,
 ];
 
 export const PAYMENT_METHOD_LABELS: Record<string, string> = {
@@ -67,6 +69,8 @@ export const PAYMENT_METHOD_LABELS: Record<string, string> = {
   CREDIT: 'Credit',
   GIFT: 'Gift voucher',
   INSTALLMENT: 'Installment plan',
+  CHEQUE: 'Cheque',
+  BANK_TRANSFER: 'Online bank transfer',
   [TENDER_TOTAL_KEY]: 'All non-cash tender',
 };
 

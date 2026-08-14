@@ -1057,6 +1057,7 @@ async function applyCreditPaymentRecordedEvent(
       note: payload.note ?? null,
       terminalId: payload.terminalId ?? null,
       userId: payload.userId ?? null,
+      shiftId: payload.shiftId ?? null,
       sourceDeviceId: event.deviceId,
       sourceSequenceNum: event.sequenceNum,
       lastVectorClock: json(event.vectorClock),
@@ -1902,7 +1903,11 @@ export async function syncWithUpstream(options?: {
   return nextRun;
 }
 
-const zReportInclude = { cashCounts: true, sales: { include: { payments: true, returns: true, lines: true } } } as const;
+const zReportInclude = {
+  cashCounts: true,
+  creditPayments: { include: { customer: true } },
+  sales: { include: { customer: true, payments: true, returns: true, lines: true } },
+} as const;
 type ZReportShift = Prisma.POSShiftGetPayload<{ include: typeof zReportInclude }>;
 
 /** Reads the declared-tender blob defensively; a malformed row must not break a Z-report. */
@@ -1946,6 +1951,56 @@ function summarizeZShift(shift: ZReportShift): ZReportSummary {
       }
       return bucket;
     }, {});
+    const readPaymentMetadata = (raw: string | null): Record<string, unknown> => {
+      if (!raw) return {};
+      try {
+        const parsed = JSON.parse(raw) as unknown;
+        return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+          ? parsed as Record<string, unknown>
+          : {};
+      } catch {
+        return {};
+      }
+    };
+    const paymentDetails = shift.sales.flatMap((sale) => sale.payments
+      .filter((payment) => payment.method === 'CHEQUE' || payment.method === 'BANK_TRANSFER')
+      .map((payment) => {
+        const metadata = readPaymentMetadata(payment.metadata);
+        return {
+          saleId: sale.id,
+          receiptNumber: sale.receiptNumber,
+          customerId: sale.customerId ?? undefined,
+          customerName: sale.customer?.name,
+          method: payment.method,
+          amount: payment.amount,
+          reference: payment.reference ?? undefined,
+          bankName: typeof metadata.bankName === 'string'
+            ? metadata.bankName
+            : typeof metadata.originatingBank === 'string' ? metadata.originatingBank : undefined,
+          origin: typeof metadata.origin === 'string' ? metadata.origin : undefined,
+          reason: typeof metadata.reason === 'string' ? metadata.reason : undefined,
+          createdAt: payment.createdAt.toISOString(),
+        };
+      }));
+    const customerCreditSales = shift.sales.flatMap((sale) => sale.payments
+      .filter((payment) => payment.method === 'CREDIT')
+      .map((payment) => ({
+        saleId: sale.id,
+        receiptNumber: sale.receiptNumber,
+        customerId: sale.customerId ?? undefined,
+        customerName: sale.customer?.name ?? 'Walk-in customer',
+        amount: payment.amount,
+        createdAt: payment.createdAt.toISOString(),
+      })));
+    const customerCollections = (shift.creditPayments ?? []).map((payment) => ({
+      paymentId: payment.id,
+      customerId: payment.customerId,
+      customerName: payment.customer.name,
+      amount: payment.amount,
+      method: payment.method,
+      note: payment.note ?? undefined,
+      createdAt: payment.createdAt.toISOString(),
+    }));
     const discountedLineCount = shift.sales.reduce(
       (count, sale) => count + (sale.lines ?? []).filter((line) => line.discountAmount > 0).length,
       0,
@@ -2004,6 +2059,9 @@ function summarizeZShift(shift: ZReportShift): ZReportSummary {
       declaredTenders,
       declaredTenderMode: (closingCount?.tenderMode as ZReportSummary['declaredTenderMode']) ?? undefined,
       cashMovements,
+      paymentDetails,
+      customerCreditSales,
+      customerCollections,
     };
 }
 
