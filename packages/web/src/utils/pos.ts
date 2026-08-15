@@ -57,6 +57,33 @@ export function findSaleByReceiptScan(sales: SaleSummary[], code: string) {
   )) ?? null;
 }
 
+export function buildProductScanCodeIndex(products: Product[]) {
+  const index = new Map<string, { product: Product; variant?: ProductVariant }>();
+  const register = (
+    code: string | undefined | null,
+    entry: { product: Product; variant?: ProductVariant },
+  ) => {
+    const key = code?.trim().toLowerCase();
+    if (key && !index.has(key)) index.set(key, entry);
+  };
+
+  for (const product of products) {
+    register(product.sku, { product });
+
+    for (const variant of product.variants ?? []) {
+      register(variant.variantCode, { product, variant });
+      for (const barcode of variant.barcodes ?? []) register(barcode, { product, variant });
+    }
+
+    // Variant aliases win over the product-wide list so a scan can select the
+    // exact variant while every other alias still resolves to the product.
+    for (const barcode of product.barcodes ?? []) register(barcode, { product });
+    register(product.barcode, { product });
+  }
+
+  return index;
+}
+
 /** Tender types a cashier can be asked to declare alongside the cash count. */
 export const NON_CASH_PAYMENT_METHODS: PaymentMethod[] = [
   PaymentMethod.VISA,

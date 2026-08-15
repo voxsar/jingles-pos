@@ -62,6 +62,7 @@ model Product {
   sku             String      @unique
   name            String
   barcode         String?     @unique
+  barcodesJson    String?     @map("barcodes_json")
   price           Float
   categoryId      String?
   subcategory     String      @default("")

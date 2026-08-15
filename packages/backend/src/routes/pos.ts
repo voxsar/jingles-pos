@@ -137,6 +137,7 @@ function mapProduct(product: any) {
     id: product.id,
     sku: product.sku,
     barcode: product.barcode ?? undefined,
+    barcodes: parseJson(product.barcodesJson, []),
     name: product.name,
     categoryId: product.categoryId ?? 'uncategorized',
     subcategory: product.subcategory || '',
@@ -639,6 +640,7 @@ router.get('/products/search', async (req: Request, res: Response) => {
         product.sku.toLowerCase().includes(term) ||
         product.name.toLowerCase().includes(term) ||
         (product.barcode?.toLowerCase() ?? '') === term ||
+        product.barcodes?.some((barcode: string) => barcode.toLowerCase().includes(term)) ||
         product.subcategory.toLowerCase().includes(term)
       ))
       .slice(0, 30);

@@ -40,5 +40,8 @@ describe('desktop schema compatibility', () => {
     expect(executeRawUnsafe).toHaveBeenCalledWith(
       'ALTER TABLE "POSUser" ADD COLUMN "is_salesman" BOOLEAN NOT NULL DEFAULT true',
     );
+    expect(executeRawUnsafe).toHaveBeenCalledWith(
+      'ALTER TABLE "Product" ADD COLUMN "barcodes_json" TEXT',
+    );
   });
 });

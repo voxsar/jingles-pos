@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { CartLine, PaymentMethod, Product, UserRole } from '@jingles/shared';
 import {
   calcCartTotals,
+  buildProductScanCodeIndex,
   createCartLine,
   formatCurrency,
   findSaleByReceiptScan,
@@ -11,6 +12,25 @@ import {
   recalculateCartLine,
   saleIncludesCash,
 } from '../utils/pos';
+
+describe('buildProductScanCodeIndex', () => {
+  it('matches every saved barcode and preserves exact variant scans', () => {
+    const product = {
+      id: 'prod-1', sku: 'SKU-1', barcode: '111', barcodes: ['111', '222', '333'], name: 'Widget',
+      categoryId: 'cat-1', subcategory: 'Tools', packSize: 1, unitLabel: 'pcs', stockOnHand: 10,
+      priceTiers: [],
+      variants: [{
+        id: 'variant-1', productId: 'prod-1', variantCode: 'SKU-1-BLUE', barcodes: ['333'],
+        stockOnHand: 2, attributes: [],
+      }],
+    } satisfies Product;
+
+    const index = buildProductScanCodeIndex([product]);
+
+    expect(index.get('222')?.product.id).toBe('prod-1');
+    expect(index.get('333')?.variant?.id).toBe('variant-1');
+  });
+});
 
 describe('findSaleByReceiptScan', () => {
   const sales = [

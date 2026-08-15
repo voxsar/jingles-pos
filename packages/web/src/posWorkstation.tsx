@@ -146,6 +146,7 @@ import { useBarcodeScanner } from './useBarcodeScanner';
 import {
   addCounts,
   buildCashDeclaration,
+  buildProductScanCodeIndex,
   calcCartTotals,
   createCartLine,
   createEmptyDenominationCounts,
@@ -1557,25 +1558,7 @@ export default function PosWorkstation() {
    * without opening the variant picker.
    */
   const productsByScanCode = useMemo(() => {
-    const index = new Map<string, { product: Product; variant?: ProductVariant }>();
-
-    const register = (code: string | undefined | null, entry: { product: Product; variant?: ProductVariant }) => {
-      const key = code?.trim().toLowerCase();
-      if (key && !index.has(key)) {
-        index.set(key, entry);
-      }
-    };
-
-    for (const product of products) {
-      register(product.barcode, { product });
-      register(product.sku, { product });
-
-      for (const variant of product.variants ?? []) {
-        register(variant.variantCode, { product, variant });
-      }
-    }
-
-    return index;
+    return buildProductScanCodeIndex(products);
   }, [products]);
 
   const handleBarcodeScan = useCallback((code: string) => {

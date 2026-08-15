@@ -137,6 +137,7 @@ export interface ProductVariant {
   id: string;
   productId: string;
   variantCode: string;
+  barcodes?: string[];
   name?: string;
   stockOnHand: number;
   stockByBranch?: Record<string, number>;
@@ -148,6 +149,7 @@ export interface Product {
   id: string;
   sku: string;
   barcode?: string;
+  barcodes?: string[];
   name: string;
   categoryId: string;
   subcategory: string;

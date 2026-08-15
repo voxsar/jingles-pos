@@ -8,6 +8,7 @@ type LocalProductRow = {
   id: string;
   sku: string;
   barcode: string | null;
+  barcodesJson: string | null;
   name: string;
   categoryId: string | null;
   subcategory: string;
@@ -46,7 +47,7 @@ const LOCAL_CATALOG_TRIGGER_SQL = `
     VALUES (
       NEW.id,
       NEW.sku,
-      COALESCE(NEW.barcode, ''),
+      COALESCE((SELECT group_concat(value, ' ') FROM json_each(COALESCE(NEW.barcodes_json, '[]'))), COALESCE(NEW.barcode, '')),
       NEW.name,
       COALESCE(NEW.subcategory, ''),
       COALESCE(NEW.description, '')
@@ -67,7 +68,7 @@ const LOCAL_CATALOG_TRIGGER_SQL = `
     VALUES (
       NEW.id,
       NEW.sku,
-      COALESCE(NEW.barcode, ''),
+      COALESCE((SELECT group_concat(value, ' ') FROM json_each(COALESCE(NEW.barcodes_json, '[]'))), COALESCE(NEW.barcode, '')),
       NEW.name,
       COALESCE(NEW.subcategory, ''),
       COALESCE(NEW.description, '')
@@ -140,6 +141,7 @@ function mapProductRow(
     id: product.id,
     sku: product.sku,
     barcode: product.barcode ?? undefined,
+    barcodes: parseJsonArray<string>(product.barcodesJson),
     name: product.name,
     categoryId: product.categoryId ?? 'uncategorized',
     subcategory: product.subcategory ?? '',
@@ -178,6 +180,12 @@ export async function ensureLocalCatalogSearchIndex() {
     )
   `);
 
+  // Replace triggers created by older releases so future catalog updates keep
+  // indexing every alias, not just the preferred barcode.
+  await prisma.$executeRawUnsafe('DROP TRIGGER IF EXISTS product_search_ai');
+  await prisma.$executeRawUnsafe('DROP TRIGGER IF EXISTS product_search_ad');
+  await prisma.$executeRawUnsafe('DROP TRIGGER IF EXISTS product_search_au');
+
   await prisma.$executeRawUnsafe(`
     CREATE TRIGGER IF NOT EXISTS product_search_ai
     AFTER INSERT ON "Product"
@@ -186,7 +194,7 @@ export async function ensureLocalCatalogSearchIndex() {
       VALUES (
         NEW.id,
         NEW.sku,
-        COALESCE(NEW.barcode, ''),
+        COALESCE((SELECT group_concat(value, ' ') FROM json_each(COALESCE(NEW.barcodes_json, '[]'))), COALESCE(NEW.barcode, '')),
         NEW.name,
         COALESCE(NEW.subcategory, ''),
         COALESCE(NEW.description, '')
@@ -211,7 +219,7 @@ export async function ensureLocalCatalogSearchIndex() {
       VALUES (
         NEW.id,
         NEW.sku,
-        COALESCE(NEW.barcode, ''),
+        COALESCE((SELECT group_concat(value, ' ') FROM json_each(COALESCE(NEW.barcodes_json, '[]'))), COALESCE(NEW.barcode, '')),
         NEW.name,
         COALESCE(NEW.subcategory, ''),
         COALESCE(NEW.description, '')
@@ -233,7 +241,7 @@ export async function rebuildLocalCatalogSearchIndex() {
     SELECT
       id,
       sku,
-      COALESCE(barcode, ''),
+      COALESCE((SELECT group_concat(value, ' ') FROM json_each(COALESCE(barcodes_json, '[]'))), COALESCE(barcode, '')),
       name,
       COALESCE(subcategory, ''),
       COALESCE(description, '')
@@ -302,7 +310,7 @@ function rebuildLocalCatalogSearchIndexDirect(db: DirectSqliteDatabase) {
     SELECT
       id,
       sku,
-      COALESCE(barcode, ''),
+      COALESCE((SELECT group_concat(value, ' ') FROM json_each(COALESCE(barcodes_json, '[]'))), COALESCE(barcode, '')),
       name,
       COALESCE(subcategory, ''),
       COALESCE(description, '')
@@ -347,10 +355,10 @@ function replaceLocalCatalogSnapshotDirect(snapshot: SharedCatalogSnapshot) {
     `);
     const insertProduct = db.prepare(`
       INSERT INTO "Product" (
-        id, sku, barcode, name, price, categoryId, subcategory, packSize,
+        id, sku, barcode, barcodes_json, name, price, categoryId, subcategory, packSize,
         unitLabel, stockOnHand, stock_by_branch_json, pricing_rules_json, description, variants_json, lastVectorClock, createdAt, updatedAt
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-      ON CONFLICT(id) DO UPDATE SET sku=excluded.sku, barcode=excluded.barcode,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+      ON CONFLICT(id) DO UPDATE SET sku=excluded.sku, barcode=excluded.barcode, barcodes_json=excluded.barcodes_json,
         name=excluded.name, price=excluded.price, categoryId=excluded.categoryId,
         subcategory=excluded.subcategory, packSize=excluded.packSize,
         unitLabel=excluded.unitLabel, stockOnHand=excluded.stockOnHand,
@@ -491,6 +499,7 @@ function replaceLocalCatalogSnapshotDirect(snapshot: SharedCatalogSnapshot) {
           product.id,
           product.sku,
           product.barcode ?? null,
+          JSON.stringify(product.barcodes ?? (product.barcode ? [product.barcode] : [])),
           product.name,
           product.priceTiers[0]?.price ?? 0,
           product.categoryId ?? null,
@@ -608,6 +617,7 @@ export async function replaceLocalCatalogSnapshot(snapshot: SharedCatalogSnapsho
     id: product.id,
     sku: product.sku,
     barcode: product.barcode ?? null,
+    barcodesJson: JSON.stringify(product.barcodes ?? (product.barcode ? [product.barcode] : [])),
     name: product.name,
     price: product.priceTiers[0]?.price ?? 0,
     categoryId: product.categoryId,
@@ -754,6 +764,7 @@ export async function searchLocalCatalog(query: string) {
           { sku: { contains: trimmedQuery } },
           { name: { contains: trimmedQuery } },
           { barcode: trimmedQuery },
+          { barcodesJson: { contains: trimmedQuery } },
           { subcategory: { contains: trimmedQuery } },
         ],
       },
@@ -774,10 +785,15 @@ export async function searchLocalCatalog(query: string) {
       `
         SELECT id
         FROM "Product"
-        WHERE barcode = ?
+         WHERE barcode = ?
+            OR EXISTS (
+              SELECT 1 FROM json_each(COALESCE(barcodes_json, '[]')) aliases
+              WHERE aliases.value = ?
+            )
         ORDER BY sku ASC
         LIMIT 5
       `,
+      trimmedQuery,
       trimmedQuery,
     )
   ).map((row) => row.id);
@@ -797,12 +813,17 @@ export async function searchLocalCatalog(query: string) {
           AND p.id NOT IN (
             SELECT id
             FROM "Product"
-            WHERE barcode = ?
+             WHERE barcode = ?
+                OR EXISTS (
+                  SELECT 1 FROM json_each(COALESCE(barcodes_json, '[]')) aliases
+                  WHERE aliases.value = ?
+                )
           )
         ORDER BY bm25(product_search), p.sku ASC
         LIMIT 30
       `,
       ftsQuery,
+      trimmedQuery,
       trimmedQuery,
     )
   ).map((row) => row.id);

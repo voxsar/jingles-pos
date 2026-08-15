@@ -42,6 +42,7 @@ export async function ensureLocalSchemaCompat() {
   await ensureColumn('POSUser', 'access_scope', "TEXT NOT NULL DEFAULT 'BOTH'");
   await ensureColumn('POSUser', 'is_salesman', 'BOOLEAN NOT NULL DEFAULT true');
   await ensureColumn('Product', 'variants_json', 'TEXT');
+  await ensureColumn('Product', 'barcodes_json', 'TEXT');
   await ensureColumn('HeldSaleLine', 'variantId', 'TEXT');
   await ensureColumn('HeldSaleLine', 'variantCode', 'TEXT');
   await ensureColumn('HeldSaleLine', 'variantName', 'TEXT');

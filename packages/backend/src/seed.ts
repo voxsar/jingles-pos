@@ -133,6 +133,7 @@ async function ensureSeedDataInternal(): Promise<void> {
         id: product.id,
         sku: product.sku,
         barcode: product.barcode ?? null,
+        barcodesJson: JSON.stringify(product.barcodes ?? (product.barcode ? [product.barcode] : [])),
         name: product.name,
         price: product.priceTiers[0]?.price ?? 0,
         categoryId: product.categoryId,
