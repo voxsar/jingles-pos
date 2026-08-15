@@ -129,7 +129,7 @@ export const HELP_TOPICS: HelpTopic[] = [
       {
         title: 'Fine-tune cart lines',
         body:
-          'Each cart line lets you change the quantity, the price tier, the assigned salesperson, and a per-line discount. Remove a line with the x button — the void confirmation protects against accidental taps.',
+          'Each cart line lets you change the quantity, the price tier, the assigned salesperson, and a per-line discount. Remove a line with the x button, or press Delete in the cart header to number every line and press the matching digit key — either way, the void confirmation protects against accidental taps.',
         image: image('cart.png', 'A cart line expanded: quantity, tier, salesperson and line discount are all editable in place.'),
       },
     ],

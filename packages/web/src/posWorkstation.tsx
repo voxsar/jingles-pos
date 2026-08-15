@@ -292,6 +292,8 @@ const PAYMENT_SUGGESTION_KEYS = [
   { code: 'KeyY', label: 'Y' },
 ] as const;
 
+const INSTALLMENT_COUNT_OPTIONS = [2, 3, 4, 6, 12] as const;
+
 /** CBSL licensed commercial and specialised banks operating in Sri Lanka. */
 const SRI_LANKAN_BANK_OPTIONS = [
   'Amana Bank PLC',
@@ -404,6 +406,7 @@ export default function PosWorkstation() {
   const [isCustomersOpen, setIsCustomersOpen] = useState(false);
   const [isVoidOpen, setIsVoidOpen] = useState(false);
   const [voidLineId, setVoidLineId] = useState<string | null>(null);
+  const [isLineDeleteMode, setIsLineDeleteMode] = useState(false);
   const [activeHeldSaleId, setActiveHeldSaleId] = useState<string | null>(null);
   const [receiptSale, setReceiptSale] = useState<SaleSummary | null>(null);
   const [isSyncing, setIsSyncing] = useState(false);
@@ -1287,12 +1290,44 @@ export default function PosWorkstation() {
     setIsReturnOpen(false);
     setIsOrdersOpen(false);
     setIsVoidOpen(false);
+    setIsLineDeleteMode(false);
     setIsCashMovementOpen(false);
     setIsCustomersOpen(false);
     setReceiptSale(null);
     setIsSettingsOpen(false);
     setSettingsDraft(desktopSettings);
   }, [desktopSettings]);
+
+  /**
+   * Line-delete mode numbers each cart line, same as the customer/staff
+   * pickers, so a digit key picks one without reaching for the mouse. The
+   * digit only chooses the target - removal still goes through the same void
+   * confirmation as clicking a line's own x button.
+   */
+  useEffect(() => {
+    if (!isLineDeleteMode) return undefined;
+
+    const handleKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        event.stopPropagation();
+        setIsLineDeleteMode(false);
+        return;
+      }
+      const index = popupNumberIndex(event);
+      if (index == null) return;
+      event.preventDefault();
+      event.stopPropagation();
+      const line = cart[index];
+      if (line == null) return;
+      setVoidLineId(line.uid);
+      setIsVoidOpen(true);
+      setIsLineDeleteMode(false);
+    };
+
+    window.addEventListener('keydown', handleKey, true);
+    return () => window.removeEventListener('keydown', handleKey, true);
+  }, [cart, isLineDeleteMode]);
 
   const handleStartSession = useCallback(() => {
     if (bootstrapData == null || authUser == null) {
@@ -1658,9 +1693,10 @@ export default function PosWorkstation() {
       variance: submission.variance,
     });
 
-    // A flagged shift is still allowed to close — the cashier may genuinely be
-    // short — but the discrepancy has to be acknowledged rather than clicked past,
-    // and it is written into the shift notes so the close is auditable.
+    // A flagged shift closes exactly like any other — the discrepancy is
+    // never surfaced to whoever is standing at the till. It's written into
+    // the shift notes and marked `flagged` instead, so it lands in the
+    // inventory system for back-office review rather than blocking the close.
     const reconciliation = zReport == null
       ? null
       : summarizeShiftReconciliation(zReport, declaration, shiftReconciliationSettings);
@@ -1671,15 +1707,6 @@ export default function PosWorkstation() {
         .map((row) => `${row.label}: declared ${formatCurrency(row.declared)} vs ${formatCurrency(row.expected)} expected (${formatCurrency(row.variance)})`)
         .join('\n');
       notes = `Closed with a flagged discrepancy:\n${detail}`;
-
-      if (shiftReconciliationSettings.requireConfirmationOnAlert) {
-        const confirmed = window.confirm(
-          `This declaration does not match the transaction log:\n\n${detail}\n\nClose the shift anyway? The discrepancy will be recorded against it.`,
-        );
-        if (!confirmed) {
-          return;
-        }
-      }
     }
 
     try {
@@ -1689,6 +1716,7 @@ export default function PosWorkstation() {
         closingFloat: declaration.total,
         notes,
         declaration,
+        flagged: reconciliation?.hasAlert ?? false,
       });
 
       setMoneyMode(null);
@@ -2131,6 +2159,7 @@ export default function PosWorkstation() {
     || isReturnOpen
     || isOrdersOpen
     || isVoidOpen
+    || isLineDeleteMode
     || isSettingsOpen
     || isCashMovementOpen
     || isCustomersOpen
@@ -2502,6 +2531,7 @@ export default function PosWorkstation() {
           defaultTierLabel={defaultTierLabel}
           defaultTierOptions={defaultTierOptions}
           discountInputRef={discountInputRef}
+          isLineDeleteMode={isLineDeleteMode}
           onBillDiscountChange={(value) => setBillDiscount(Math.max(0, value))}
           onClearCart={() => {
             setVoidLineId(null);
@@ -2556,6 +2586,7 @@ export default function PosWorkstation() {
             });
           }}
           onPay={() => setIsPaymentOpen(true)}
+          onToggleLineDeleteMode={() => setIsLineDeleteMode((current) => !current)}
           salespeople={salespeople}
           totals={totals}
           variantProductIds={productsWithVariants}
@@ -3396,6 +3427,7 @@ type CartPanelProps = {
   defaultTierLabel: string;
   defaultTierOptions: string[];
   discountInputRef: React.RefObject<HTMLInputElement>;
+  isLineDeleteMode: boolean;
   onBillDiscountChange: (value: number) => void;
   onClearCart: () => void;
   onCustomerChange: (value: string) => void;
@@ -3409,6 +3441,7 @@ type CartPanelProps = {
   onLineSalespersonChange: (lineId: string, salespersonId: string) => void;
   onLineTierChange: (lineId: string, tierLabel: string) => void;
   onPay: () => void;
+  onToggleLineDeleteMode: () => void;
   onViewCustomer: () => void;
   salespeople: POSUser[];
   totals: ReturnType<typeof calcCartTotals>;
@@ -3423,6 +3456,15 @@ function CartPanel(props: CartPanelProps) {
           <div className="meta-label">Active sale</div>
           <div className="cart-sale-id">{props.activeHeldSaleId != null ? `Recalled ${props.activeHeldSaleId}` : 'New walk-in sale'}</div>
         </div>
+        <button
+          className={`ghost-button small ${props.isLineDeleteMode ? 'active' : ''}`}
+          onClick={props.onToggleLineDeleteMode}
+          disabled={props.cart.length === 0}
+          title="Number the cart lines so a digit key removes one"
+          type="button"
+        >
+          {props.isLineDeleteMode ? 'Esc - Cancel' : 'Delete'}
+        </button>
         <button className="ghost-button small" onClick={props.onClearCart} disabled={props.cart.length === 0}>
           Void
         </button>
@@ -3478,7 +3520,7 @@ function CartPanel(props: CartPanelProps) {
             <div className="empty-copy">Scan, search, or tap a product tile to begin.</div>
           </div>
         ) : (
-          props.cart.map((line) => (
+          props.cart.map((line, index) => (
             <div key={line.uid} className="cart-line">
               <div className="cart-line-body">
                 <div className="cart-line-top">
@@ -3489,9 +3531,19 @@ function CartPanel(props: CartPanelProps) {
                     )}
                     <div className="cart-line-meta">{line.sku} - stock {formatStockQuantity(line.stockOnHand)}</div>
                   </div>
-                  <button className="line-remove" onClick={() => props.onLineRemove(line.uid)}>
-                    x
-                  </button>
+                  {props.isLineDeleteMode && index < 9 ? (
+                    <button
+                      className="line-remove picker-number-button"
+                      onClick={() => props.onLineRemove(line.uid)}
+                      title={`Press ${index + 1} to remove this line`}
+                    >
+                      <kbd className="picker-number">{index + 1}</kbd>
+                    </button>
+                  ) : (
+                    <button className="line-remove" onClick={() => props.onLineRemove(line.uid)}>
+                      x
+                    </button>
+                  )}
                 </div>
 
                 {props.variantProductIds.has(line.productId) && (
@@ -4344,21 +4396,9 @@ function ShiftReconciliationCard(
 
       <div className="field-hint">
         A declaration is flagged when it differs from the expected figure by either threshold. Set a
-        threshold to 0 to switch that check off.
+        threshold to 0 to switch that check off. The cashier never sees this — a flagged shift closes
+        normally, and the discrepancy is logged for review in the inventory system.
       </div>
-
-      <label className="settings-checkbox-row admin-setting-row">
-        <input
-          type="checkbox"
-          disabled={props.disabled}
-          checked={props.settings.requireConfirmationOnAlert}
-          onChange={(event) => update('requireConfirmationOnAlert', event.target.checked)}
-        />
-        <span>
-          <b>Confirm before closing a flagged shift</b>
-          <small>The cashier must acknowledge the discrepancy, and it is recorded against the shift either way.</small>
-        </span>
-      </label>
 
       <label className="settings-checkbox-row admin-setting-row">
         <input
@@ -6179,6 +6219,7 @@ function PaymentModal(
   const [isUnderpaymentWarning, setIsUnderpaymentWarning] = useState(false);
   const [completeAfterAdd, setCompleteAfterAdd] = useState(false);
   const tenderedInputRef = useRef<HTMLInputElement>(null);
+  const referenceInputRef = useRef<HTMLInputElement>(null);
   const splitPaid = roundToMoney(splitPayments.reduce((sum, payment) => sum + payment.amount, 0));
   const splitRemaining = Math.max(0, roundToMoney(props.total - splitPaid));
   const splitChange = roundToMoney(splitPayments.reduce((sum, payment) => sum + (payment.changeDue ?? 0), 0));
@@ -6455,6 +6496,35 @@ function PaymentModal(
         }
       }
 
+      // R is CASH's 4th quick-amount suggestion (handled above), but for every
+      // other method it jumps to the Reference field instead - the field a
+      // non-cash payment almost always still needs filled in. Once the cursor
+      // is actually inside Reference it reads as "other text entry" above and
+      // this block is skipped, so typing the letter R there just types R.
+      if (method !== PaymentMethod.CASH && method !== PaymentMethod.INSTALLMENT && event.code === 'KeyR') {
+        event.preventDefault();
+        event.stopPropagation();
+        // Deferred a frame, same as focusTendered/rejectUnderpayment below: a
+        // method switch just before this key also queues a refocus of the
+        // Amount field, and queuing after it (rather than focusing
+        // synchronously here) guarantees this one runs last and wins.
+        window.requestAnimationFrame(() => {
+          referenceInputRef.current?.focus();
+          referenceInputRef.current?.select();
+        });
+        return;
+      }
+
+      if (method === PaymentMethod.INSTALLMENT && event.code === 'KeyR') {
+        event.preventDefault();
+        event.stopPropagation();
+        setInstallmentCount((current) => {
+          const index = INSTALLMENT_COUNT_OPTIONS.indexOf(current as (typeof INSTALLMENT_COUNT_OPTIONS)[number]);
+          return INSTALLMENT_COUNT_OPTIONS[(index + 1) % INSTALLMENT_COUNT_OPTIONS.length];
+        });
+        return;
+      }
+
       const paymentOption = PAYMENT_OPTIONS.find((option) => option.keyCode === event.code);
       if (paymentOption) {
         event.preventDefault();
@@ -6569,13 +6639,13 @@ function PaymentModal(
           )}
 
           {method === PaymentMethod.INSTALLMENT ? (
-            <LabelBlock label="Number of installments">
+            <LabelBlock label="Number of installments (R cycles)">
               <SearchableSelect
                 className="glass-input large"
                 value={String(installmentCount)}
                 disabled={splitPayments.length > 0}
                 onChange={(value) => setInstallmentCount(Number(value))}
-                options={[2, 3, 4, 6, 12].map((count) => ({ value: String(count), label: `${count} installments` }))}
+                options={INSTALLMENT_COUNT_OPTIONS.map((count) => ({ value: String(count), label: `${count} installments` }))}
                 ariaLabel="Number of installments"
               />
               <div className="installment-preview">
@@ -6738,8 +6808,9 @@ function PaymentModal(
           )}
 
           {method !== PaymentMethod.CASH && method !== PaymentMethod.INSTALLMENT && (
-            <LabelBlock label="Reference">
+            <LabelBlock label="Reference (R)">
               <input
+                ref={referenceInputRef}
                 className="glass-input"
                 value={reference}
                 onChange={(event) => setReference(event.target.value)}
@@ -7024,15 +7095,13 @@ function MoneyDeclareModal(
             <div className="meta-label">{isClosing ? 'Counted drawer' : 'Declared float'}</div>
             <div className="payment-total">{formatCurrency(declaration.total)}</div>
           </div>
-          {isClosing && !props.cashSalesHidden && reconciliation != null && (
-            <div className="variance-card">
-              <div className="meta-label">Expected drawer</div>
-              <div>{formatCurrency(reconciliation.cash.expected)}</div>
-              <div className={varianceClass(reconciliation.cash.variance, reconciliation.cash.flagged)}>
-                Variance {formatCurrency(reconciliation.cash.variance)}
-              </div>
-            </div>
-          )}
+          {/*
+            No expected-drawer / variance figure is shown here on purpose: the
+            reconciliation still runs (see `reconciliation` below) and its
+            result travels with the close, but the comparison itself is a
+            back-office concern, not something to put in front of whoever is
+            closing the till. See handleCloseShift for where it's logged.
+          */}
         </div>
 
         {isClosing && !props.cashSalesHidden && cashMovements.length > 0 && (
@@ -7116,22 +7185,12 @@ function MoneyDeclareModal(
           </section>
         )}
 
-        {reconciliation?.hasAlert && (
-          <div className="inline-alert danger">
-            <b>Large discrepancy against the transaction log.</b>
-            <ul className="discrepancy-list">
-              {reconciliation.flaggedRows.map((row) => (
-                <li key={row.key}>
-                  {row.label}: declared {formatCurrency(row.declared)} against {formatCurrency(row.expected)} expected
-                  {' '}({row.variance > 0 ? 'over' : 'short'} by {formatCurrency(Math.abs(row.variance))}).
-                </li>
-              ))}
-            </ul>
-            <small>
-              Threshold: {formatCurrency(props.settings.alertThresholdAmount)} or {props.settings.alertThresholdPercent}% of the expected figure.
-            </small>
-          </div>
-        )}
+        {/*
+          A flagged declaration (reconciliation?.hasAlert) is deliberately not
+          rendered here — see handleCloseShift, which logs it and marks the
+          close `flagged` for review in the inventory system instead of
+          showing the discrepancy at the till.
+        */}
 
         <div className="modal-actions">
           <button className="ghost-button" onClick={props.onClose}>Cancel</button>

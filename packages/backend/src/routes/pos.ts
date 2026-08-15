@@ -737,6 +737,9 @@ router.post('/shifts/:id/close', async (req: Request, res: Response) => {
         closingFloat: req.body.closingFloat ?? 0,
         notes: req.body.notes,
         declaration: req.body.declaration,
+        // Carried through as-is so the inventory system can queue a review
+        // without the workstation having to show anything to the cashier.
+        flagged: req.body.flagged === true,
       },
     });
 

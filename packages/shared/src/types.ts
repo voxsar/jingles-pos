@@ -472,6 +472,12 @@ export interface ShiftCloseInput {
   closingFloat: number;
   notes?: string;
   declaration?: CashDeclaration;
+  /**
+   * True when the declaration cleared the reconciliation alert threshold.
+   * The cashier is never shown this — it exists so the discrepancy can be
+   * queued for back-office review in the inventory system instead.
+   */
+  flagged?: boolean;
 }
 
 export interface HoldSaleInput {
