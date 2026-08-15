@@ -6465,7 +6465,12 @@ function PaymentModal(
         return;
       }
 
-      if (method === PaymentMethod.CASH) {
+      // The tendered field stays exempt from isOtherTextEntry above so Esc and
+      // the complete-payment key still work while it's focused, but a digit
+      // shortcut match while it's the actual target must not win over typing
+      // a manual amount into it — otherwise every digit keystroke gets eaten
+      // as "add a note" instead of reaching the input.
+      if (method === PaymentMethod.CASH && target !== tenderedInputRef.current) {
         const cashShortcut = CASH_DENOMINATION_SHORTCUTS.find((shortcut) => shortcut.code === event.code);
         if (cashShortcut) {
           event.preventDefault();
@@ -7035,7 +7040,13 @@ function MoneyDeclareModal(
 
   useEffect(() => {
     const handleCashKey = (event: KeyboardEvent) => {
-      const shortcut = cashDenominationShortcut(event);
+      // Every denomination row has its own typed-count field, so a digit
+      // shortcut must stand down while one of those (or any other input) has
+      // focus — otherwise typing a count by hand gets hijacked into bumping
+      // whichever row the key nominally belongs to.
+      const target = event.target as HTMLElement | null;
+      const isTyping = target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement;
+      const shortcut = isTyping ? null : cashDenominationShortcut(event);
       if (shortcut != null) {
         event.preventDefault();
         setCounts((previous) => ({
@@ -7268,7 +7279,13 @@ function CashMovementModal(
 
   useEffect(() => {
     const handleCashKey = (event: KeyboardEvent) => {
-      const shortcut = cashDenominationShortcut(event);
+      // Denomination rows and the reason box are all typed fields, so a digit
+      // shortcut (and I/O below) must stand down while any of them has focus —
+      // otherwise a digit meant for a row's count, or for "invoice 2024" in
+      // the reason box, gets hijacked into bumping an unrelated denomination.
+      const target = event.target as HTMLElement | null;
+      const isTyping = target != null && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA');
+      const shortcut = isTyping ? null : cashDenominationShortcut(event);
       if (shortcut != null) {
         event.preventDefault();
         setCounts((previous) => ({
@@ -7285,8 +7302,6 @@ function CashMovementModal(
       // I/O flip the direction tab, same as the shift-open denomination keys —
       // but only when the reason box isn't the one taking the keystroke, since
       // both "Petty cash returned" and "Banking" type through I and O.
-      const target = event.target as HTMLElement | null;
-      const isTyping = target != null && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA');
       if (!isTyping && !event.ctrlKey && !event.altKey && !event.metaKey) {
         if (event.code === 'KeyI') {
           event.preventDefault();
@@ -8814,15 +8829,29 @@ function ReturnModal(
   }, [selectedSale, linesWindowStart]);
 
   const toggleLineReturn = useCallback((line: SaleLineSummary) => {
+    const remaining = line.quantity - line.returnedQuantity;
+    if (remaining <= 0) return;
     setQuantities((previous) => ({
       ...previous,
-      [line.id]: (previous[line.id] ?? 0) > 0 ? 0 : line.quantity,
+      [line.id]: (previous[line.id] ?? 0) > 0 ? 0 : remaining,
     }));
   }, []);
+
+  const canSubmitReturn = selectedSale != null && Object.values(quantities).some((quantity) => quantity > 0);
+  const submitReturn = useCallback(() => {
+    if (selectedSale == null) return;
+    props.onSubmit({ sale: selectedSale, reason, quantities });
+  }, [props, quantities, reason, selectedSale]);
 
   useEffect(() => {
     const handleReturnKey = (event: KeyboardEvent) => {
       if (event.ctrlKey || event.altKey || event.metaKey) return;
+
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        if (canSubmitReturn) submitReturn();
+        return;
+      }
 
       if (event.code === 'PageUp' || event.code === 'PageDown') {
         // Scrolls the sold-lines list; kept off the number row/numpad so it
@@ -8934,43 +8963,46 @@ function ReturnModal(
                 {RETURN_REASONS.map((label, index) => `${formatBinding(RETURN_REASON_HOTKEYS[index])} ${label}`).join(' - ')}
               </div>
 
-              <div className="field-hint">Numpad 1-9 toggles a line for return - Page Up/Down scrolls the list.</div>
+              <div className="field-hint">Numpad 1-9 toggles a line for return - Page Up/Down scrolls the list. Enter submits.</div>
               <div className="return-lines">
-                {visibleLines.map((line, index) => (
-                  <div key={line.id} className={`return-line ${(quantities[line.id] ?? 0) > 0 ? 'active' : ''}`}>
+                {visibleLines.map((line, index) => {
+                  const remaining = line.quantity - line.returnedQuantity;
+                  const fullyReturned = remaining <= 0;
+                  return (
+                  <div key={line.id} className={`return-line ${(quantities[line.id] ?? 0) > 0 ? 'active' : ''} ${fullyReturned ? 'disabled' : ''}`}>
                     <kbd className="picker-number">{index + 1}</kbd>
                     <div>
                       <div>{line.name}</div>
                       {getLineVariantSummary(line) != null && (
                         <div className="cart-line-variant">{getLineVariantSummary(line)}</div>
                       )}
-                      <div className="cart-line-meta">Sold {line.quantity} x {formatCurrency(line.unitPrice)}</div>
+                      <div className="cart-line-meta">
+                        Sold {line.quantity} x {formatCurrency(line.unitPrice)}
+                        {line.returnedQuantity > 0 && (
+                          <> - {fullyReturned ? 'fully refunded' : `${line.returnedQuantity} already refunded`}</>
+                        )}
+                      </div>
                     </div>
                     <input
                       className="glass-input compact narrow"
                       type="number"
                       min={0}
-                      max={line.quantity}
+                      max={remaining}
+                      disabled={fullyReturned}
                       value={quantities[line.id] ?? 0}
                       onChange={(event) => setQuantities((previous) => ({
                         ...previous,
-                        [line.id]: Math.min(line.quantity, Math.max(0, Number(event.target.value) || 0)),
+                        [line.id]: Math.min(remaining, Math.max(0, Number(event.target.value) || 0)),
                       }))}
                     />
                   </div>
-                ))}
+                  );
+                })}
               </div>
 
               <div className="modal-actions">
                 <button className="ghost-button" onClick={props.onClose}>Cancel</button>
-                <button
-                  className="btn-primary"
-                  onClick={() => props.onSubmit({
-                    sale: selectedSale,
-                    reason,
-                    quantities,
-                  })}
-                >
+                <button className="btn-primary" disabled={!canSubmitReturn} onClick={submitReturn}>
                   Submit return
                 </button>
               </div>

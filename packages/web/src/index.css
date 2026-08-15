@@ -3792,6 +3792,10 @@ button {
   margin-top: 4px;
 }
 
+.return-line.disabled {
+  opacity: 0.6;
+}
+
 @media (max-width: 1380px) {
   .workstation-grid {
     grid-template-columns: 1fr;

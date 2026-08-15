@@ -99,19 +99,23 @@ export function returnReasonHotkeyIndex(
 /**
  * Single-key cash denomination shortcuts shared by the payment window, the
  * open/close shift declaration, and cash in/out. Digit1 is the largest note in
- * use and Digit9 the smallest, so the key order reads the same as the
- * denomination list on screen (largest to smallest, left to right).
+ * use and the key order reads the same as the denomination list on screen
+ * (largest to smallest, left to right). There are 11 denominations and only 9
+ * digits, so the row continues onto Digit0 and Equal — still the same
+ * physical top-row run (1234567890=) a cashier's hand already sits over.
  */
 export const CASH_DENOMINATION_SHORTCUTS = [
   { code: 'Digit1', value: 5000, label: '1' },
-  { code: 'Digit2', value: 500, label: '2' },
-  { code: 'Digit3', value: 100, label: '3' },
-  { code: 'Digit4', value: 50, label: '4' },
-  { code: 'Digit5', value: 20, label: '5' },
-  { code: 'Digit6', value: 10, label: '6' },
-  { code: 'Digit7', value: 5, label: '7' },
-  { code: 'Digit8', value: 2, label: '8' },
-  { code: 'Digit9', value: 1, label: '9' },
+  { code: 'Digit2', value: 2000, label: '2' },
+  { code: 'Digit3', value: 1000, label: '3' },
+  { code: 'Digit4', value: 500, label: '4' },
+  { code: 'Digit5', value: 100, label: '5' },
+  { code: 'Digit6', value: 50, label: '6' },
+  { code: 'Digit7', value: 20, label: '7' },
+  { code: 'Digit8', value: 10, label: '8' },
+  { code: 'Digit9', value: 5, label: '9' },
+  { code: 'Digit0', value: 2, label: '0' },
+  { code: 'Equal', value: 1, label: '=' },
 ] as const;
 
 /** Looks up the cash shortcut for a keydown event; modified key presses don't match. */

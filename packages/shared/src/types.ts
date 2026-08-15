@@ -369,6 +369,8 @@ export interface SaleLineSummary {
   costBasis: number;
   marginAmount: number;
   lineTotal: number;
+  /** Units of this line already refunded across every prior return. */
+  returnedQuantity: number;
 }
 
 export interface SaleSummary {

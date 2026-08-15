@@ -179,6 +179,7 @@ describe('buildCompletedSaleDisplayState', () => {
       costBasis: 350,
       marginAmount: 300,
       lineTotal: 1000,
+      returnedQuantity: 0,
     }],
     payments: [{ method: PaymentMethod.CASH, amount: 1000, tenderedAmount: 2000, changeDue: 1000 }],
   };

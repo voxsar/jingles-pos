@@ -226,16 +226,18 @@ describe('returnReasonHotkeyIndex', () => {
 });
 
 describe('cashDenominationShortcut', () => {
-  it('maps Digit1 through Digit9 to the notes and coins in use, largest first', () => {
+  it('maps Digit1 through Digit0 and Equal to every note and coin in use, largest first', () => {
     expect(cashDenominationShortcut(keyEvent('Digit1'))?.value).toBe(5000);
-    expect(cashDenominationShortcut(keyEvent('Digit2'))?.value).toBe(500);
-    expect(cashDenominationShortcut(keyEvent('Digit3'))?.value).toBe(100);
-    expect(cashDenominationShortcut(keyEvent('Digit4'))?.value).toBe(50);
-    expect(cashDenominationShortcut(keyEvent('Digit5'))?.value).toBe(20);
-    expect(cashDenominationShortcut(keyEvent('Digit6'))?.value).toBe(10);
-    expect(cashDenominationShortcut(keyEvent('Digit7'))?.value).toBe(5);
-    expect(cashDenominationShortcut(keyEvent('Digit8'))?.value).toBe(2);
-    expect(cashDenominationShortcut(keyEvent('Digit9'))?.value).toBe(1);
+    expect(cashDenominationShortcut(keyEvent('Digit2'))?.value).toBe(2000);
+    expect(cashDenominationShortcut(keyEvent('Digit3'))?.value).toBe(1000);
+    expect(cashDenominationShortcut(keyEvent('Digit4'))?.value).toBe(500);
+    expect(cashDenominationShortcut(keyEvent('Digit5'))?.value).toBe(100);
+    expect(cashDenominationShortcut(keyEvent('Digit6'))?.value).toBe(50);
+    expect(cashDenominationShortcut(keyEvent('Digit7'))?.value).toBe(20);
+    expect(cashDenominationShortcut(keyEvent('Digit8'))?.value).toBe(10);
+    expect(cashDenominationShortcut(keyEvent('Digit9'))?.value).toBe(5);
+    expect(cashDenominationShortcut(keyEvent('Digit0'))?.value).toBe(2);
+    expect(cashDenominationShortcut(keyEvent('Equal'))?.value).toBe(1);
   });
 
   it('does not match the numpad or unrelated keys', () => {

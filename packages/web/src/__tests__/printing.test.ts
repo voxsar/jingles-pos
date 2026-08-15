@@ -38,6 +38,7 @@ describe('buildRefundReceiptDocument', () => {
         costBasis: 100,
         marginAmount: 50,
         lineTotal: 250,
+        returnedQuantity: 0,
       }],
       payments: [],
     };

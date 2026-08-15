@@ -452,6 +452,7 @@ function mapSale(sale: any, userMap: Map<string, any>) {
       costBasis: line.costBasis ?? 0,
       marginAmount: line.marginAmount ?? 0,
       lineTotal: line.lineTotal,
+      returnedQuantity: (line.returnLines ?? []).reduce((sum: number, returnLine: any) => sum + returnLine.quantity, 0),
     })),
     payments: (sale.payments ?? []).map((payment: any) => ({
       method: payment.method,
@@ -1151,7 +1152,7 @@ router.post('/sales', async (req: Request, res: Response) => {
 
     const sale = await prisma.sale.findUnique({
       where: { id: saleId },
-      include: { customer: true, lines: true, payments: true },
+      include: { customer: true, lines: { include: { returnLines: true } }, payments: true },
     });
 
     const userMap = await getUserMap();
@@ -1176,7 +1177,7 @@ router.get('/sales', async (req: Request, res: Response) => {
         terminalId: terminalId || undefined,
         userId: cashierId || undefined,
       },
-      include: { customer: true, lines: true, payments: true },
+      include: { customer: true, lines: { include: { returnLines: true } }, payments: true },
       orderBy: { createdAt: 'desc' },
       take: limit,
     });
@@ -1194,7 +1195,7 @@ router.get('/sales/:id', async (req: Request, res: Response) => {
     await ensureSeedData();
     const sale = await prisma.sale.findUnique({
       where: { id: req.params.id },
-      include: { customer: true, lines: true, payments: true },
+      include: { customer: true, lines: { include: { returnLines: true } }, payments: true },
     });
 
     if (!sale) {
@@ -1226,7 +1227,7 @@ router.post('/sales/:id/void', async (req: Request, res: Response) => {
 
     const sale = await prisma.sale.findUnique({
       where: { id: req.params.id },
-      include: { customer: true, lines: true, payments: true },
+      include: { customer: true, lines: { include: { returnLines: true } }, payments: true },
     });
     if (!sale) {
       return res.status(404).json({ error: 'Sale not found' });
@@ -1265,7 +1266,12 @@ router.post('/returns', async (req: Request, res: Response) => {
     return res.status(201).json(record);
   } catch (error) {
     console.error(error);
-    return res.status(500).json({ error: 'Failed to create return' });
+    // Rejections here are almost always the "only N remain returnable" /
+    // "only a completed sale can be returned" validation thrown while
+    // applying the event — surface that instead of a generic message so the
+    // cashier sees why, e.g. that the line was already refunded.
+    const message = error instanceof Error ? error.message : 'Failed to create return';
+    return res.status(400).json({ error: message });
   }
 });
 
