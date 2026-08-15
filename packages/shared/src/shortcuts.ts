@@ -16,12 +16,14 @@ import {
   DECLARABLE_TENDER_METHODS,
   DEFAULT_POS_ACTION_SHORTCUTS,
   DEFAULT_POS_CASH_SALES_VISIBILITY,
+  DEFAULT_POS_PRICE_OVERRIDE_SETTINGS,
   DEFAULT_POS_SHIFT_RECONCILIATION,
   TENDER_TOTAL_KEY,
   type POSActionShortcutId,
   type POSActionShortcuts,
   type POSCashSalesVisibilitySettings,
   type POSKeyBinding,
+  type POSPriceOverrideSettings,
   type POSQuickKey,
   type POSShiftReconciliationSettings,
   type POSShortcutSettings,
@@ -291,4 +293,20 @@ export function normalizeCashSalesVisibility(value: unknown): POSCashSalesVisibi
 
 export function createQuickKeyId(): string {
   return `quick-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
+}
+
+/** Already claimed by the "<qty>*<code>" / "<qty>@<code>" quantity shorthand. */
+const RESERVED_PRICE_PREFIX_SEPARATORS = new Set(['*', '@']);
+
+export function normalizePriceOverrideSettings(value: unknown): POSPriceOverrideSettings {
+  const source = (value && typeof value === 'object' ? value : {}) as Partial<POSPriceOverrideSettings>;
+  const candidate = typeof source.separator === 'string' ? source.separator.trim().slice(0, 1) : '';
+  const separator = candidate && !RESERVED_PRICE_PREFIX_SEPARATORS.has(candidate)
+    ? candidate
+    : DEFAULT_POS_PRICE_OVERRIDE_SETTINGS.separator;
+
+  return {
+    enabled: source.enabled !== false,
+    separator,
+  };
 }

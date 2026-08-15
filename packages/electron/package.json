@@ -1,6 +1,6 @@
 {
   "name": "@jingles/electron",
-  "version": "1.0.17",
+  "version": "1.0.18",
   "description": "Offline-capable Federation Commerce point-of-sale desktop application",
   "author": "The Red Sun",
   "main": "dist/main.js",

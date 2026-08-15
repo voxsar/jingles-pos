@@ -136,6 +136,7 @@ export const HELP_TOPICS: HelpTopic[] = [
     tips: [
       'Selling without an open shift is blocked — open the shift first.',
       'The cart survives accidental navigation, but use Hold (F4) if you need to park it deliberately.',
+      'Type a quantity ahead of a code — 25*3RL or 5@1234567890123 — in the barcode field or F3 search to add that many units in one go, instead of adding one and editing the quantity afterward.',
     ],
   },
   {
@@ -452,6 +453,7 @@ export const HELP_TOPICS: HelpTopic[] = [
     tips: [
       'Variant codes are matched as well as product barcodes, so scanning a variant label adds that exact variant without opening the picker.',
       'A code that matches nothing shows a message naming the code that was scanned, which makes mis-programmed scanners easy to spot.',
+      'Typing a quantity ahead of a code — 25*3RL or 5@barcode — into the barcode field or F3 search adds that many units directly. A real barcode never contains * or @, so it never gets mistaken for a scan.',
     ],
   },
   {

@@ -670,6 +670,23 @@ export interface POSScannerSettings {
   beepOnScan: boolean;
 }
 
+/**
+ * The "<price><separator><code>" shorthand a cashier types ahead of a
+ * product's code or barcode to ring it up at a hand-set price instead of its
+ * normal price tier — how a General Item (or any other product) gets a
+ * one-off price at the point of sale, carried over from the previous POS.
+ */
+export interface POSPriceOverrideSettings {
+  /** Recognise the shorthand at all. Off means every scan uses its normal price tier. */
+  enabled: boolean;
+  /**
+   * Single character between the typed price and the code/barcode, e.g. the
+   * "-" in "150-GENERAL". Never "*" or "@" — those are already claimed by
+   * the "<qty>*<code>" quantity shorthand.
+   */
+  separator: string;
+}
+
 /** A printer offered to the user by discovery, not yet configured. */
 export interface POSDiscoveredPrinter {
   name: string;
@@ -921,6 +938,7 @@ export interface POSDesktopSettings {
   allowShortPayments: boolean;
   printers: POSPrinterConfig[];
   scanner: POSScannerSettings;
+  priceOverride: POSPriceOverrideSettings;
   shortcuts: POSShortcutSettings;
   shiftReconciliation: POSShiftReconciliationSettings;
   customerDisplay: POSCustomerDisplaySettings;
@@ -1018,6 +1036,13 @@ export const DEFAULT_POS_SCANNER_SETTINGS: POSScannerSettings = {
   requireTerminator: true,
   prefix: '',
   beepOnScan: true,
+};
+
+export const DEFAULT_POS_PRICE_OVERRIDE_SETTINGS: POSPriceOverrideSettings = {
+  enabled: true,
+  // The hyphen on the digit row beside backtick, not the numpad's — both type
+  // the same character here, but this is the one a scanner label prints.
+  separator: '-',
 };
 
 export const DEFAULT_POS_PRINTER_CONFIG: Omit<POSPrinterConfig, 'id' | 'name'> = {

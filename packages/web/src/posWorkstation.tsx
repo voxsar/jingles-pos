@@ -13,6 +13,7 @@ import {
   POSDatabaseSwitchMode,
   POSDesktopSettings,
   POSDiscoveredPrinter,
+  POSPriceOverrideSettings,
   POSPrintResult,
   POSPrinterConfig,
   POSPrinterRole,
@@ -54,6 +55,7 @@ import {
   normalizeBinding,
   normalizeCashSalesVisibility,
   normalizeCustomerDisplaySettings,
+  normalizePriceOverrideSettings,
   normalizeShiftReconciliation,
   normalizeShortcutSettings,
   QUICK_KEY_BINDING_HINT,
@@ -62,6 +64,7 @@ import {
   DEFAULT_POS_ACTION_SHORTCUTS,
   DEFAULT_POS_CASH_SALES_VISIBILITY,
   DEFAULT_POS_CUSTOMER_DISPLAY,
+  DEFAULT_POS_PRICE_OVERRIDE_SETTINGS,
   DEFAULT_POS_SCANNER_SETTINGS,
   DEFAULT_POS_SHIFT_RECONCILIATION,
   DEFAULT_POS_SHORTCUT_SETTINGS,
@@ -166,6 +169,8 @@ import {
   getNameInitials,
   NON_CASH_PAYMENT_METHODS,
   PAYMENT_METHOD_LABELS,
+  parsePricePrefixedCode,
+  parseQuantityPrefixedCode,
   pickPriceTier,
   recalculateCartLine,
   resolveDefaultCustomerId,
@@ -224,6 +229,14 @@ type VariantSelectionRequest = {
   initialVariantId?: string | null;
   lineId?: string | null;
   product: Product;
+  /** Set when a quantity was typed up front (the "25*code" shorthand), so
+   * the variant just picked can go straight into the cart instead of
+   * reopening the unit-selection modal to ask for the quantity again. */
+  quantity?: number;
+  /** Set when a price was typed up front (the "150-code" shorthand), so the
+   * variant just picked is added at that hand-set price instead of its
+   * normal tier. */
+  priceOverride?: number;
 };
 
 type UnitSelectionRequest = {
@@ -1002,6 +1015,7 @@ export default function PosWorkstation() {
       shiftReconciliation: normalizeShiftReconciliation(settingsDraft.shiftReconciliation),
       customerDisplay: normalizeCustomerDisplaySettings(settingsDraft.customerDisplay),
       cashSalesVisibility: normalizeCashSalesVisibility(settingsDraft.cashSalesVisibility),
+      priceOverride: normalizePriceOverrideSettings(settingsDraft.priceOverride),
     };
 
     try {
@@ -1501,6 +1515,44 @@ export default function PosWorkstation() {
     addProductToCart(product, variant, quantity, tierLabel);
   }, [addProductToCart]);
 
+  /**
+   * Adds a product at a hand-typed price instead of its normal tier — the
+   * "<price>-<code>" shorthand (see `parsePricePrefixedCode`), how the
+   * General Item (or any other product) gets a one-off price at the point of
+   * sale, carried over from the previous POS. Built as a single synthetic
+   * price tier so the rest of the cart pipeline (stock checks, quantity
+   * recalculation, the line's own tier dropdown) needs no special case; the
+   * price is folded into the tier's label so two different override prices
+   * for the same product never merge into one line, while scanning the same
+   * override twice correctly adds to its quantity.
+   */
+  const addPriceOverrideToCart = useCallback((
+    product: Product,
+    variant: ProductVariant | undefined,
+    price: number,
+    requestedQuantity = 1,
+  ) => {
+    const roundedPrice = Math.round(price * 100) / 100;
+    const customTier: ProductPriceTier = {
+      id: `custom-${roundedPrice}`,
+      // The price rides along in the label itself (not just `price`) so two
+      // different override prices for the same product are recognised as
+      // different tiers and never silently merge into one line - the tier
+      // picker and receipts append the formatted price on their own, so this
+      // stays a bare number rather than repeating "Rs ...".
+      label: `Custom price ${roundedPrice}`,
+      price: roundedPrice,
+      priority: 0,
+      isDefault: true,
+    };
+
+    if (variant) {
+      addProductToCart(product, { ...variant, priceTiers: [customTier] }, requestedQuantity, customTier.label);
+    } else {
+      addProductToCart({ ...product, priceTiers: [customTier] }, undefined, requestedQuantity, customTier.label);
+    }
+  }, [addProductToCart]);
+
   const updateCartLineById = useCallback((lineId: string, updater: (line: CartLine) => CartLine | null) => {
     setCart((previous) => previous.flatMap((line) => {
       if (line.uid !== lineId) {
@@ -1540,17 +1592,36 @@ export default function PosWorkstation() {
     });
   }, [preferredTierLabels, updateCartLineById]);
 
-  const handleProductPick = useCallback((product: Product) => {
+  const handleProductPick = useCallback((product: Product, options?: { quantity?: number; priceOverride?: number }) => {
+    const explicitQuantity = options?.quantity;
+    const priceOverride = options?.priceOverride;
+
     if ((product.variants?.length ?? 0) > 0) {
       setVariantSelection({
         product,
         initialVariantId: product.variants?.[0]?.id ?? null,
+        quantity: explicitQuantity,
+        priceOverride,
       });
       return;
     }
 
+    if (priceOverride != null) {
+      // Price was typed up front (the "150-code" shorthand), so add straight
+      // to the cart at that price instead of asking again in the unit modal.
+      addPriceOverrideToCart(product, undefined, priceOverride, explicitQuantity ?? 1);
+      return;
+    }
+
+    if (explicitQuantity != null) {
+      // Quantity was typed up front (the "25*code" shorthand), so add
+      // straight to the cart instead of asking again in the unit modal.
+      addProductToCart(product, undefined, explicitQuantity);
+      return;
+    }
+
     setUnitSelection({ product });
-  }, []);
+  }, [addPriceOverrideToCart, addProductToCart]);
 
   /**
    * Lookup table for scanned codes. Variant codes are registered too, so a
@@ -1560,6 +1631,8 @@ export default function PosWorkstation() {
   const productsByScanCode = useMemo(() => {
     return buildProductScanCodeIndex(products);
   }, [products]);
+
+  const priceOverrideSettings = desktopSettings?.priceOverride ?? DEFAULT_POS_PRICE_OVERRIDE_SETTINGS;
 
   const handleBarcodeScan = useCallback((code: string) => {
     if (isReturnOpen) {
@@ -1571,20 +1644,52 @@ export default function PosWorkstation() {
       setReturnReceiptScan((previous) => ({ code: sale.receiptNumber, sequence: (previous?.sequence ?? 0) + 1 }));
       return;
     }
-    const match = productsByScanCode.get(code.trim().toLowerCase());
+    // Sales staff type "qty*code" or "qty@code" ahead of the product code to
+    // add a known quantity in one shot, the shorthand the previous POS used.
+    const prefixed = parseQuantityPrefixedCode(code);
+    const lookupCode = prefixed?.code ?? code;
+    const match = productsByScanCode.get(lookupCode.trim().toLowerCase());
 
-    if (!match) {
-      showNotice('error', `No product matches scanned code ${code}.`);
+    if (match) {
+      if (match.variant) {
+        addProductToCart(match.product, match.variant, prefixed?.quantity ?? 1);
+        return;
+      }
+
+      handleProductPick(match.product, prefixed ? { quantity: prefixed.quantity } : undefined);
       return;
     }
 
-    if (match.variant) {
-      addProductToCart(match.product, match.variant);
-      return;
+    // No direct or quantity-prefixed match. Sales staff also type
+    // "<price>-<code>" ahead of the General Item (or any other product) to
+    // ring it up at a hand-set price instead of its normal tier — tried only
+    // now, after a direct match has already failed, because a real SKU or
+    // barcode can itself contain the separator (a product coded "7-Up" must
+    // still resolve as itself, not "price 7 for Up").
+    if (prefixed == null && priceOverrideSettings.enabled) {
+      const pricePrefixed = parsePricePrefixedCode(code, priceOverrideSettings.separator);
+      const priceMatch = pricePrefixed && productsByScanCode.get(pricePrefixed.code.trim().toLowerCase());
+      if (pricePrefixed && priceMatch) {
+        if (priceMatch.variant) {
+          addPriceOverrideToCart(priceMatch.product, priceMatch.variant, pricePrefixed.price);
+        } else {
+          handleProductPick(priceMatch.product, { priceOverride: pricePrefixed.price });
+        }
+        return;
+      }
     }
 
-    handleProductPick(match.product);
-  }, [addProductToCart, handleProductPick, isReturnOpen, productsByScanCode, showNotice, visibleSales]);
+    showNotice('error', `No product matches scanned code ${code}.`);
+  }, [
+    addPriceOverrideToCart,
+    addProductToCart,
+    handleProductPick,
+    isReturnOpen,
+    priceOverrideSettings,
+    productsByScanCode,
+    showNotice,
+    visibleSales,
+  ]);
 
   const scannerSettings = desktopSettings?.scanner ?? DEFAULT_POS_SCANNER_SETTINGS;
   const shortcutSettings: POSShortcutSettings = desktopSettings?.shortcuts ?? DEFAULT_POS_SHORTCUT_SETTINGS;
@@ -1663,12 +1768,16 @@ export default function PosWorkstation() {
 
     if (variantSelection.lineId) {
       applyVariantToCartLine(variantSelection.lineId, variantSelection.product, variant);
+    } else if (variantSelection.priceOverride != null) {
+      addPriceOverrideToCart(variantSelection.product, variant, variantSelection.priceOverride, variantSelection.quantity ?? 1);
+    } else if (variantSelection.quantity != null) {
+      addProductToCart(variantSelection.product, variant, variantSelection.quantity);
     } else {
       setUnitSelection({ product: variantSelection.product, variant });
     }
 
     setVariantSelection(null);
-  }, [applyVariantToCartLine, variantSelection]);
+  }, [addPriceOverrideToCart, addProductToCart, applyVariantToCartLine, variantSelection]);
 
   const handleOpenShift = useCallback(async (submission: MoneyDeclareSubmission) => {
     if (session == null) {
@@ -2661,9 +2770,9 @@ export default function PosWorkstation() {
           terminalId={currentTerminalId}
           shortcuts={actionShortcuts}
           onClose={() => setIsSearchOpen(false)}
-          onPick={(product) => {
+          onPick={(product, quantity) => {
             setIsSearchOpen(false);
-            handleProductPick(product);
+            handleProductPick(product, quantity != null ? { quantity } : undefined);
           }}
           onPrintLabel={(product) => {
             void handlePrintProductLabel(product);
@@ -3313,6 +3422,7 @@ function ProductPanel(props: ProductPanelProps) {
             data-scanner-passthrough
             aria-label="Barcode entry"
             placeholder="Scan or enter barcode"
+            title="Lead with qty*code to add that many, or price-code (e.g. 150-GENERAL) to set a price for this sale."
             onKeyDown={(event) => {
               if (event.key !== 'Enter') return;
               event.preventDefault();
@@ -4233,6 +4343,12 @@ function SettingsModal(
                 onChange={(scanner) => updateDraft('scanner', scanner)}
               />
 
+              <PriceOverrideSettingsCard
+                disabled={props.isSaving}
+                settings={settings.priceOverride}
+                onChange={(priceOverride) => updateDraft('priceOverride', priceOverride)}
+              />
+
               <CustomerDisplayCard
                 disabled={props.isSaving}
                 hasDesktopBridge={props.hasDesktopBridge}
@@ -4875,6 +4991,70 @@ function ScannerSettingsCard(
 }
 
 /**
+ * The "<price>-<code>" shorthand for ringing an item up at a hand-typed
+ * price instead of its normal tier — how the General Item (or any other
+ * product) gets a one-off price at the point of sale.
+ */
+function PriceOverrideSettingsCard(
+  props: {
+    disabled: boolean;
+    settings: POSPriceOverrideSettings;
+    onChange: (settings: POSPriceOverrideSettings) => void;
+  },
+) {
+  const update = <K extends keyof POSPriceOverrideSettings>(key: K, value: POSPriceOverrideSettings[K]) => {
+    props.onChange({ ...props.settings, [key]: value });
+  };
+
+  return (
+    <section className="settings-card">
+      <div className="settings-card-head">
+        <div>
+          <div className="section-kicker">Sales</div>
+          <div className="section-title">Price entry shorthand</div>
+        </div>
+        <div className="report-chip mono">{DEFAULT_POS_PRICE_OVERRIDE_SETTINGS.separator} by default</div>
+      </div>
+
+      <label className="settings-checkbox-row">
+        <input
+          type="checkbox"
+          checked={props.settings.enabled}
+          onChange={(event) => update('enabled', event.target.checked)}
+        />
+        <span>
+          <b>Allow "price{props.settings.separator || '-'}code" at the barcode field</b>
+          <small>
+            Typing a price ahead of a code or barcode - e.g. "150{props.settings.separator || '-'}GENERAL" -
+            rings that item up at Rs 150 for this sale instead of its normal price tier. Checked only after the
+            code alone fails to match a product, so a SKU or barcode that happens to contain the separator (like
+            "7-Up") still resolves as itself.
+          </small>
+        </span>
+      </label>
+
+      <div className="settings-field-row">
+        <LabelBlock label="Separator character">
+          <input
+            className="glass-input"
+            maxLength={1}
+            disabled={props.disabled || !props.settings.enabled}
+            value={props.settings.separator}
+            onChange={(event) => update('separator', event.target.value)}
+            placeholder={DEFAULT_POS_PRICE_OVERRIDE_SETTINGS.separator}
+          />
+        </LabelBlock>
+      </div>
+
+      <div className="field-hint">
+        The hyphen on the digit row beside backtick, not the numpad's - both type the same character here.
+        Cannot be "*" or "@": those are already claimed by the "qty*code" quantity shorthand.
+      </div>
+    </section>
+  );
+}
+
+/**
  * Settings for the second screen the customer reads.
  *
  * On the desktop the display is a real window the main process places on a
@@ -5489,7 +5669,7 @@ function SearchOverlay(
     terminalId: string;
     shortcuts: POSActionShortcuts;
     onClose: () => void;
-    onPick: (product: Product) => void;
+    onPick: (product: Product, quantity?: number) => void;
     onPrintLabel: (product: Product) => void;
   },
 ) {
@@ -5503,8 +5683,13 @@ function SearchOverlay(
     inputRef.current?.focus();
   }, []);
 
+  // "25*code" / "5@code" adds that quantity the moment a result is picked,
+  // the same shorthand the barcode field accepts, while the digits before
+  // it are stripped so the search itself still runs against the code alone.
+  const prefixedQuery = useMemo(() => parseQuantityPrefixedCode(query), [query]);
+
   useEffect(() => {
-    const term = query.trim().toLowerCase();
+    const term = (prefixedQuery?.code ?? query).trim().toLowerCase();
 
     function filterByScope(rows: Product[]) {
       return rows.filter((product) => {
@@ -5573,7 +5758,7 @@ function SearchOverlay(
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [props.hideOutOfStock, props.products, props.terminalId, query, scope]);
+  }, [prefixedQuery, props.hideOutOfStock, props.products, props.terminalId, query, scope]);
 
   useEffect(() => {
     const handlePickerKey = (event: KeyboardEvent) => {
@@ -5592,11 +5777,11 @@ function SearchOverlay(
       const index = Number(match[1]) - 1;
       if (!results[index]) return;
       event.preventDefault();
-      props.onPick(results[index]);
+      props.onPick(results[index], prefixedQuery?.quantity);
     };
     window.addEventListener('keydown', handlePickerKey, true);
     return () => window.removeEventListener('keydown', handlePickerKey, true);
-  }, [props, results]);
+  }, [prefixedQuery, props, results]);
 
   return (
     <ModalShell onClose={props.onClose} title="Search products" width="wide">
@@ -5608,19 +5793,22 @@ function SearchOverlay(
             // Scans typed here should populate the box instead of jumping
             // straight into the cart, so the global capture stands down.
             data-scanner-passthrough="true"
-            placeholder="Search by SKU, barcode, name, or subcategory"
+            placeholder="Search by SKU, barcode, name, or subcategory - or type qty*code, e.g. 25*3RL"
             value={query}
             onChange={(event) => setQuery(event.target.value)}
             onKeyDown={(event) => {
               if (event.key === 'Enter' && results[0]) {
-                props.onPick(results[0]);
+                props.onPick(results[0], prefixedQuery?.quantity);
               }
             }}
           />
           <kbd className="kbd">F3</kbd>
         </div>
 
-        <div className="field-hint">Numpad 1-9 jumps to a result. The number row types normally, so SKUs and names starting with a digit search fine.</div>
+        <div className="field-hint">
+          Numpad 1-9 jumps to a result. The number row types normally, so SKUs and names starting with a digit search fine.
+          {' '}Lead with a quantity - 25*3RL or 5@barcode - to add that many the moment a result is picked.
+        </div>
 
         <div className="scope-row">
           {(['all', 'sku', 'name', 'category', 'subcategory'] as const).map((entry) => (

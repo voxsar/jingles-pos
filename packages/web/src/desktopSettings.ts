@@ -1,5 +1,6 @@
 import {
   DEFAULT_POS_CASH_SALES_VISIBILITY,
+  DEFAULT_POS_PRICE_OVERRIDE_SETTINGS,
   DEFAULT_POS_PRINTER_CONFIG,
   DEFAULT_POS_SCANNER_SETTINGS,
   DEFAULT_POS_SESSION_LOCK_MINUTES,
@@ -73,6 +74,7 @@ export function buildFallbackDesktopSettings(themeMode: POSThemeMode): POSDeskto
     allowShortPayments: false,
     printers: [],
     scanner: { ...DEFAULT_POS_SCANNER_SETTINGS },
+    priceOverride: { ...DEFAULT_POS_PRICE_OVERRIDE_SETTINGS },
     shortcuts: {
       ...DEFAULT_POS_SHORTCUT_SETTINGS,
       actions: { ...DEFAULT_POS_SHORTCUT_SETTINGS.actions },

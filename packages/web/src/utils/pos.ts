@@ -57,6 +57,62 @@ export function findSaleByReceiptScan(sales: SaleSummary[], code: string) {
   )) ?? null;
 }
 
+/**
+ * Parses the "<qty>*<code>" / "<qty>@<code>" shorthand sales staff type ahead
+ * of a product code to add a known quantity in one shot — carried over from
+ * the previous POS, e.g. "25*3RL" or "5@1234567890123". Returns null for
+ * anything else (a plain code, a scanned barcode, a free-text search) so
+ * those keep flowing through untouched; a real barcode never contains `*`
+ * or `@`, so detecting this unconditionally ahead of a lookup is safe.
+ */
+export function parseQuantityPrefixedCode(input: string): { quantity: number; code: string } | null {
+  const match = /^\s*(\d+)\s*[*@]\s*(.+)$/.exec(input);
+  if (!match) return null;
+
+  const quantity = Number(match[1]);
+  const code = match[2].trim();
+  if (!Number.isFinite(quantity) || quantity <= 0 || !code) return null;
+
+  return { quantity, code };
+}
+
+/**
+ * Separator characters already claimed by {@link parseQuantityPrefixedCode}.
+ * A price-prefix separator can be reconfigured to almost anything, but never
+ * to one of these, or "150*3RL" would be ambiguous between "150 units" and
+ * "price 150".
+ */
+const RESERVED_PRICE_PREFIX_SEPARATORS = new Set(['*', '@']);
+
+/**
+ * Parses the "<price><separator><code>" shorthand for ringing an item up at a
+ * hand-typed price instead of its normal tier — e.g. "150-GENERAL" or
+ * "150-1234567890123" for the General Item, carried over from the previous
+ * POS. The separator defaults to a plain hyphen but is reconfigurable (see
+ * `POSPriceOverrideSettings`). Returns null for anything else, including a
+ * blank/reserved separator, so a plain code keeps flowing through untouched.
+ *
+ * Unlike `*`/`@`, a hyphen can legitimately appear inside a real SKU or
+ * barcode (e.g. a product coded "7-Up"), so callers must try an exact
+ * scan-code match first and only fall back to this parse when that fails —
+ * this function has no way to know whether "7-Up" is meant as itself or as
+ * "price 7 for Up".
+ */
+export function parsePricePrefixedCode(input: string, separator = '-'): { price: number; code: string } | null {
+  const char = separator.trim().slice(0, 1);
+  if (!char || RESERVED_PRICE_PREFIX_SEPARATORS.has(char)) return null;
+
+  const escaped = char.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const match = new RegExp(`^\\s*(\\d+(?:\\.\\d+)?)\\s*${escaped}\\s*(.+)$`).exec(input);
+  if (!match) return null;
+
+  const price = Number(match[1]);
+  const code = match[2].trim();
+  if (!Number.isFinite(price) || price <= 0 || !code) return null;
+
+  return { price, code };
+}
+
 export function buildProductScanCodeIndex(products: Product[]) {
   const index = new Map<string, { product: Product; variant?: ProductVariant }>();
   const register = (

@@ -8,6 +8,8 @@ import {
   findSaleByReceiptScan,
   formatShiftReference,
   generateReceiptNumber,
+  parsePricePrefixedCode,
+  parseQuantityPrefixedCode,
   pickPriceTier,
   recalculateCartLine,
   saleIncludesCash,
@@ -29,6 +31,68 @@ describe('buildProductScanCodeIndex', () => {
 
     expect(index.get('222')?.product.id).toBe('prod-1');
     expect(index.get('333')?.variant?.id).toBe('variant-1');
+  });
+});
+
+describe('parseQuantityPrefixedCode', () => {
+  it('splits a leading quantity off "*" and "@" shorthand', () => {
+    expect(parseQuantityPrefixedCode('25*3RL')).toEqual({ quantity: 25, code: '3RL' });
+    expect(parseQuantityPrefixedCode('5@1234567890123')).toEqual({ quantity: 5, code: '1234567890123' });
+  });
+
+  it('tolerates stray spacing around the separator', () => {
+    expect(parseQuantityPrefixedCode(' 12 * SKU-1 ')).toEqual({ quantity: 12, code: 'SKU-1' });
+  });
+
+  it('returns null for a plain code, so ordinary scans and searches pass through', () => {
+    expect(parseQuantityPrefixedCode('3RL')).toBeNull();
+    expect(parseQuantityPrefixedCode('1234567890123')).toBeNull();
+    expect(parseQuantityPrefixedCode('7-Up')).toBeNull();
+  });
+
+  it('rejects a zero quantity or an empty code', () => {
+    expect(parseQuantityPrefixedCode('0*SKU-1')).toBeNull();
+    expect(parseQuantityPrefixedCode('25*')).toBeNull();
+  });
+});
+
+describe('parsePricePrefixedCode', () => {
+  it('splits a leading price off the default "-" separator', () => {
+    expect(parsePricePrefixedCode('150-GENERAL')).toEqual({ price: 150, code: 'GENERAL' });
+    expect(parsePricePrefixedCode('99.50-1234567890123')).toEqual({ price: 99.5, code: '1234567890123' });
+  });
+
+  it('tolerates stray spacing around the separator', () => {
+    expect(parsePricePrefixedCode(' 150 - GENERAL ')).toEqual({ price: 150, code: 'GENERAL' });
+  });
+
+  it('honours a reconfigured separator', () => {
+    expect(parsePricePrefixedCode('150#GENERAL', '#')).toEqual({ price: 150, code: 'GENERAL' });
+    expect(parsePricePrefixedCode('150-GENERAL', '#')).toBeNull();
+  });
+
+  it('only splits at the first separator, so a code with its own dash stays whole', () => {
+    expect(parsePricePrefixedCode('150-3-RL')).toEqual({ price: 150, code: '3-RL' });
+  });
+
+  it('returns null for a plain code with no separator', () => {
+    expect(parsePricePrefixedCode('3RL')).toBeNull();
+    expect(parsePricePrefixedCode('1234567890123')).toBeNull();
+  });
+
+  // "7-Up" itself parses as price 7 for code "Up" - the parser has no way to
+  // know that's a real SKU. Safety against that comes from the caller trying
+  // an exact scan-code match first and only falling back to this parse when
+  // that fails (see `handleBarcodeScan`), not from this function.
+  it('parses a numeric-prefixed real-looking SKU the same as any other shorthand', () => {
+    expect(parsePricePrefixedCode('7-Up')).toEqual({ price: 7, code: 'Up' });
+  });
+
+  it('rejects a zero price, an empty code, or a reserved separator', () => {
+    expect(parsePricePrefixedCode('0-GENERAL')).toBeNull();
+    expect(parsePricePrefixedCode('150-')).toBeNull();
+    expect(parsePricePrefixedCode('150*GENERAL', '*')).toBeNull();
+    expect(parsePricePrefixedCode('150@GENERAL', '@')).toBeNull();
   });
 });
 
