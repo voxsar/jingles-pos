@@ -239,8 +239,10 @@ export async function bootstrapPOS(options?: { deviceId?: string; terminalId?: s
 	return getJson<POSBootstrap>(`/bootstrap${params.size > 0 ? `?${params.toString()}` : ''}`);
 }
 
-export async function searchProducts(query: string): Promise<Product[]> {
-	return getJson<Product[]>(`${'/products/search'}?q=${encodeURIComponent(query)}`);
+export async function searchProducts(query: string, terminalId?: string): Promise<Product[]> {
+	const params = new URLSearchParams({ q: query });
+	if (terminalId?.trim()) params.set('terminalId', terminalId.trim());
+	return getJson<Product[]>(`${'/products/search'}?${params.toString()}`);
 }
 
 export async function openShift(input: ShiftOpenInput): Promise<ShiftSummary> {

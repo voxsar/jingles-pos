@@ -2675,6 +2675,7 @@ export default function PosWorkstation() {
           canPrintLabels={hasLabelPrinter}
           hideOutOfStock={hideOutOfStock}
           products={products}
+          terminalId={currentTerminalId}
           shortcuts={actionShortcuts}
           onClose={() => setIsSearchOpen(false)}
           onPick={(product) => {
@@ -3953,6 +3954,7 @@ function SettingsModal(
     customerDisplayStatus: POSCustomerDisplayStatus;
     hasPrintingBridge: boolean;
     products: Product[];
+    terminalId: string;
   },
 ) {
   const settings = props.draft;
@@ -5511,7 +5513,7 @@ function SearchOverlay(
     setIsSearching(true);
 
     const timer = window.setTimeout(() => {
-      void searchProducts(term)
+      void searchProducts(term, props.terminalId)
         .then((rows) => {
           if (!cancelled) {
             setResults(filterByScope(rows).slice(0, 24));
@@ -5534,7 +5536,7 @@ function SearchOverlay(
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [props.hideOutOfStock, props.products, query, scope]);
+  }, [props.hideOutOfStock, props.products, props.terminalId, query, scope]);
 
   useEffect(() => {
     const handlePickerKey = (event: KeyboardEvent) => {

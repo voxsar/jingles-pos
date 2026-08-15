@@ -112,4 +112,14 @@ describe('client error reporting', () => {
       backendErrorCode: 'P2010',
     });
   });
+
+  it('scopes remote product search to the selected terminal stock', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => [] });
+    vi.stubGlobal('fetch', fetchMock);
+    const { searchProducts } = await import('./api');
+
+    await searchProducts('rice 5kg', 'terminal-02');
+
+    expect(fetchMock.mock.calls[0][0]).toBe('http://127.0.0.1:3631/api/pos/products/search?q=rice+5kg&terminalId=terminal-02');
+  });
 });
