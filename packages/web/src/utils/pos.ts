@@ -49,6 +49,14 @@ export const DENOMINATIONS: DenominationDefinition[] = [
   { value: 1, label: 'Rs 1', kind: 'coin' },
 ];
 
+export function findSaleByReceiptScan(sales: SaleSummary[], code: string) {
+  const normalized = code.trim().toLowerCase();
+  return sales.find((sale) => (
+    sale.receiptNumber.trim().toLowerCase() === normalized
+    || sale.id.trim().toLowerCase() === normalized
+  )) ?? null;
+}
+
 /** Tender types a cashier can be asked to declare alongside the cash count. */
 export const NON_CASH_PAYMENT_METHODS: PaymentMethod[] = [
   PaymentMethod.VISA,

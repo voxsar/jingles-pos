@@ -369,15 +369,26 @@ ipcMain.on('app:version-sync', (event) => {
   event.returnValue = app.getVersion();
 });
 
-ipcMain.handle('app:backend-url', () => {
+function handleIpc(channel: string, listener: Parameters<typeof ipcMain.handle>[1]) {
+  ipcMain.handle(channel, async (event, ...args) => {
+    try {
+      return await listener(event, ...args);
+    } catch (error) {
+      reportElectronError(error, 'electron.ipc.failure', { channel });
+      throw error;
+    }
+  });
+}
+
+handleIpc('app:backend-url', () => {
   return localApiServer?.url ?? getDesktopLocalApiUrl();
 });
 
-ipcMain.handle('desktop-settings:get', () => {
+handleIpc('desktop-settings:get', () => {
   return readDesktopSettings();
 });
 
-ipcMain.handle('desktop-settings:pick-database-path', async (_event, currentPath?: string) => {
+handleIpc('desktop-settings:pick-database-path', async (_event, currentPath?: string) => {
   const dialogOptions = {
     title: 'Choose POS database file',
     defaultPath: currentPath || readDesktopSettings().databasePath,
@@ -393,7 +404,7 @@ ipcMain.handle('desktop-settings:pick-database-path', async (_event, currentPath
   return selection.canceled ? null : selection.filePath ?? null;
 });
 
-ipcMain.handle('desktop-settings:pick-backup-directory', async (_event, currentPath?: string) => {
+handleIpc('desktop-settings:pick-backup-directory', async (_event, currentPath?: string) => {
   const dialogOptions = {
     title: 'Choose backup directory',
     defaultPath: currentPath || readDesktopSettings().backupDirectory,
@@ -406,11 +417,11 @@ ipcMain.handle('desktop-settings:pick-backup-directory', async (_event, currentP
   return selection.canceled ? null : selection.filePaths[0] ?? null;
 });
 
-ipcMain.handle('desktop-settings:backup-now', async () => {
+handleIpc('desktop-settings:backup-now', async () => {
   return createDesktopBackup();
 });
 
-ipcMain.handle('desktop-settings:backup-as', async () => {
+handleIpc('desktop-settings:backup-as', async () => {
   const backupPath = await pickBackupDestinationPath();
   if (!backupPath) {
     return { canceled: true, filePath: null, createdAt: null };
@@ -420,11 +431,11 @@ ipcMain.handle('desktop-settings:backup-as', async () => {
   return { canceled: false, ...result };
 });
 
-ipcMain.handle('desktop-settings:get-database-info', () => {
+handleIpc('desktop-settings:get-database-info', () => {
   return getDatabaseInfo();
 });
 
-ipcMain.handle('desktop-settings:reveal-database-file', async () => {
+handleIpc('desktop-settings:reveal-database-file', async () => {
   const info = getDatabaseInfo();
 
   if (info.exists) {
@@ -438,7 +449,7 @@ ipcMain.handle('desktop-settings:reveal-database-file', async () => {
   }
 });
 
-ipcMain.handle('desktop-settings:switch-database', async (_event, mode: POSDatabaseSwitchMode) => {
+handleIpc('desktop-settings:switch-database', async (_event, mode: POSDatabaseSwitchMode) => {
   let nextPath: string;
 
   if (mode === 'default') {
@@ -460,19 +471,19 @@ ipcMain.handle('desktop-settings:switch-database', async (_event, mode: POSDatab
   };
 });
 
-ipcMain.handle('customer-display:status', () => {
+handleIpc('customer-display:status', () => {
   return getCustomerDisplayStatus();
 });
 
-ipcMain.handle('customer-display:open', async () => {
+handleIpc('customer-display:open', async () => {
   return openCustomerDisplayWindow();
 });
 
-ipcMain.handle('customer-display:close', () => {
+handleIpc('customer-display:close', () => {
   return closeCustomerDisplayWindow();
 });
 
-ipcMain.handle('customer-display:toggle', async () => {
+handleIpc('customer-display:toggle', async () => {
   return toggleCustomerDisplayWindow();
 });
 
@@ -482,35 +493,35 @@ ipcMain.on('customer-display:publish', (_event, state) => {
 });
 
 // Asked by the display window itself when it mounts.
-ipcMain.handle('customer-display:get-state', () => {
+handleIpc('customer-display:get-state', () => {
   return getCachedCustomerDisplayState();
 });
 
-ipcMain.handle('printing:list', () => {
+handleIpc('printing:list', () => {
   return listConfiguredPrinters();
 });
 
-ipcMain.handle('printing:discover', async (_event, options?: { includeNetwork?: boolean }) => {
+handleIpc('printing:discover', async (_event, options?: { includeNetwork?: boolean }) => {
   return discoverPrinters(mainWindow?.webContents ?? null, options ?? {});
 });
 
-ipcMain.handle('printing:test', async (_event, printer) => {
+handleIpc('printing:test', async (_event, printer) => {
   return testPrinter(printer);
 });
 
-ipcMain.handle('printing:print-receipt', async (_event, document, options?: { printerId?: string }) => {
+handleIpc('printing:print-receipt', async (_event, document, options?: { printerId?: string }) => {
   return printDocument(document, { ...options, role: 'receipt' });
 });
 
-ipcMain.handle('printing:print-label', async (_event, document, options?: { printerId?: string }) => {
+handleIpc('printing:print-label', async (_event, document, options?: { printerId?: string }) => {
   return printLabel(document, options ?? {});
 });
 
-ipcMain.handle('printing:open-drawer', async (_event, printerId?: string) => {
+handleIpc('printing:open-drawer', async (_event, printerId?: string) => {
   return openCashDrawer(printerId);
 });
 
-ipcMain.handle('desktop-settings:save', async (_event, nextSettings) => {
+handleIpc('desktop-settings:save', async (_event, nextSettings) => {
   const previousSettings = readDesktopSettings();
   const savedSettings = saveDesktopSettings(nextSettings ?? {});
   const copiedDatabase = await copyDatabaseSnapshotIfNeeded(

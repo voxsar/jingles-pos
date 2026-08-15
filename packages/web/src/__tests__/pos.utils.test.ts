@@ -4,12 +4,26 @@ import {
   calcCartTotals,
   createCartLine,
   formatCurrency,
+  findSaleByReceiptScan,
   formatShiftReference,
   generateReceiptNumber,
   pickPriceTier,
   recalculateCartLine,
   saleIncludesCash,
 } from '../utils/pos';
+
+describe('findSaleByReceiptScan', () => {
+  const sales = [
+    { id: 'sale-1', receiptNumber: '260815-TE01-0042' },
+    { id: 'SALE-UUID-2', receiptNumber: '260815-TE01-0043' },
+  ] as never;
+
+  it('matches the exact printed receipt QR value regardless of case or surrounding whitespace', () => {
+    expect(findSaleByReceiptScan(sales, ' 260815-te01-0042 ')?.id).toBe('sale-1');
+    expect(findSaleByReceiptScan(sales, 'sale-uuid-2')?.receiptNumber).toBe('260815-TE01-0043');
+    expect(findSaleByReceiptScan(sales, '0042')).toBeNull();
+  });
+});
 
 describe('formatShiftReference', () => {
   it('shows the terminal and opening date instead of an internal UUID', () => {

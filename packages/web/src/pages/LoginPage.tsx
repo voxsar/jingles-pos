@@ -1,6 +1,7 @@
 import { useEffect, useState, type FormEvent, type ReactNode } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../auth/AuthContext';
+import { reportCaughtClientError } from '../clientErrorReporter';
 import HelpGuide from '../help/HelpGuide';
 
 export default function LoginPage() {
@@ -38,7 +39,8 @@ export default function LoginPage() {
     try {
       await login(identifier, password);
       navigate('/', { replace: true });
-    } catch {
+    } catch (error) {
+      reportCaughtClientError(error, 'auth.login-form');
       // Error state is surfaced by the auth context.
     }
   }

@@ -20,6 +20,7 @@ import {
   type POSScannerSettings,
   type POSThemeMode,
 } from '@jingles/shared';
+import { reportElectronError } from './errorReporter';
 
 const DEFAULT_SYNC_URL = 'https://inv.theredsun.org';
 const SETTINGS_FILE_NAME = 'desktop-settings.json';
@@ -203,7 +204,8 @@ function parseStoredDesktopSettings(): StoredDesktopSettings {
     const raw = fs.readFileSync(settingsPath, 'utf8');
     const parsed = JSON.parse(raw) as unknown;
     return parsed && typeof parsed === 'object' ? parsed as StoredDesktopSettings : {};
-  } catch {
+  } catch (error) {
+    reportElectronError(error, 'electron.settings.read');
     return {};
   }
 }

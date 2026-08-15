@@ -15,7 +15,7 @@ describe('POS backend diagnostic logging', () => {
   beforeAll(() => {
     process.env.JINGLES_POS_SERVER_ERROR_LOG_PATH = logPath;
     process.env.JINGLES_POS_LOCAL_MODE = 'true';
-    process.env.JINGLES_POS_APP_VERSION = '1.0.13';
+    process.env.JINGLES_POS_APP_VERSION = '1.0.14';
     process.env.JINGLES_POS_UPSTREAM_URL = 'https://errors.example.test';
   });
 
@@ -64,7 +64,7 @@ describe('POS backend diagnostic logging', () => {
     const entry = JSON.parse(fs.readFileSync(logPath, 'utf8').trim());
     expect(entry.id).toBe(response.diagnosticId);
     expect(entry.route).toBe('/api/pos/sales');
-    expect(entry.appVersion).toBe('1.0.13');
+    expect(entry.appVersion).toBe('1.0.14');
     expect(entry.context).toMatchObject({ lineCount: 1, paymentCount: 1, paymentMethods: 'VISA' });
     expect(JSON.stringify(entry)).not.toContain('4111111111111111');
     expect(JSON.stringify(entry)).not.toContain('do-not-store');

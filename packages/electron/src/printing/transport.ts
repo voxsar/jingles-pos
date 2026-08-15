@@ -12,6 +12,7 @@ import os from 'os';
 import path from 'path';
 import type { POSPrinterConfig } from '@jingles/shared';
 import { RAW_PRINT_SCRIPT } from './rawPrintScript';
+import { reportElectronError } from '../errorReporter';
 
 const NETWORK_CONNECT_TIMEOUT_MS = 5_000;
 const NETWORK_WRITE_TIMEOUT_MS = 15_000;
@@ -171,7 +172,8 @@ async function sendThroughWindowsSpooler(payload: Buffer, printerName: string, d
   } finally {
     try {
       fs.unlinkSync(jobPath);
-    } catch {
+    } catch (error) {
+      reportElectronError(error, 'electron.print.spool-cleanup-windows');
       // A leftover spool file is harmless; the directory is cleaned on startup.
     }
   }
@@ -194,7 +196,8 @@ async function sendThroughCups(payload: Buffer, printerName: string, documentNam
   } finally {
     try {
       fs.unlinkSync(jobPath);
-    } catch {
+    } catch (error) {
+      reportElectronError(error, 'electron.print.spool-cleanup-cups');
       // Ignored, same as the Windows path.
     }
   }
@@ -214,7 +217,8 @@ export function cleanPrintingWorkDirectory() {
         fs.unlinkSync(path.join(directory, entry));
       }
     }
-  } catch {
+  } catch (error) {
+    reportElectronError(error, 'electron.print.startup-cleanup');
     // Never let housekeeping block startup.
   }
 }

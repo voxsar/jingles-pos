@@ -154,6 +154,7 @@ import {
   formatDateTime,
   expectedForTenderKey,
   formatDenominationBreakdown,
+  findSaleByReceiptScan,
   formatInteger,
   formatShiftReference,
   formatTime,
@@ -397,6 +398,7 @@ export default function PosWorkstation() {
   const [isSavingCashMovement, setIsSavingCashMovement] = useState(false);
   const [drawer, setDrawer] = useState<DrawerContents | null>(null);
   const [isReturnOpen, setIsReturnOpen] = useState(false);
+  const [returnReceiptScan, setReturnReceiptScan] = useState<{ code: string; sequence: number } | null>(null);
   const [isOrdersOpen, setIsOrdersOpen] = useState(false);
   const [customersModalInitialId, setCustomersModalInitialId] = useState<string | null>(null);
   const [isCustomersOpen, setIsCustomersOpen] = useState(false);
@@ -465,7 +467,8 @@ export default function PosWorkstation() {
 
     try {
       setDatabaseInfo(await getDesktopDatabaseInfo());
-    } catch {
+    } catch (error) {
+      reportCaughtClientError(error, 'pos.database.info');
       // The database-file panel is a convenience; a failed refresh just leaves it stale.
     }
   }, []);
@@ -957,7 +960,8 @@ export default function PosWorkstation() {
       try {
         const refreshedHeldSales = await listHeldSales();
         setBootstrapData((previous) => previous ? { ...previous, heldSales: refreshedHeldSales } : previous);
-      } catch {
+      } catch (error) {
+        reportCaughtClientError(error, 'pos.held-sale.refresh');
         // Silent refresh path; bootstrap already carries held sales in normal cases.
       }
     },
@@ -1575,6 +1579,15 @@ export default function PosWorkstation() {
   }, [products]);
 
   const handleBarcodeScan = useCallback((code: string) => {
+    if (isReturnOpen) {
+      const sale = findSaleByReceiptScan(visibleSales, code);
+      if (!sale) {
+        showNotice('error', `No refundable receipt matches scanned code ${code}.`);
+        return;
+      }
+      setReturnReceiptScan((previous) => ({ code: sale.receiptNumber, sequence: (previous?.sequence ?? 0) + 1 }));
+      return;
+    }
     const match = productsByScanCode.get(code.trim().toLowerCase());
 
     if (!match) {
@@ -1588,7 +1601,7 @@ export default function PosWorkstation() {
     }
 
     handleProductPick(match.product);
-  }, [addProductToCart, handleProductPick, productsByScanCode, showNotice]);
+  }, [addProductToCart, handleProductPick, isReturnOpen, productsByScanCode, showNotice, visibleSales]);
 
   const scannerSettings = desktopSettings?.scanner ?? DEFAULT_POS_SCANNER_SETTINGS;
   const shortcutSettings: POSShortcutSettings = desktopSettings?.shortcuts ?? DEFAULT_POS_SHORTCUT_SETTINGS;
@@ -2092,7 +2105,8 @@ export default function PosWorkstation() {
       const contents = await getDrawerContents(activeShift.id);
       setDrawer(contents);
       return contents;
-    } catch {
+    } catch (error) {
+      reportCaughtClientError(error, 'pos.drawer.refresh');
       setDrawer(null);
       return null;
     }
@@ -2298,6 +2312,7 @@ export default function PosWorkstation() {
         void handlePrintQuotation();
         return;
       case 'refund':
+        setReturnReceiptScan(null);
         setIsReturnOpen(true);
         return;
       case 'void':
@@ -2893,8 +2908,12 @@ export default function PosWorkstation() {
       {isReturnOpen && (
         <ReturnModal
           isLoading={salesLoading}
-          onClose={() => setIsReturnOpen(false)}
+          onClose={() => {
+            setReturnReceiptScan(null);
+            setIsReturnOpen(false);
+          }}
           onSubmit={(draft) => void handleSubmitReturn(draft)}
+          scannedReceipt={returnReceiptScan}
           sales={visibleSales}
         />
       )}
@@ -8875,6 +8894,7 @@ function ReturnModal(
     isLoading: boolean;
     onClose: () => void;
     onSubmit: (draft: ReturnDraft) => void;
+    scannedReceipt: { code: string; sequence: number } | null;
     sales: SaleSummary[];
   },
 ) {
@@ -8885,6 +8905,24 @@ function ReturnModal(
   const [salesWindowStart, setSalesWindowStart] = useState(0);
   const [linesWindowStart, setLinesWindowStart] = useState(0);
   const searchInputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    window.requestAnimationFrame(() => {
+      searchInputRef.current?.focus();
+      searchInputRef.current?.select();
+    });
+  }, []);
+
+  useEffect(() => {
+    if (!props.scannedReceipt) return;
+    const match = findSaleByReceiptScan(props.sales, props.scannedReceipt.code);
+    setQuery(props.scannedReceipt.code);
+    if (match) setSelectedSaleId(match.id);
+    window.requestAnimationFrame(() => {
+      searchInputRef.current?.focus();
+      searchInputRef.current?.select();
+    });
+  }, [props.sales, props.scannedReceipt]);
 
   const filteredSales = useMemo(() => {
     const term = query.trim().toLowerCase();
@@ -9011,6 +9049,7 @@ function ReturnModal(
         <div className="return-sales">
           <input
             ref={searchInputRef}
+            autoFocus
             className="glass-input"
             placeholder="Find receipt or customer"
             value={query}

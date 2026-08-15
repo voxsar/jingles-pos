@@ -2,7 +2,6 @@ import fs from 'fs';
 import path from 'path';
 import { app } from 'electron';
 import { DEFAULT_DEVICE_ID, DEFAULT_TERMINAL_ID } from '@jingles/shared';
-import { readDesktopSettings } from './desktopSettings';
 
 type Primitive = string | number | boolean | null | undefined;
 type ErrorContext = Record<string, Primitive>;
@@ -61,7 +60,10 @@ function endpoints() {
   const port = Number(process.env.JINGLES_POS_LOCAL_API_PORT ?? 3631);
   const values = [`http://127.0.0.1:${port}/api/pos/client-errors`];
   try {
-    const upstream = readDesktopSettings().syncUrl?.trim().replace(/\/+$/, '');
+    const stored = JSON.parse(
+      fs.readFileSync(path.join(app.getPath('userData'), 'desktop-settings.json'), 'utf8'),
+    ) as { syncUrl?: unknown };
+    const upstream = typeof stored.syncUrl === 'string' ? stored.syncUrl.trim().replace(/\/+$/, '') : '';
     if (upstream && /^https?:\/\//i.test(upstream)) values.push(`${upstream}/api/pos/client-errors`);
   } catch {
     // The local endpoint remains available when settings cannot be read.

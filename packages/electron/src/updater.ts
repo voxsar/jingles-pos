@@ -25,6 +25,17 @@ let manualCheck = false;
 let checking = false;
 let checkTimer: NodeJS.Timeout | null = null;
 
+function handleUpdaterIpc(channel: string, listener: Parameters<typeof ipcMain.handle>[1]) {
+  ipcMain.handle(channel, async (event, ...args) => {
+    try {
+      return await listener(event, ...args);
+    } catch (error) {
+      reportElectronError(error, 'electron.updater.ipc', { channel });
+      throw error;
+    }
+  });
+}
+
 function preferencePath() {
   return path.join(app.getPath('userData'), 'update-preferences.json');
 }
@@ -246,10 +257,10 @@ export function initializeUpdater(environmentVariable: string) {
     broadcast({ state: 'error', message: `Invalid update configuration: ${String(error)}` });
   }
 
-  ipcMain.handle('updater:get-status', () => status);
-  ipcMain.handle('updater:check', () => checkForUpdates(true));
-  ipcMain.handle('updater:choose-policy', () => chooseUpdatePolicy());
-  ipcMain.handle('updater:install', () => {
+  handleUpdaterIpc('updater:get-status', () => status);
+  handleUpdaterIpc('updater:check', () => checkForUpdates(true));
+  handleUpdaterIpc('updater:choose-policy', () => chooseUpdatePolicy());
+  handleUpdaterIpc('updater:install', () => {
     if (status.state !== 'downloaded') return false;
     autoUpdater.quitAndInstall(false, true);
     return true;

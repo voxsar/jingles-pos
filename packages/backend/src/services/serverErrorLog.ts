@@ -5,6 +5,7 @@ import type { Request, Response } from 'express';
 import { isLocalPosBackendMode } from '../localMode';
 
 const DEFAULT_MAX_LOG_BYTES = 5 * 1024 * 1024;
+const MAX_PENDING_UPLOADS = 50;
 let writeQueue = Promise.resolve();
 
 type ErrorDetails = {
@@ -16,6 +17,7 @@ type ErrorDetails = {
 };
 
 type PrimitiveContext = Record<string, string | number | boolean | null | undefined>;
+type PendingUpload = { endpoint: string; payload: Record<string, unknown> };
 
 function redact(value: string) {
   return value
@@ -101,10 +103,9 @@ async function uploadDesktopError(
   if (!isLocalPosBackendMode()) return;
   const upstream = process.env.JINGLES_POS_UPSTREAM_URL?.trim().replace(/\/+$/, '');
   if (!upstream || !/^https?:\/\//i.test(upstream)) return;
-  const response = await fetch(`${upstream}/api/pos/client-errors`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
+  const report: PendingUpload = {
+    endpoint: `${upstream}/api/pos/client-errors`,
+    payload: {
       message: details.message,
       name: details.name,
       stack: details.stack,
@@ -114,9 +115,67 @@ async function uploadDesktopError(
       appVersion: process.env.JINGLES_POS_APP_VERSION,
       timestamp: new Date().toISOString(),
       context: { diagnosticId, errorCode: details.code, ...context },
-    }),
-  });
-  if (!response.ok) throw new Error(`Central error collector returned HTTP ${response.status}`);
+    },
+  };
+  await flushPendingServerErrorUploads();
+  try {
+    const response = await fetch(report.endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(report.payload),
+    });
+    if (!response.ok) throw new Error(`Central error collector returned HTTP ${response.status}`);
+  } catch (error) {
+    await enqueuePendingUpload(report);
+    throw error;
+  }
+}
+
+function uploadQueuePath() {
+  return path.join(path.dirname(getServerErrorLogPath()), 'server-error-upload-queue.json');
+}
+
+async function readPendingUploads(): Promise<PendingUpload[]> {
+  try {
+    const parsed = JSON.parse(await fs.promises.readFile(uploadQueuePath(), 'utf8')) as unknown;
+    return Array.isArray(parsed) ? parsed.slice(-MAX_PENDING_UPLOADS) as PendingUpload[] : [];
+  } catch {
+    return [];
+  }
+}
+
+async function writePendingUploads(reports: PendingUpload[]) {
+  const target = uploadQueuePath();
+  await fs.promises.mkdir(path.dirname(target), { recursive: true });
+  if (reports.length === 0) {
+    await fs.promises.rm(target, { force: true });
+    return;
+  }
+  await fs.promises.writeFile(target, JSON.stringify(reports.slice(-MAX_PENDING_UPLOADS), null, 2), { encoding: 'utf8', mode: 0o600 });
+}
+
+async function enqueuePendingUpload(report: PendingUpload) {
+  await writePendingUploads([...await readPendingUploads(), report]);
+}
+
+export async function flushPendingServerErrorUploads() {
+  if (!isLocalPosBackendMode()) return;
+  const pending = await readPendingUploads();
+  if (pending.length === 0) return;
+  const unsent: PendingUpload[] = [];
+  for (const report of pending) {
+    try {
+      const response = await fetch(report.endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(report.payload),
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    } catch {
+      unsent.push(report);
+    }
+  }
+  await writePendingUploads(unsent);
 }
 
 export async function reportBackgroundServerError(

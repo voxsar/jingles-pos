@@ -10,7 +10,11 @@ import { ensureLocalCatalogSearchIndex } from './services/localCatalog';
 import { ensureLocalSchemaCompat } from './services/schemaCompat';
 import { syncWithUpstream } from './services/posSync';
 import { syncSharedCatalogProjection } from './sharedInventory';
-import { reportBackgroundServerError, respondWithServerError } from './services/serverErrorLog';
+import {
+  flushPendingServerErrorUploads,
+  reportBackgroundServerError,
+  respondWithServerError,
+} from './services/serverErrorLog';
 
 const app = express();
 const PORT = Number(process.env.PORT || 3001);
@@ -46,6 +50,7 @@ async function startServer() {
 
   app.listen(PORT, () => {
     console.log(`Backend server running on port ${PORT}`);
+    void flushPendingServerErrorUploads();
   });
 
   if (isLocalPosBackendMode()) {
