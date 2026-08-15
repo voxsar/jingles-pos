@@ -1,8 +1,13 @@
 import {
+  DEFAULT_POS_CASH_SALES_VISIBILITY,
   DEFAULT_POS_PRINTER_CONFIG,
   DEFAULT_POS_SCANNER_SETTINGS,
   DEFAULT_POS_SHIFT_RECONCILIATION,
   DEFAULT_POS_SHORTCUT_SETTINGS,
+  type POSDatabaseInfo,
+  type POSDatabaseSwitchMode,
+  type POSDatabaseSwitchResult,
+  type POSDesktopBackupAsResult,
   type POSDesktopBackupResult,
   type POSDesktopSettings,
   type POSDesktopSettingsSaveResult,
@@ -63,6 +68,7 @@ export function buildFallbackDesktopSettings(themeMode: POSThemeMode): POSDeskto
     // The browser build has no settings file, so the one section it can still
     // honour is kept in local storage instead of defaulting on every reload.
     customerDisplay: readStoredCustomerDisplaySettings(),
+    cashSalesVisibility: { ...DEFAULT_POS_CASH_SALES_VISIBILITY },
   };
 }
 
@@ -157,5 +163,43 @@ export async function createDesktopBackup(): Promise<POSDesktopBackupResult> {
   }
 
   return bridge.backupNow();
+}
+
+/** Backs up to a destination the user picks in a save dialog, unlike {@link createDesktopBackup}'s fixed folder. */
+export async function createDesktopBackupAs(): Promise<POSDesktopBackupAsResult> {
+  const bridge = getDesktopSettingsBridge();
+  if (!bridge) {
+    throw new Error('Desktop settings are only available in the Electron app.');
+  }
+
+  return bridge.backupAs();
+}
+
+export async function getDesktopDatabaseInfo(): Promise<POSDatabaseInfo> {
+  const bridge = getDesktopSettingsBridge();
+  if (!bridge) {
+    throw new Error('Desktop settings are only available in the Electron app.');
+  }
+
+  return bridge.getDatabaseInfo();
+}
+
+export async function revealDesktopDatabaseFile(): Promise<void> {
+  const bridge = getDesktopSettingsBridge();
+  if (!bridge) {
+    throw new Error('Desktop settings are only available in the Electron app.');
+  }
+
+  return bridge.revealDatabaseFile();
+}
+
+/** Switches the live database file and restarts the local backend against it. */
+export async function switchDesktopDatabase(mode: POSDatabaseSwitchMode): Promise<POSDatabaseSwitchResult> {
+  const bridge = getDesktopSettingsBridge();
+  if (!bridge) {
+    throw new Error('Desktop settings are only available in the Electron app.');
+  }
+
+  return bridge.switchDatabase(mode);
 }
 

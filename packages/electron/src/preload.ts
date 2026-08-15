@@ -2,6 +2,10 @@ import { contextBridge, ipcRenderer } from 'electron';
 import type {
   POSCustomerDisplayState,
   POSCustomerDisplayStatus,
+  POSDatabaseInfo,
+  POSDatabaseSwitchMode,
+  POSDatabaseSwitchResult,
+  POSDesktopBackupAsResult,
   POSDesktopBackupResult,
   POSDesktopSettings,
   POSDesktopSettingsSaveResult,
@@ -45,6 +49,18 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ),
     backupNow: () => (
       ipcRenderer.invoke('desktop-settings:backup-now') as Promise<POSDesktopBackupResult>
+    ),
+    backupAs: () => (
+      ipcRenderer.invoke('desktop-settings:backup-as') as Promise<POSDesktopBackupAsResult>
+    ),
+    getDatabaseInfo: () => (
+      ipcRenderer.invoke('desktop-settings:get-database-info') as Promise<POSDatabaseInfo>
+    ),
+    revealDatabaseFile: () => (
+      ipcRenderer.invoke('desktop-settings:reveal-database-file') as Promise<void>
+    ),
+    switchDatabase: (mode: POSDatabaseSwitchMode) => (
+      ipcRenderer.invoke('desktop-settings:switch-database', mode) as Promise<POSDatabaseSwitchResult>
     ),
   },
   printing: {
@@ -108,6 +124,10 @@ declare global {
         pickDatabasePath: (currentPath?: string) => Promise<string | null>;
         pickBackupDirectory: (currentPath?: string) => Promise<string | null>;
         backupNow: () => Promise<POSDesktopBackupResult>;
+        backupAs: () => Promise<POSDesktopBackupAsResult>;
+        getDatabaseInfo: () => Promise<POSDatabaseInfo>;
+        revealDatabaseFile: () => Promise<void>;
+        switchDatabase: (mode: POSDatabaseSwitchMode) => Promise<POSDatabaseSwitchResult>;
       };
       printing?: {
         list: () => Promise<POSPrinterConfig[]>;

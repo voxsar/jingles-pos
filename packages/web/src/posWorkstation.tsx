@@ -9,6 +9,8 @@ import {
   HeldSaleSummary,
   POSCustomerDisplaySettings,
   POSCustomerDisplayStatus,
+  POSDatabaseInfo,
+  POSDatabaseSwitchMode,
   POSDesktopSettings,
   POSDiscoveredPrinter,
   POSPrintResult,
@@ -27,6 +29,7 @@ import {
   ProductVariant,
   RecordCreditPaymentInput,
   ReturnInput,
+  SaleLineSummary,
   SaleSummary,
   ShiftSummary,
   SyncStatusSummary,
@@ -36,6 +39,7 @@ import {
   ZReportSlot,
   POSActionShortcutId,
   POSActionShortcuts,
+  POSCashSalesVisibilitySettings,
   POSQuickKey,
   POSShiftReconciliationSettings,
   POSShortcutSettings,
@@ -47,6 +51,7 @@ import {
   formatBinding,
   isValidQuickKeyBinding,
   normalizeBinding,
+  normalizeCashSalesVisibility,
   normalizeCustomerDisplaySettings,
   normalizeShiftReconciliation,
   normalizeShortcutSettings,
@@ -54,6 +59,7 @@ import {
   TENDER_TOTAL_KEY,
   DECLARABLE_TENDER_METHODS,
   DEFAULT_POS_ACTION_SHORTCUTS,
+  DEFAULT_POS_CASH_SALES_VISIBILITY,
   DEFAULT_POS_CUSTOMER_DISPLAY,
   DEFAULT_POS_SCANNER_SETTINGS,
   DEFAULT_POS_SHIFT_RECONCILIATION,
@@ -104,14 +110,18 @@ import {
 import {
   buildFallbackDesktopSettings,
   createDesktopBackup,
+  createDesktopBackupAs,
   createPrinterDraft,
+  getDesktopDatabaseInfo,
   hasDesktopSettingsBridge,
   loadDesktopSettings,
   persistThemeMode,
   pickDesktopBackupDirectory,
   pickDesktopDatabasePath,
   readStoredThemeMode,
+  revealDesktopDatabaseFile,
   saveDesktopSettings as saveDesktopSettingsToBridge,
+  switchDesktopDatabase,
   withPrinterUpdate,
 } from './desktopSettings';
 import {
@@ -154,6 +164,7 @@ import {
   recalculateCartLine,
   resolveDefaultCustomerId,
   saleIncludesCash,
+  sortPriceTiers,
   suggestChangeBreakdowns,
   suggestTenderTopUps,
   summarizeShiftReconciliation,
@@ -164,8 +175,12 @@ import {
   ACTION_SHORTCUT_LABELS,
   CASH_DENOMINATION_SHORTCUTS,
   cashDenominationShortcut,
+  digitRowIndex,
   findShortcutConflicts,
+  numpadRowIndex,
   popupNumberIndex,
+  RETURN_REASON_HOTKEYS,
+  returnReasonHotkeyIndex,
 } from './utils/shortcuts';
 import { useNavigate } from 'react-router-dom';
 
@@ -215,6 +230,23 @@ const MAX_CATALOG_PANE_WIDTH = 72;
 const MIN_CATALOG_PANEL_PX = 420;
 const MIN_CART_PANEL_PX = 380;
 const PANEL_RESIZER_WIDTH = 16;
+
+function formatFileSize(bytes: number): string {
+  if (bytes <= 0) {
+    return '0 B';
+  }
+
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let value = bytes;
+  let unitIndex = 0;
+
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024;
+    unitIndex += 1;
+  }
+
+  return `${value >= 10 || unitIndex === 0 ? value.toFixed(0) : value.toFixed(1)} ${units[unitIndex]}`;
+}
 
 function formatStockQuantity(value: number): string {
   if (Math.abs(value) < 10_000) return formatInteger(value);
@@ -328,9 +360,12 @@ export default function PosWorkstation() {
   const [activeShift, setActiveShift] = useState<ShiftSummary | null>(null);
   const [sales, setSales] = useState<SaleSummary[]>([]);
   const [salesLoading, setSalesLoading] = useState(false);
+  // Cash sales are hidden by default every session; only an explicit reveal
+  // (recorded as 'false') carries forward across a reload within the tab.
   const [hideCashSales, setHideCashSales] = useState(
-    () => window.sessionStorage.getItem('jingles-pos-hide-cash-sales') === 'true',
+    () => window.sessionStorage.getItem('jingles-pos-hide-cash-sales') !== 'false',
   );
+  const cashSalesAutoHideTimerRef = useRef<number | null>(null);
   const [syncStatus, setSyncStatus] = useState<SyncStatusSummary | null>(null);
 
   const [cart, setCart] = useState<CartLine[]>([]);
@@ -376,6 +411,10 @@ export default function PosWorkstation() {
   const [isSettingsLoading, setIsSettingsLoading] = useState(false);
   const [isSettingsSaving, setIsSettingsSaving] = useState(false);
   const [isCreatingBackup, setIsCreatingBackup] = useState(false);
+  const [isCreatingBackupAs, setIsCreatingBackupAs] = useState(false);
+  const [isRevealingDatabase, setIsRevealingDatabase] = useState(false);
+  const [switchingDatabaseMode, setSwitchingDatabaseMode] = useState<POSDatabaseSwitchMode | null>(null);
+  const [databaseInfo, setDatabaseInfo] = useState<POSDatabaseInfo | null>(null);
   const [appliedThemeMode, setAppliedThemeMode] = useState<POSThemeMode>(() => readStoredThemeMode());
   const [desktopSettings, setDesktopSettings] = useState<POSDesktopSettings | null>(() => (
     buildFallbackDesktopSettings(readStoredThemeMode())
@@ -383,6 +422,8 @@ export default function PosWorkstation() {
   const [settingsDraft, setSettingsDraft] = useState<POSDesktopSettings | null>(() => (
     buildFallbackDesktopSettings(readStoredThemeMode())
   ));
+  const cashSalesVisibilitySettings: POSCashSalesVisibilitySettings =
+    desktopSettings?.cashSalesVisibility ?? DEFAULT_POS_CASH_SALES_VISIBILITY;
   const [chromeOffsets, setChromeOffsets] = useState({ top: 136, bottom: 140 });
   const [customerDisplayStatus, setCustomerDisplayStatus] = useState<POSCustomerDisplayStatus>(
     () => ({ supported: hasCustomerDisplayBridge(), open: false, displayCount: 0 }),
@@ -412,6 +453,19 @@ export default function PosWorkstation() {
 
   const showNotice = useCallback((type: 'success' | 'error', text: string) => {
     setNotice({ type, text });
+  }, []);
+
+  const refreshDatabaseInfo = useCallback(async () => {
+    if (!hasDesktopSettingsBridge()) {
+      setDatabaseInfo(null);
+      return;
+    }
+
+    try {
+      setDatabaseInfo(await getDesktopDatabaseInfo());
+    } catch {
+      // The database-file panel is a convenience; a failed refresh just leaves it stale.
+    }
   }, []);
 
   useEffect(() => {
@@ -914,13 +968,14 @@ export default function PosWorkstation() {
     try {
       const loaded = await loadDesktopSettingsIntoState();
       setSettingsDraft(loaded);
+      await refreshDatabaseInfo();
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to load workstation settings';
       showNotice('error', message);
     } finally {
       setIsSettingsLoading(false);
     }
-  }, [loadDesktopSettingsIntoState, showNotice]);
+  }, [loadDesktopSettingsIntoState, refreshDatabaseInfo, showNotice]);
 
   const handleSaveSettings = useCallback(async () => {
     if (settingsDraft == null) {
@@ -937,6 +992,7 @@ export default function PosWorkstation() {
       shortcuts: normalizeShortcutSettings(settingsDraft.shortcuts),
       shiftReconciliation: normalizeShiftReconciliation(settingsDraft.shiftReconciliation),
       customerDisplay: normalizeCustomerDisplaySettings(settingsDraft.customerDisplay),
+      cashSalesVisibility: normalizeCashSalesVisibility(settingsDraft.cashSalesVisibility),
     };
 
     try {
@@ -1025,6 +1081,60 @@ export default function PosWorkstation() {
     }
   }, [showNotice]);
 
+  const handleCreateBackupAs = useCallback(async () => {
+    setIsCreatingBackupAs(true);
+
+    try {
+      const result = await createDesktopBackupAs();
+      if (!result.canceled) {
+        showNotice('success', `Backup created at ${result.filePath}`);
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to create a database backup';
+      showNotice('error', message);
+    } finally {
+      setIsCreatingBackupAs(false);
+    }
+  }, [showNotice]);
+
+  const handleRevealDatabaseFile = useCallback(async () => {
+    setIsRevealingDatabase(true);
+
+    try {
+      await revealDesktopDatabaseFile();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to open the database location';
+      showNotice('error', message);
+    } finally {
+      setIsRevealingDatabase(false);
+    }
+  }, [showNotice]);
+
+  const handleSwitchDatabase = useCallback(async (mode: POSDatabaseSwitchMode) => {
+    setSwitchingDatabaseMode(mode);
+
+    try {
+      const result = await switchDesktopDatabase(mode);
+      if (result.canceled) {
+        return;
+      }
+
+      showNotice(
+        'success',
+        result.copiedDatabase
+          ? `Switched to ${result.selectedPath}. The previous database was copied over.`
+          : `Switched to ${result.selectedPath}.`,
+      );
+      await loadDesktopSettingsIntoState();
+      await refreshDatabaseInfo();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to switch the database file';
+      showNotice('error', message);
+    } finally {
+      setSwitchingDatabaseMode(null);
+    }
+  }, [loadDesktopSettingsIntoState, refreshDatabaseInfo, showNotice]);
+
   useEffect(() => {
     void reloadBootstrap();
   }, [reloadBootstrap]);
@@ -1102,7 +1212,8 @@ export default function PosWorkstation() {
           setHideCashSales((previous) => {
             const next = !previous;
             window.sessionStorage.setItem('jingles-pos-hide-cash-sales', String(next));
-            showNotice('success', next ? 'Cash sales are hidden.' : 'Cash sales are visible.');
+            // No toast here by design: the status dot next to the "Today"
+            // metric is the only tell, so revealing cash sales stays discreet.
             return next;
           });
         } else {
@@ -1134,6 +1245,33 @@ export default function PosWorkstation() {
       }
     };
   }, [session, showNotice]);
+
+  // A reveal (Ctrl x3) re-hides itself after the configured interval, unless
+  // that behavior is switched off in Settings. Timer is cleared whenever cash
+  // sales go back to hidden by any means, so it never fires after the fact.
+  useEffect(() => {
+    if (cashSalesAutoHideTimerRef.current != null) {
+      window.clearTimeout(cashSalesAutoHideTimerRef.current);
+      cashSalesAutoHideTimerRef.current = null;
+    }
+
+    if (hideCashSales || !cashSalesVisibilitySettings.autoHideEnabled) {
+      return;
+    }
+
+    cashSalesAutoHideTimerRef.current = window.setTimeout(() => {
+      cashSalesAutoHideTimerRef.current = null;
+      setHideCashSales(true);
+      window.sessionStorage.setItem('jingles-pos-hide-cash-sales', 'true');
+    }, cashSalesVisibilitySettings.autoHideMinutes * 60_000);
+
+    return () => {
+      if (cashSalesAutoHideTimerRef.current != null) {
+        window.clearTimeout(cashSalesAutoHideTimerRef.current);
+        cashSalesAutoHideTimerRef.current = null;
+      }
+    };
+  }, [cashSalesVisibilitySettings.autoHideEnabled, cashSalesVisibilitySettings.autoHideMinutes, hideCashSales]);
 
   const closeOverlayStack = useCallback(() => {
     setIsSearchOpen(false);
@@ -1256,7 +1394,7 @@ export default function PosWorkstation() {
     'Retail',
   ].filter(Boolean)), [defaultTierLabel, selectedCustomer?.tier]);
 
-  const addProductToCart = useCallback((product: Product, variant?: ProductVariant, requestedQuantity = 1) => {
+  const addProductToCart = useCallback((product: Product, variant?: ProductVariant, requestedQuantity = 1, tierLabel?: string) => {
     const salesperson = salespeople[0] ?? users[0];
     if (salesperson == null) {
       showNotice('error', 'No cashier or salesperson is configured for the workstation.');
@@ -1270,7 +1408,7 @@ export default function PosWorkstation() {
         return previous;
       }
       const effectivePriceTiers = variant?.priceTiers?.length ? variant.priceTiers : product.priceTiers;
-      const tier = pickPriceTier(effectivePriceTiers, preferredTierLabels);
+      const tier = pickPriceTier(effectivePriceTiers, tierLabel ? [tierLabel, ...preferredTierLabels] : preferredTierLabels);
       const quantityToAdd = Math.max(1, Math.floor(requestedQuantity));
       const existing = previous.find((line) => (
         line.productId === product.id
@@ -1302,8 +1440,8 @@ export default function PosWorkstation() {
     });
   }, [preferredTierLabels, salespeople, showNotice, users]);
 
-  const addProductQuantityToCart = useCallback((product: Product, variant: ProductVariant | undefined, quantity: number) => {
-    addProductToCart(product, variant, quantity);
+  const addProductQuantityToCart = useCallback((product: Product, variant: ProductVariant | undefined, quantity: number, tierLabel?: string) => {
+    addProductToCart(product, variant, quantity, tierLabel);
   }, [addProductToCart]);
 
   const updateCartLineById = useCallback((lineId: string, updater: (line: CartLine) => CartLine | null) => {
@@ -2044,6 +2182,12 @@ export default function PosWorkstation() {
           showNotice('error', 'Add items to the cart before holding the bill.');
           return;
         }
+        if (isHoldOpen && holdMode === 'hold') {
+          // The held-bills list is already open for this action - a second
+          // press is the operator confirming, same as clicking "Save current bill".
+          void handleSaveHeldSale();
+          return;
+        }
         handleOpenHoldModal('hold');
         return;
       case 'recall':
@@ -2094,6 +2238,7 @@ export default function PosWorkstation() {
         handleOpenCashMovement();
         return;
       case 'unit':
+      case 'tier':
       case 'discountValue':
       case 'discountPercent':
       case 'closePopup':
@@ -2109,6 +2254,9 @@ export default function PosWorkstation() {
     handleOpenHoldModal,
     handleOpenMoneyModal,
     handlePrintQuotation,
+    handleSaveHeldSale,
+    holdMode,
+    isHoldOpen,
     showNotice,
   ]);
 
@@ -2136,7 +2284,14 @@ export default function PosWorkstation() {
       // Escape falls through to whatever action is bound to the key.
       if (isOverlayOpen) {
         event.preventDefault();
-        closeOverlayStack();
+        if (receiptSale != null) {
+          // A receipt opened from a list (orders, customer history) sits on
+          // top of that list rather than replacing it - Escape steps back to
+          // the list at the cursor the operator left off, not past it.
+          setReceiptSale(null);
+        } else {
+          closeOverlayStack();
+        }
         return;
       }
     } else if (isPlainKey && isTyping && !isBarcodeField) {
@@ -2154,7 +2309,7 @@ export default function PosWorkstation() {
 
     for (const action of ACTION_SHORTCUT_IDS) {
       if (action === 'help') continue;
-      if (action === 'unit' || action === 'discountValue' || action === 'discountPercent' || action === 'closePopup') continue;
+      if (action === 'unit' || action === 'tier' || action === 'discountValue' || action === 'discountPercent' || action === 'closePopup') continue;
       if (!bindingMatchesEvent(actionShortcuts[action], event)) continue;
       event.preventDefault();
       runAction(action);
@@ -2179,6 +2334,7 @@ export default function PosWorkstation() {
     handleProductPick,
     isOverlayOpen,
     quickKeyProducts,
+    receiptSale,
     runAction,
     session,
     shortcutSettings.quickKeysEnabled,
@@ -2260,6 +2416,7 @@ export default function PosWorkstation() {
       <HeaderBar
         activeShift={activeShift}
         cashierName={sessionUser?.name ?? session.user.name}
+        cashSalesHidden={hideCashSales}
         conflictCount={syncStatus?.conflictCount ?? 0}
         elementRef={headerBarRef}
         isSyncing={isSyncing}
@@ -2448,8 +2605,8 @@ export default function PosWorkstation() {
           variant={unitSelection.variant}
           shortcuts={actionShortcuts}
           onClose={() => setUnitSelection(null)}
-          onConfirm={(quantity) => {
-            addProductQuantityToCart(unitSelection.product, unitSelection.variant, quantity);
+          onConfirm={(quantity, tierLabel) => {
+            addProductQuantityToCart(unitSelection.product, unitSelection.variant, quantity, tierLabel);
             setUnitSelection(null);
           }}
         />
@@ -2514,14 +2671,21 @@ export default function PosWorkstation() {
       {isSettingsOpen && (
         <SettingsModal
           draft={settingsDraft}
+          databaseInfo={databaseInfo}
           hasDesktopBridge={hasDesktopSettingsBridge()}
           hasPrintingBridge={hasPrintingBridge()}
           isBackingUp={isCreatingBackup}
+          isBackingUpAs={isCreatingBackupAs}
           isLoading={isSettingsLoading}
+          isRevealingDatabase={isRevealingDatabase}
           isSaving={isSettingsSaving}
+          switchingDatabaseMode={switchingDatabaseMode}
           onBackupNow={() => void handleCreateBackup()}
+          onBackupAs={() => void handleCreateBackupAs()}
           onBrowseBackupDirectory={() => void handlePickBackupDirectory()}
           onBrowseDatabasePath={() => void handlePickDatabaseLocation()}
+          onRevealDatabaseFile={() => void handleRevealDatabaseFile()}
+          onSwitchDatabase={(mode) => void handleSwitchDatabase(mode)}
           onClose={() => {
             setIsSettingsOpen(false);
             setSettingsDraft(desktopSettings);
@@ -2598,26 +2762,15 @@ export default function PosWorkstation() {
         />
       )}
 
-      {receiptSale != null && (
-        <ReceiptModal
-          onClose={() => setReceiptSale(null)}
-          onPrinted={reportPrintResult}
-          sale={receiptSale}
-          terminalCode={terminalCode}
-        />
-      )}
-
       {isOrdersOpen && (
         <OrderHistoryModal
           cashSalesHidden={hideCashSales}
           currentTerminalId={currentTerminalId}
           isLoading={salesLoading}
           isManager={session.user.role === UserRole.MANAGER}
+          isReceiptOpen={receiptSale != null}
           onClose={() => setIsOrdersOpen(false)}
-          onOpenReceipt={(sale) => {
-            setIsOrdersOpen(false);
-            setReceiptSale(sale);
-          }}
+          onOpenReceipt={(sale) => setReceiptSale(sale)}
           sales={visibleSales}
           terminals={terminals}
           users={users}
@@ -2684,6 +2837,18 @@ export default function PosWorkstation() {
       )}
 
       {isHelpOpen && <HelpGuide onClose={() => setIsHelpOpen(false)} />}
+
+      {/* Rendered last so it stacks on top of whatever list (orders, customer
+          history) opened it - those stay mounted underneath instead of
+          closing, so Escape can hand control back at the same cursor. */}
+      {receiptSale != null && (
+        <ReceiptModal
+          onClose={() => setReceiptSale(null)}
+          onPrinted={reportPrintResult}
+          sale={receiptSale}
+          terminalCode={terminalCode}
+        />
+      )}
     </div>
   );
 }
@@ -2811,6 +2976,7 @@ function WorkstationAccessScreen(props: WorkstationAccessScreenProps) {
 type HeaderBarProps = {
   activeShift: ShiftSummary | null;
   cashierName: string;
+  cashSalesHidden: boolean;
   conflictCount: number;
   elementRef?: React.Ref<HTMLElement>;
   isSyncing: boolean;
@@ -2897,7 +3063,12 @@ function HeaderBar(props: HeaderBarProps) {
       </div>
 
       <div className="header-right">
-        <MetricCard label="Today" value={formatCurrency(props.todayRevenue)} />
+        <MetricCard
+          label="Today"
+          value={formatCurrency(props.todayRevenue)}
+          dot={props.cashSalesHidden ? 'hidden' : 'visible'}
+          dotTitle={props.cashSalesHidden ? 'Cash sales hidden' : 'Cash sales visible'}
+        />
         <MetricCard label="Bills" value={String(props.todayBills)} />
         <button className="ghost-button" onClick={props.onOpenOrders} title={`Order history (${formatBinding(props.shortcuts.orders)})`}>
           Orders
@@ -3527,10 +3698,15 @@ function LabelBlock(props: { label: string; children: React.ReactNode }) {
   );
 }
 
-function MetricCard(props: { label: string; value: string }) {
+function MetricCard(props: { label: string; value: string; dot?: 'hidden' | 'visible'; dotTitle?: string }) {
   return (
     <div className="metric-card">
-      <span>{props.label}</span>
+      <span>
+        {props.label}
+        {props.dot != null && (
+          <i className={`metric-card-dot ${props.dot}`} title={props.dotTitle} />
+        )}
+      </span>
       <b>{props.value}</b>
     </div>
   );
@@ -3613,13 +3789,20 @@ function ModalShell(
 function SettingsModal(
   props: {
     draft: POSDesktopSettings | null;
+    databaseInfo: POSDatabaseInfo | null;
     hasDesktopBridge: boolean;
     isBackingUp: boolean;
+    isBackingUpAs: boolean;
     isLoading: boolean;
+    isRevealingDatabase: boolean;
     isSaving: boolean;
+    switchingDatabaseMode: POSDatabaseSwitchMode | null;
     onBackupNow: () => void;
+    onBackupAs: () => void;
     onBrowseBackupDirectory: () => void;
     onBrowseDatabasePath: () => void;
+    onRevealDatabaseFile: () => void;
+    onSwitchDatabase: (mode: POSDatabaseSwitchMode) => void;
     onClose: () => void;
     onDraftChange: React.Dispatch<React.SetStateAction<POSDesktopSettings | null>>;
     onSave: () => void;
@@ -3630,6 +3813,8 @@ function SettingsModal(
   },
 ) {
   const settings = props.draft;
+  const databaseInfo = props.databaseInfo;
+  const databaseActionBusy = props.isRevealingDatabase || props.switchingDatabaseMode != null;
 
   const updateDraft = <K extends keyof POSDesktopSettings>(key: K, value: POSDesktopSettings[K]) => {
     props.onDraftChange((previous: POSDesktopSettings | null) => (
@@ -3682,7 +3867,9 @@ function SettingsModal(
                     <div className="section-kicker">Storage</div>
                     <div className="section-title">SQLite database</div>
                   </div>
-                  <div className="report-chip mono">Backend restart on save</div>
+                  <div className="report-chip mono">
+                    {databaseInfo?.usesCustomPath ? 'Custom file' : 'Default file'}
+                  </div>
                 </div>
 
                 <LabelBlock label="Database location">
@@ -3702,10 +3889,62 @@ function SettingsModal(
                   >
                     Browse database
                   </button>
+                  <button
+                    className="ghost-button"
+                    disabled={databaseActionBusy || !props.hasDesktopBridge}
+                    onClick={props.onRevealDatabaseFile}
+                  >
+                    {props.isRevealingDatabase ? 'Opening...' : 'Reveal in folder'}
+                  </button>
                 </div>
 
                 <div className="field-hint">
                   When you choose a new empty file path, the current database is copied there before the backend switches over.
+                </div>
+
+                {databaseInfo && (
+                  <div className="settings-info-grid">
+                    <div className="settings-info-item">
+                      <span className="settings-info-label">File size</span>
+                      <span className="settings-info-value">{formatFileSize(databaseInfo.sizeBytes)}</span>
+                    </div>
+                    <div className="settings-info-item">
+                      <span className="settings-info-label">Last modified</span>
+                      <span className="settings-info-value">{formatDateTime(databaseInfo.lastModifiedAt ?? undefined)}</span>
+                    </div>
+                  </div>
+                )}
+
+                <div className="settings-subsection">
+                  <div className="section-kicker">Switch database file</div>
+                  <div className="field-hint">
+                    Switch this workstation to a different SQLite file. The local backend restarts against it immediately &mdash; no relaunch needed. Pick an existing file (e.g. a backup) to restore from it.
+                  </div>
+                  <div className="settings-inline-actions">
+                    <button
+                      className="ghost-button"
+                      disabled={databaseActionBusy || !props.hasDesktopBridge}
+                      onClick={() => props.onSwitchDatabase('new')}
+                    >
+                      {props.switchingDatabaseMode === 'new' ? 'Preparing...' : 'Switch to new file'}
+                    </button>
+                    <button
+                      className="ghost-button"
+                      disabled={databaseActionBusy || !props.hasDesktopBridge}
+                      onClick={() => props.onSwitchDatabase('existing')}
+                    >
+                      {props.switchingDatabaseMode === 'existing' ? 'Preparing...' : 'Switch to existing file'}
+                    </button>
+                    {databaseInfo?.usesCustomPath && (
+                      <button
+                        className="ghost-button"
+                        disabled={databaseActionBusy || !props.hasDesktopBridge}
+                        onClick={() => props.onSwitchDatabase('default')}
+                      >
+                        {props.switchingDatabaseMode === 'default' ? 'Preparing...' : 'Use default file'}
+                      </button>
+                    )}
+                  </div>
                 </div>
               </section>
 
@@ -3742,10 +3981,17 @@ function SettingsModal(
                   >
                     {props.isBackingUp ? 'Backing up...' : 'Back up now'}
                   </button>
+                  <button
+                    className="ghost-button"
+                    disabled={props.isBackingUpAs || !props.hasDesktopBridge}
+                    onClick={props.onBackupAs}
+                  >
+                    {props.isBackingUpAs ? 'Backing up...' : 'Backup as...'}
+                  </button>
                 </div>
 
                 <div className="field-hint">
-                  Backups are written as timestamped SQLite files so you can archive or restore them separately.
+                  "Back up now" writes a timestamped SQLite file to the backup directory above. "Backup as..." lets you pick any destination and filename for a one-off copy.
                 </div>
               </section>
 
@@ -3826,6 +4072,12 @@ function SettingsModal(
                 disabled={props.isSaving}
                 settings={settings.shiftReconciliation}
                 onChange={(shiftReconciliation) => updateDraft('shiftReconciliation', shiftReconciliation)}
+              />
+
+              <CashSalesVisibilityCard
+                disabled={props.isSaving}
+                settings={settings.cashSalesVisibility}
+                onChange={(cashSalesVisibility) => updateDraft('cashSalesVisibility', cashSalesVisibility)}
               />
 
               <ScannerSettingsCard
@@ -4123,6 +4375,67 @@ function ShiftReconciliationCard(
           </small>
         </span>
       </label>
+    </section>
+  );
+}
+
+function CashSalesVisibilityCard(
+  props: {
+    disabled: boolean;
+    settings: POSCashSalesVisibilitySettings;
+    onChange: (settings: POSCashSalesVisibilitySettings) => void;
+  },
+) {
+  const update = <K extends keyof POSCashSalesVisibilitySettings>(
+    key: K,
+    value: POSCashSalesVisibilitySettings[K],
+  ) => {
+    props.onChange({ ...props.settings, [key]: value });
+  };
+
+  return (
+    <section className="settings-card">
+      <div className="settings-card-head">
+        <div>
+          <div className="section-kicker">Privacy</div>
+          <div className="section-title">Cash sales visibility</div>
+        </div>
+        <div className="report-chip mono">Ctrl x3 reveals</div>
+      </div>
+
+      <div className="field-hint">
+        Cash sales are hidden from the till by default. Tapping Ctrl three times in a row reveals
+        them; a small dot next to the "Today" total shows which state it's in — orange while
+        hidden, green while visible.
+      </div>
+
+      <label className="settings-checkbox-row admin-setting-row">
+        <input
+          type="checkbox"
+          disabled={props.disabled}
+          checked={props.settings.autoHideEnabled}
+          onChange={(event) => update('autoHideEnabled', event.target.checked)}
+        />
+        <span>
+          <b>Re-hide automatically</b>
+          <small>Switch a reveal back off after the interval below, instead of leaving it visible until Ctrl x3 again.</small>
+        </span>
+      </label>
+
+      <div className="settings-field-row">
+        <LabelBlock label="Re-hide after (minutes)">
+          <input
+            className="glass-input compact"
+            type="number"
+            min={1}
+            max={120}
+            step={1}
+            disabled={props.disabled || !props.settings.autoHideEnabled}
+            value={props.settings.autoHideMinutes}
+            onChange={(event) => update('autoHideMinutes', Math.min(120, Math.max(1, Number(event.target.value) || 1)))}
+          />
+        </LabelBlock>
+      </div>
     </section>
   );
 }
@@ -5076,8 +5389,15 @@ function SearchOverlay(
         props.onClose();
         return;
       }
-      const index = popupNumberIndex(event);
-      if (index == null || !results[index]) return;
+      // Jumping to a result only answers to the numpad, never the number row
+      // beside backtick: that row is where a product name or SKU beginning
+      // with a digit (e.g. "7-Up", "3M tape") actually gets typed, and it
+      // has to keep reaching the search box instead of picking a result.
+      if (event.ctrlKey || event.altKey || event.shiftKey || event.metaKey) return;
+      const match = /^Numpad([1-9])$/.exec(event.code);
+      if (!match) return;
+      const index = Number(match[1]) - 1;
+      if (!results[index]) return;
       event.preventDefault();
       props.onPick(results[index]);
     };
@@ -5106,6 +5426,8 @@ function SearchOverlay(
           />
           <kbd className="kbd">F3</kbd>
         </div>
+
+        <div className="field-hint">Numpad 1-9 jumps to a result. The number row types normally, so SKUs and names starting with a digit search fine.</div>
 
         <div className="scope-row">
           {(['all', 'sku', 'name', 'category', 'subcategory'] as const).map((entry) => (
@@ -5166,11 +5488,21 @@ function UnitSelectionModal(props: {
   variant?: ProductVariant;
   shortcuts: POSActionShortcuts;
   onClose: () => void;
-  onConfirm: (quantity: number) => void;
+  onConfirm: (quantity: number, tierLabel?: string) => void;
 }) {
   const [quantity, setQuantity] = useState(1);
   const quantityRef = useRef<HTMLInputElement>(null);
   const unitLabel = props.product.unitLabel || 'unit';
+
+  const tiers = useMemo(() => {
+    const source = props.variant?.priceTiers?.length ? props.variant.priceTiers : props.product.priceTiers;
+    return sortPriceTiers(source);
+  }, [props.product, props.variant]);
+  const [tierIndex, setTierIndex] = useState(() => {
+    const defaultIndex = tiers.findIndex((tier) => tier.isDefault);
+    return defaultIndex === -1 ? 0 : defaultIndex;
+  });
+  const selectedTier = tiers[tierIndex] ?? tiers[0];
 
   useEffect(() => {
     quantityRef.current?.focus();
@@ -5190,6 +5522,11 @@ function UnitSelectionModal(props: {
         quantityRef.current?.select();
         return;
       }
+      if (tiers.length > 1 && bindingMatchesEvent(props.shortcuts.tier, event)) {
+        event.preventDefault();
+        setTierIndex((previous) => (previous + 1) % tiers.length);
+        return;
+      }
       // The number row beside the backtick chooses a suggestion. Numpad digits
       // remain ordinary input so a cashier can type any custom quantity.
       const suggestionMatch = !event.ctrlKey && !event.altKey && !event.shiftKey && !event.metaKey
@@ -5197,27 +5534,34 @@ function UnitSelectionModal(props: {
         : null;
       if (suggestionMatch != null) {
         event.preventDefault();
-        props.onConfirm(Number(suggestionMatch[1]));
+        props.onConfirm(Number(suggestionMatch[1]), selectedTier?.label);
         return;
       }
       if (event.key === 'Enter') {
         event.preventDefault();
-        props.onConfirm(quantity);
+        props.onConfirm(quantity, selectedTier?.label);
       }
     };
     window.addEventListener('keydown', handleKey, true);
     return () => window.removeEventListener('keydown', handleKey, true);
-  }, [props, quantity]);
+  }, [props, quantity, selectedTier, tiers]);
 
   return (
     <ModalShell onClose={props.onClose} title={`Choose units - ${props.product.name}`} width="wide">
       <div className="quick-picker-stack">
+        {tiers.length > 1 && (
+          <LabelBlock label={`Price tier (${formatBinding(props.shortcuts.tier)})`}>
+            <div className="quick-picker-help">
+              <b>{selectedTier?.label}</b> - {formatCurrency(selectedTier?.price ?? 0)} / {unitLabel}
+            </div>
+          </LabelBlock>
+        )}
         <div className="quick-picker-grid">
           {Array.from({ length: 9 }, (_, index) => index + 1).map((count) => (
-            <button className="quick-picker-card" key={count} onClick={() => props.onConfirm(count)}>
+            <button className="quick-picker-card" key={count} onClick={() => props.onConfirm(count, selectedTier?.label)}>
               <kbd className="picker-number">{count}</kbd>
               <b>{count} {unitLabel}</b>
-              <span>{formatCurrency((props.variant?.priceTiers?.[0]?.price ?? props.product.priceTiers[0]?.price ?? 0) * count)}</span>
+              <span>{formatCurrency((selectedTier?.price ?? 0) * count)}</span>
             </button>
           ))}
         </div>
@@ -5232,7 +5576,11 @@ function UnitSelectionModal(props: {
             onChange={(event) => setQuantity(Math.max(1, Number(event.target.value) || 1))}
           />
         </LabelBlock>
-        <div className="quick-picker-help">Top number row 1-9 selects a suggestion. Use the numpad for a custom quantity. {formatBinding(props.shortcuts.closePopup)} closes.</div>
+        <div className="quick-picker-help">
+          Top number row 1-9 selects a suggestion. Use the numpad for a custom quantity.
+          {tiers.length > 1 ? ` ${formatBinding(props.shortcuts.tier)} cycles the price tier.` : ''}
+          {' '}{formatBinding(props.shortcuts.closePopup)} closes.
+        </div>
       </div>
     </ModalShell>
   );
@@ -6477,6 +6825,37 @@ function HoldRecallModal(
     [props.heldSales],
   );
 
+  const [windowStart, setWindowStart] = useState(0);
+
+  // A fresh list of held bills (one saved, one recalled elsewhere) invalidates whatever window the operator had scrolled to.
+  useEffect(() => setWindowStart(0), [orderedHeldSales]);
+
+  const visibleHeldSales = useMemo(() => {
+    const start = clampWindowStart(windowStart, orderedHeldSales.length);
+    return orderedHeldSales.slice(start, start + DIGIT_LIST_WINDOW_SIZE);
+  }, [orderedHeldSales, windowStart]);
+
+  useEffect(() => {
+    const handleKey = (event: KeyboardEvent) => {
+      if (event.ctrlKey || event.altKey || event.metaKey) return;
+
+      if (event.code === 'ArrowUp' || event.code === 'ArrowDown') {
+        event.preventDefault();
+        setWindowStart((previous) => clampWindowStart(previous + (event.code === 'ArrowUp' ? -1 : 1), orderedHeldSales.length));
+        return;
+      }
+
+      const index = digitRowIndex(event);
+      if (index == null) return;
+      const heldSale = visibleHeldSales[index];
+      if (!heldSale) return;
+      event.preventDefault();
+      props.onRecall(heldSale);
+    };
+    window.addEventListener('keydown', handleKey, true);
+    return () => window.removeEventListener('keydown', handleKey, true);
+  }, [orderedHeldSales.length, props, visibleHeldSales]);
+
   return (
     <ModalShell onClose={props.onClose} title="Held bills" width="medium">
       <div className="modal-stack">
@@ -6487,13 +6866,20 @@ function HoldRecallModal(
           </button>
         </div>
 
+        {orderedHeldSales.length > 0 && (
+          <div className="field-hint">Digit 1-9 recalls a bill - Up/Down scrolls the list.</div>
+        )}
+
         <div className="held-list">
-          {orderedHeldSales.map((heldSale) => (
+          {visibleHeldSales.map((heldSale, index) => (
             <button key={heldSale.id} className="held-row" onClick={() => props.onRecall(heldSale)}>
-              <div>
-                <div className="held-id">{heldSale.holdNumber}</div>
-                <div className="held-copy">{heldSale.customerName ?? 'Walk-in'} - {heldSale.itemCount} items</div>
-                <div className="held-meta">{heldSale.cashierName} - {formatDateTime(heldSale.createdAt)}</div>
+              <div className="held-main">
+                <kbd className="picker-number">{index + 1}</kbd>
+                <div>
+                  <div className="held-id">{heldSale.holdNumber}</div>
+                  <div className="held-copy">{heldSale.customerName ?? 'Walk-in'} - {heldSale.itemCount} items</div>
+                  <div className="held-meta">{heldSale.cashierName} - {formatDateTime(heldSale.createdAt)}</div>
+                </div>
               </div>
               <div className="held-side">
                 <div>{formatCurrency(heldSale.total)}</div>
@@ -7322,6 +7708,8 @@ function OrderHistoryModal(
     currentTerminalId: string;
     isLoading: boolean;
     isManager: boolean;
+    /** True while a receipt opened from this list is showing on top of it - the list's own keys stand down so they don't fire invisibly underneath. */
+    isReceiptOpen: boolean;
     onClose: () => void;
     onOpenReceipt: (sale: SaleSummary) => void;
     sales: SaleSummary[];
@@ -7333,6 +7721,8 @@ function OrderHistoryModal(
   const [cashierId, setCashierId] = useState('all');
   const [terminalId, setTerminalId] = useState('all');
   const [query, setQuery] = useState('');
+  const [ordersWindowStart, setOrdersWindowStart] = useState(0);
+  const searchInputRef = useRef<HTMLInputElement>(null);
 
   const terminalMap = useMemo(
     () => new Map(props.terminals.map((terminal) => [terminal.id, terminal])),
@@ -7399,6 +7789,59 @@ function OrderHistoryModal(
     setQuery('');
   };
 
+  // A fresh filter/tab invalidates whatever page the operator had paged to.
+  useEffect(() => setOrdersWindowStart(0), [filteredSales]);
+
+  const visibleSales = useMemo(() => {
+    const start = clampWindowStart(ordersWindowStart, filteredSales.length);
+    return filteredSales.slice(start, start + DIGIT_LIST_WINDOW_SIZE);
+  }, [filteredSales, ordersWindowStart]);
+
+  useEffect(() => {
+    const handleKey = (event: KeyboardEvent) => {
+      // A receipt opened from this list is showing on top of it - leave its
+      // keys alone so a digit or page press doesn't silently change the list
+      // hidden underneath.
+      if (props.isReceiptOpen || event.ctrlKey || event.altKey || event.metaKey) return;
+
+      if (event.code === 'ArrowUp' || event.code === 'ArrowDown') {
+        if (document.activeElement === searchInputRef.current) return;
+        event.preventDefault();
+        setOrdersWindowStart((previous) => clampWindowStart(
+          previous + (event.code === 'ArrowUp' ? -DIGIT_LIST_WINDOW_SIZE : DIGIT_LIST_WINDOW_SIZE),
+          filteredSales.length,
+        ));
+        return;
+      }
+
+      if (document.activeElement === searchInputRef.current) return;
+
+      if (event.code === 'KeyT') {
+        event.preventDefault();
+        switchTab('current');
+        return;
+      }
+
+      if (event.code === 'KeyO' && props.isManager) {
+        event.preventDefault();
+        switchTab('other');
+        return;
+      }
+
+      const index = digitRowIndex(event);
+      if (index == null) return;
+      const sale = visibleSales[index];
+      if (!sale) return;
+      event.preventDefault();
+      props.onOpenReceipt(sale);
+    };
+    window.addEventListener('keydown', handleKey, true);
+    return () => window.removeEventListener('keydown', handleKey, true);
+  }, [filteredSales.length, props, visibleSales]);
+
+  const ordersPageStart = clampWindowStart(ordersWindowStart, filteredSales.length);
+  const ordersRangeLabel = `${ordersPageStart + 1}-${ordersPageStart + visibleSales.length} of ${filteredSales.length}`;
+
   return (
     <ModalShell onClose={props.onClose} title="Orders" width="payment">
       <div className="orders-workspace">
@@ -7409,7 +7852,7 @@ function OrderHistoryModal(
             role="tab"
             aria-selected={activeTab === 'current'}
           >
-            This terminal
+            This terminal <kbd>T</kbd>
           </button>
           {props.isManager && (
             <button
@@ -7418,7 +7861,7 @@ function OrderHistoryModal(
               role="tab"
               aria-selected={activeTab === 'other'}
             >
-              Other terminals
+              Other terminals <kbd>O</kbd>
             </button>
           )}
           {props.cashSalesHidden && <span className="orders-mask-indicator">Cash sales hidden</span>}
@@ -7426,6 +7869,7 @@ function OrderHistoryModal(
 
         <div className="orders-filters">
           <input
+            ref={searchInputRef}
             className="glass-input"
             onChange={(event) => setQuery(event.target.value)}
             placeholder="Receipt, customer, cashier or status"
@@ -7449,8 +7893,15 @@ function OrderHistoryModal(
           <OrderSummaryCard title="Summary by terminal" rows={terminalSummaries} />
         </div>
 
+        {filteredSales.length > 0 && (
+          <div className="field-hint">
+            Digit 1-9 opens a receipt - Up/Down pages 9 rows ({ordersRangeLabel}) - T/O switches tabs.
+          </div>
+        )}
+
         <div className="orders-list-wrap">
-          <div className="orders-list-head">
+          <div className="orders-list-head numbered">
+            <span />
             <span>Receipt</span>
             <span>Date</span>
             <span>Terminal</span>
@@ -7461,8 +7912,9 @@ function OrderHistoryModal(
           </div>
           <div className="orders-list">
             {props.isLoading && <div className="orders-empty">Loading orders...</div>}
-            {!props.isLoading && filteredSales.map((sale) => (
-              <button className="orders-row" key={sale.id} onClick={() => props.onOpenReceipt(sale)}>
+            {!props.isLoading && visibleSales.map((sale, index) => (
+              <button className="orders-row numbered" key={sale.id} onClick={() => props.onOpenReceipt(sale)}>
+                <kbd className="picker-number">{index + 1}</kbd>
                 <b>{sale.receiptNumber}</b>
                 <span>{formatDateTime(sale.createdAt)}</span>
                 <span>{terminalMap.get(sale.terminalId)?.code ?? sale.terminalId}</span>
@@ -7512,6 +7964,17 @@ function CustomerDirectoryModal(
   );
   const [query, setQuery] = useState('');
   const [selectedId, setSelectedId] = useState<string | null>(props.initialCustomerId);
+  const searchInputRef = useRef<HTMLInputElement>(null);
+  // Which pane the number row/arrows drive: the customer sidebar, or (once a
+  // customer is open) their order history. Escape steps back from the latter
+  // to the former before it closes the dialog.
+  const [focusRegion, setFocusRegion] = useState<'customers' | 'orders'>('customers');
+  const [customerCursor, setCustomerCursor] = useState(
+    () => Math.max(0, props.customers.findIndex((customer) => customer.id === props.initialCustomerId)),
+  );
+  const [customerWindowStart, setCustomerWindowStart] = useState(0);
+  const [orderCursor, setOrderCursor] = useState(0);
+  const [orderWindowStart, setOrderWindowStart] = useState(0);
   const [account, setAccount] = useState<CustomerAccountDetail | null>(null);
   const [isAccountLoading, setIsAccountLoading] = useState(false);
   const [accountError, setAccountError] = useState('');
@@ -7558,12 +8021,137 @@ function CustomerDirectoryModal(
 
   useEffect(() => {
     setIsEditing(false);
+    // A newly selected customer starts their order list at the top rather
+    // than wherever the cursor happened to sit for the previous customer.
+    setOrderCursor(0);
+    setOrderWindowStart(0);
     if (selectedId) {
       void loadAccount(selectedId);
     } else {
       setAccount(null);
     }
   }, [selectedId, loadAccount]);
+
+  // A fresh search invalidates whatever cursor/window the operator had
+  // scrolled to in the customer sidebar. Skipped on mount so an initial
+  // customer (opened via "View this customer") keeps the cursor it was
+  // seeded with instead of snapping back to the top of the list.
+  const hasSearchedRef = useRef(false);
+  useEffect(() => {
+    if (!hasSearchedRef.current) {
+      hasSearchedRef.current = true;
+      return;
+    }
+    setCustomerCursor(0);
+    setCustomerWindowStart(0);
+  }, [query]);
+
+  const visibleCustomers = useMemo(
+    () => filteredCustomers.slice(customerWindowStart, customerWindowStart + DIGIT_LIST_WINDOW_SIZE),
+    [filteredCustomers, customerWindowStart],
+  );
+
+  const visibleCustomerSales = useMemo(
+    () => customerSales.slice(orderWindowStart, orderWindowStart + DIGIT_LIST_WINDOW_SIZE),
+    [customerSales, orderWindowStart],
+  );
+
+  useEffect(() => {
+    const handleKey = (event: KeyboardEvent) => {
+      if (event.ctrlKey || event.altKey || event.metaKey) return;
+
+      const isSearchFocused = document.activeElement === searchInputRef.current;
+
+      // "/" jumps to the search box from anywhere in the dialog, same as the
+      // product search overlay's own shortcut.
+      if (event.code === 'Slash' && !isSearchFocused) {
+        event.preventDefault();
+        searchInputRef.current?.focus();
+        return;
+      }
+
+      if (event.key === 'Escape') {
+        if (focusRegion === 'orders') {
+          // First Escape backs out of the order list to the customer
+          // sidebar rather than closing the dialog outright - stopping
+          // propagation keeps the workstation's own Escape handler from
+          // also tearing the whole dialog down on this same press.
+          event.preventDefault();
+          event.stopPropagation();
+          setFocusRegion('customers');
+        }
+        // A bare Escape from the customer sidebar is left alone so it
+        // bubbles to the workstation shortcut handler, which closes the dialog.
+        return;
+      }
+
+      if (isSearchFocused) return;
+
+      if (focusRegion === 'customers') {
+        if (event.code === 'ArrowUp' || event.code === 'ArrowDown') {
+          event.preventDefault();
+          const next = stepListCursor(customerCursor, customerWindowStart, filteredCustomers.length, event.code === 'ArrowUp' ? -1 : 1);
+          setCustomerCursor(next.cursor);
+          setCustomerWindowStart(next.windowStart);
+          return;
+        }
+        const index = digitRowIndex(event);
+        if (index != null) {
+          const target = customerWindowStart + index;
+          if (target < filteredCustomers.length) {
+            event.preventDefault();
+            setCustomerCursor(target);
+          }
+          return;
+        }
+        if (event.code === 'Enter') {
+          const customer = filteredCustomers[customerCursor];
+          if (customer) {
+            event.preventDefault();
+            setSelectedId(customer.id);
+            setFocusRegion('orders');
+          }
+        }
+        return;
+      }
+
+      // focusRegion === 'orders'
+      if (event.code === 'ArrowUp' || event.code === 'ArrowDown') {
+        event.preventDefault();
+        const next = stepListCursor(orderCursor, orderWindowStart, customerSales.length, event.code === 'ArrowUp' ? -1 : 1);
+        setOrderCursor(next.cursor);
+        setOrderWindowStart(next.windowStart);
+        return;
+      }
+      const orderIndex = digitRowIndex(event);
+      if (orderIndex != null) {
+        const sale = customerSales[orderWindowStart + orderIndex];
+        if (sale) {
+          event.preventDefault();
+          props.onOpenReceipt(sale);
+        }
+        return;
+      }
+      if (event.code === 'Enter') {
+        const sale = customerSales[orderCursor];
+        if (sale) {
+          event.preventDefault();
+          props.onOpenReceipt(sale);
+        }
+      }
+    };
+    window.addEventListener('keydown', handleKey, true);
+    return () => window.removeEventListener('keydown', handleKey, true);
+  }, [
+    customerCursor,
+    customerSales,
+    customerWindowStart,
+    filteredCustomers,
+    focusRegion,
+    orderCursor,
+    orderWindowStart,
+    props,
+  ]);
 
   const startEdit = () => {
     if (!selectedCustomer) return;
@@ -7629,20 +8217,37 @@ function CustomerDirectoryModal(
         <div className="customers-list-pane">
           <input
             autoFocus
+            ref={searchInputRef}
             className="glass-input"
             onChange={(event) => setQuery(event.target.value)}
             placeholder="Name, code, phone or email"
             value={query}
           />
+          {filteredCustomers.length > 0 && (
+            <div className="field-hint">
+              / searches - Digit 1-9 or Up/Down highlights - Enter opens the account.
+            </div>
+          )}
           <div className="customers-list">
-            {filteredCustomers.map((customer) => (
+            {visibleCustomers.map((customer, index) => (
               <button
-                className={`customers-row ${customer.id === selectedId ? 'active' : ''}`}
+                className={[
+                  'customers-row',
+                  customer.id === selectedId ? 'active' : '',
+                  focusRegion === 'customers' && customerWindowStart + index === customerCursor ? 'cursor' : '',
+                ].filter(Boolean).join(' ')}
                 key={customer.id}
-                onClick={() => setSelectedId(customer.id)}
+                onClick={() => {
+                  setSelectedId(customer.id);
+                  setCustomerCursor(customerWindowStart + index);
+                  setFocusRegion('orders');
+                }}
               >
-                <b>{customer.name}</b>
-                <span>{customer.code} - {customer.tier}</span>
+                <kbd className="picker-number">{index + 1}</kbd>
+                <div className="customers-row-copy">
+                  <b>{customer.name}</b>
+                  <span>{customer.code} - {customer.tier}</span>
+                </div>
               </button>
             ))}
             {filteredCustomers.length === 0 && <div className="orders-empty">No customers match this search.</div>}
@@ -7792,8 +8397,14 @@ function CustomerDirectoryModal(
               </div>
 
               <div className="section-kicker">Order history</div>
+              {customerSales.length > 0 && (
+                <div className="field-hint">
+                  Digit 1-9 or Up/Down highlights an order - Enter opens the receipt - Escape returns to the customer list.
+                </div>
+              )}
               <div className="orders-list-wrap">
-                <div className="orders-list-head">
+                <div className="orders-list-head numbered">
+                  <span />
                   <span>Receipt</span>
                   <span>Date</span>
                   <span>Terminal</span>
@@ -7804,8 +8415,13 @@ function CustomerDirectoryModal(
                 </div>
                 <div className="orders-list">
                   {customerSales.length === 0 && <div className="orders-empty">No orders yet.</div>}
-                  {customerSales.map((sale) => (
-                    <button className="orders-row" key={sale.id} onClick={() => props.onOpenReceipt(sale)}>
+                  {visibleCustomerSales.map((sale, index) => (
+                    <button
+                      className={`orders-row numbered ${focusRegion === 'orders' && orderWindowStart + index === orderCursor ? 'cursor' : ''}`}
+                      key={sale.id}
+                      onClick={() => props.onOpenReceipt(sale)}
+                    >
+                      <kbd className="picker-number">{index + 1}</kbd>
                       <b>{sale.receiptNumber}</b>
                       <span>{formatDateTime(sale.createdAt)}</span>
                       <span>{terminalMap.get(sale.terminalId)?.code ?? sale.terminalId}</span>
@@ -7879,6 +8495,18 @@ function ReceiptModal(
       setIsPrinting(false);
     }
   };
+
+  useEffect(() => {
+    const handleKey = (event: KeyboardEvent) => {
+      if (event.ctrlKey || event.altKey || event.metaKey) return;
+      if (event.code !== 'KeyP') return;
+      event.preventDefault();
+      event.stopPropagation();
+      if (!isPrinting) void handlePrint();
+    };
+    window.addEventListener('keydown', handleKey, true);
+    return () => window.removeEventListener('keydown', handleKey, true);
+  }, [handlePrint, isPrinting]);
 
   const paidAmount = roundToMoney(props.sale.payments.reduce((sum, payment) => sum + payment.amount, 0));
   const tenderedAmount = roundToMoney(props.sale.payments.reduce(
@@ -8020,10 +8648,10 @@ function ReceiptModal(
 
       <div className="modal-actions">
         <button className="ghost-button" disabled={isPrinting} onClick={() => void handlePrint()}>
-          {isPrinting ? 'Printing...' : 'Print'}
+          {isPrinting ? 'Printing...' : 'Print'} <kbd>P</kbd>
         </button>
         <button className="btn-primary" onClick={props.onClose}>
-          Finish
+          Finish <kbd>Esc</kbd>
         </button>
       </div>
     </ModalShell>
@@ -8035,6 +8663,37 @@ type ReturnDraft = {
   reason: string;
   quantities: Record<string, number>;
 };
+
+const RETURN_REASONS = ['Customer return', 'Damaged item', 'Pricing error', 'Order cancellation'];
+
+/** Any digit-navigable list (return sales/lines, held bills) only ever shows one screen's worth of rows at a time, so a digit key can be reused as the row scrolls. */
+const DIGIT_LIST_WINDOW_SIZE = 9;
+
+/** Keeps a scroll offset inside `[0, length - 1]` so Up/PageUp can never scroll a list past its last row. */
+function clampWindowStart(start: number, length: number): number {
+  return Math.max(0, Math.min(start, Math.max(0, length - 1)));
+}
+
+/**
+ * Moves a highlighted-row cursor by one and slides its digit-navigable
+ * window along just enough to keep the cursor on screen, rather than paging
+ * a whole window at a time. Used by the customer directory, where Up/Down
+ * and the number row both move the same highlight instead of acting
+ * immediately on the row underneath it.
+ */
+function stepListCursor(
+  cursor: number,
+  windowStart: number,
+  length: number,
+  delta: number,
+): { cursor: number; windowStart: number } {
+  if (length === 0) return { cursor: 0, windowStart: 0 };
+  const nextCursor = Math.max(0, Math.min(cursor + delta, length - 1));
+  let nextWindowStart = windowStart;
+  if (nextCursor < nextWindowStart) nextWindowStart = nextCursor;
+  else if (nextCursor > nextWindowStart + DIGIT_LIST_WINDOW_SIZE - 1) nextWindowStart = nextCursor - DIGIT_LIST_WINDOW_SIZE + 1;
+  return { cursor: nextCursor, windowStart: clampWindowStart(nextWindowStart, length) };
+}
 
 function ReturnModal(
   props: {
@@ -8048,6 +8707,9 @@ function ReturnModal(
   const [selectedSaleId, setSelectedSaleId] = useState(props.sales[0]?.id ?? '');
   const [reason, setReason] = useState('Customer return');
   const [quantities, setQuantities] = useState<Record<string, number>>({});
+  const [salesWindowStart, setSalesWindowStart] = useState(0);
+  const [linesWindowStart, setLinesWindowStart] = useState(0);
+  const searchInputRef = useRef<HTMLInputElement>(null);
 
   const filteredSales = useMemo(() => {
     const term = query.trim().toLowerCase();
@@ -8064,6 +8726,14 @@ function ReturnModal(
     });
   }, [props.sales, query]);
 
+  // A fresh search invalidates whatever window the operator had scrolled to.
+  useEffect(() => setSalesWindowStart(0), [filteredSales]);
+
+  const visibleSales = useMemo(() => {
+    const start = clampWindowStart(salesWindowStart, filteredSales.length);
+    return filteredSales.slice(start, start + DIGIT_LIST_WINDOW_SIZE);
+  }, [filteredSales, salesWindowStart]);
+
   const selectedSale = props.sales.find((sale) => sale.id === selectedSaleId) ?? filteredSales[0] ?? null;
 
   useEffect(() => {
@@ -8075,27 +8745,99 @@ function ReturnModal(
     setQuantities(
       Object.fromEntries(selectedSale.lines.map((line) => [line.id, 0])),
     );
+    setLinesWindowStart(0);
   }, [selectedSale?.id]);
+
+  const visibleLines = useMemo(() => {
+    if (selectedSale == null) return [];
+    const start = clampWindowStart(linesWindowStart, selectedSale.lines.length);
+    return selectedSale.lines.slice(start, start + DIGIT_LIST_WINDOW_SIZE);
+  }, [selectedSale, linesWindowStart]);
+
+  const toggleLineReturn = useCallback((line: SaleLineSummary) => {
+    setQuantities((previous) => ({
+      ...previous,
+      [line.id]: (previous[line.id] ?? 0) > 0 ? 0 : line.quantity,
+    }));
+  }, []);
+
+  useEffect(() => {
+    const handleReturnKey = (event: KeyboardEvent) => {
+      if (event.ctrlKey || event.altKey || event.metaKey) return;
+
+      if (event.code === 'PageUp' || event.code === 'PageDown') {
+        // Scrolls the sold-lines list; kept off the number row/numpad so it
+        // never collides with the digit and reason shortcuts below.
+        event.preventDefault();
+        const lineCount = selectedSale?.lines.length ?? 0;
+        setLinesWindowStart((previous) => clampWindowStart(previous + (event.code === 'PageUp' ? -1 : 1), lineCount));
+        return;
+      }
+
+      if (event.code === 'ArrowUp' || event.code === 'ArrowDown') {
+        if (document.activeElement === searchInputRef.current) return;
+        event.preventDefault();
+        setSalesWindowStart((previous) => clampWindowStart(previous + (event.code === 'ArrowUp' ? -1 : 1), filteredSales.length));
+        return;
+      }
+
+      // The remaining shortcuts double as characters the operator may be
+      // typing into the receipt/customer search box, so they stand down
+      // while it has focus.
+      if (document.activeElement === searchInputRef.current) return;
+
+      const lineIndex = numpadRowIndex(event);
+      if (lineIndex != null) {
+        const line = visibleLines[lineIndex];
+        if (line) {
+          event.preventDefault();
+          toggleLineReturn(line);
+        }
+        return;
+      }
+
+      const saleIndex = digitRowIndex(event);
+      if (saleIndex != null) {
+        const sale = visibleSales[saleIndex];
+        if (sale) {
+          event.preventDefault();
+          setSelectedSaleId(sale.id);
+        }
+        return;
+      }
+
+      const reasonIndex = returnReasonHotkeyIndex(event);
+      if (reasonIndex != null && RETURN_REASONS[reasonIndex]) {
+        event.preventDefault();
+        setReason(RETURN_REASONS[reasonIndex]);
+      }
+    };
+    window.addEventListener('keydown', handleReturnKey, true);
+    return () => window.removeEventListener('keydown', handleReturnKey, true);
+  }, [filteredSales, selectedSale, toggleLineReturn, visibleLines, visibleSales]);
 
   return (
     <ModalShell onClose={props.onClose} title="Refund / return" width="wide">
       <div className="return-layout">
         <div className="return-sales">
           <input
+            ref={searchInputRef}
             className="glass-input"
             placeholder="Find receipt or customer"
             value={query}
             onChange={(event) => setQuery(event.target.value)}
           />
+          <div className="field-hint">Digit 1-9 selects a receipt - Up/Down scrolls the list.</div>
 
           <div className="return-sales-list">
             {props.isLoading && <div className="meta-label">Loading sales...</div>}
-            {!props.isLoading && filteredSales.map((sale) => (
+            {!props.isLoading && visibleSales.map((sale, index) => (
               <button
                 key={sale.id}
                 className={`return-sale-row ${sale.id === selectedSale?.id ? 'active' : ''}`}
                 onClick={() => setSelectedSaleId(sale.id)}
               >
+                <kbd className="picker-number">{index + 1}</kbd>
                 <div>{sale.receiptNumber}</div>
                 <div>{sale.customerName ?? 'Walk-in'}</div>
                 <span>{formatCurrency(sale.total)}</span>
@@ -8127,12 +8869,17 @@ function ReturnModal(
               </div>
 
               <LabelBlock label="Reason">
-                <SearchableSelect className="glass-input compact" value={reason} onChange={setReason} options={['Customer return', 'Damaged item', 'Pricing error', 'Order cancellation'].map((label) => ({ value: label, label }))} ariaLabel="Return reason" />
+                <SearchableSelect className="glass-input compact" value={reason} onChange={setReason} options={RETURN_REASONS.map((label) => ({ value: label, label }))} ariaLabel="Return reason" />
               </LabelBlock>
+              <div className="field-hint">
+                {RETURN_REASONS.map((label, index) => `${formatBinding(RETURN_REASON_HOTKEYS[index])} ${label}`).join(' - ')}
+              </div>
 
+              <div className="field-hint">Numpad 1-9 toggles a line for return - Page Up/Down scrolls the list.</div>
               <div className="return-lines">
-                {selectedSale.lines.map((line) => (
-                  <div key={line.id} className="return-line">
+                {visibleLines.map((line, index) => (
+                  <div key={line.id} className={`return-line ${(quantities[line.id] ?? 0) > 0 ? 'active' : ''}`}>
+                    <kbd className="picker-number">{index + 1}</kbd>
                     <div>
                       <div>{line.name}</div>
                       {getLineVariantSummary(line) != null && (
@@ -8183,6 +8930,22 @@ function VoidModal(
     onConfirm: () => void;
   },
 ) {
+  useEffect(() => {
+    const handleVoidKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        event.stopPropagation();
+        props.onClose();
+      } else if (event.key === 'Enter') {
+        event.preventDefault();
+        event.stopPropagation();
+        props.onConfirm();
+      }
+    };
+    window.addEventListener('keydown', handleVoidKey, true);
+    return () => window.removeEventListener('keydown', handleVoidKey, true);
+  }, [props]);
+
   return (
     <ModalShell onClose={props.onClose} title={props.line == null ? 'Void current sale' : 'Void line'} width="narrow">
       <div className="modal-stack">
@@ -8192,8 +8955,8 @@ function VoidModal(
             : `Remove ${props.line.name} from the current cart.`}
         </p>
         <div className="modal-actions">
-          <button className="ghost-button" onClick={props.onClose}>Cancel</button>
-          <button className="ghost-button danger" onClick={props.onConfirm}>Confirm void</button>
+          <button className="ghost-button" onClick={props.onClose}>Esc - Cancel</button>
+          <button className="ghost-button danger" onClick={props.onConfirm}>Enter - Confirm void</button>
         </div>
       </div>
     </ModalShell>

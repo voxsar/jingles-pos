@@ -31,6 +31,7 @@ export const ACTION_SHORTCUT_LABELS: Record<POSActionShortcutId, string> = {
   cashMovement: 'Cash in / out',
   staff: 'Change line staff',
   unit: 'Choose unit quantity',
+  tier: 'Cycle price tier',
   discountValue: 'Discount by value',
   discountPercent: 'Discount by percent',
   closePopup: 'Close quick popup',
@@ -52,6 +53,7 @@ export const ACTION_SHORTCUT_HINTS: Record<POSActionShortcutId, string> = {
   cashMovement: 'Records cash added to or taken out of the drawer mid-shift, so the close still reconciles.',
   staff: 'Opens the staff picker for the most recently added cart line.',
   unit: 'Works only in the unit popup and returns to the quantity choices.',
+  tier: 'Works only in the unit popup and cycles through the product’s price tiers.',
   discountValue: 'Works only in the discount popup and selects value mode.',
   discountPercent: 'Works only in the discount popup and selects percentage mode.',
   closePopup: 'Works only in unit, staff, customer and discount quick popups.',
@@ -62,6 +64,36 @@ export function popupNumberIndex(event: Pick<KeyboardEvent, 'code' | 'ctrlKey' |
   if (event.ctrlKey || event.altKey || event.shiftKey || event.metaKey) return null;
   const match = /^(?:Numpad|Digit)([1-9])$/.exec(event.code);
   return match ? Number(match[1]) - 1 : null;
+}
+
+/**
+ * The refund/return window keeps two scrollable lists on screen at once — the
+ * matching receipts and the sold lines on whichever one is selected — so it
+ * can't share a single digit range between them the way `popupNumberIndex`
+ * does for a lone picker: the number row picks a visible receipt, the numpad
+ * (below, `numpadRowIndex`) toggles a visible sold line instead.
+ */
+export function digitRowIndex(event: Pick<KeyboardEvent, 'code' | 'ctrlKey' | 'altKey' | 'shiftKey' | 'metaKey'>): number | null {
+  if (event.ctrlKey || event.altKey || event.shiftKey || event.metaKey) return null;
+  const match = /^Digit([1-9])$/.exec(event.code);
+  return match ? Number(match[1]) - 1 : null;
+}
+
+export function numpadRowIndex(event: Pick<KeyboardEvent, 'code' | 'ctrlKey' | 'altKey' | 'shiftKey' | 'metaKey'>): number | null {
+  if (event.ctrlKey || event.altKey || event.shiftKey || event.metaKey) return null;
+  const match = /^Numpad([1-9])$/.exec(event.code);
+  return match ? Number(match[1]) - 1 : null;
+}
+
+/** Left-to-right top-row keys used to pick a return reason without a mouse. */
+export const RETURN_REASON_HOTKEYS = ['KeyQ', 'KeyW', 'KeyE', 'KeyR', 'KeyT', 'KeyY'] as const;
+
+export function returnReasonHotkeyIndex(
+  event: Pick<KeyboardEvent, 'code' | 'ctrlKey' | 'altKey' | 'shiftKey' | 'metaKey'>,
+): number | null {
+  if (event.ctrlKey || event.altKey || event.shiftKey || event.metaKey) return null;
+  const index = RETURN_REASON_HOTKEYS.indexOf(event.code as (typeof RETURN_REASON_HOTKEYS)[number]);
+  return index === -1 ? null : index;
 }
 
 /**

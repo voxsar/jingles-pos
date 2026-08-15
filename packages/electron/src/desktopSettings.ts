@@ -5,9 +5,11 @@ import { app } from 'electron';
 import {
   DEFAULT_POS_PRINTER_CONFIG,
   DEFAULT_POS_SCANNER_SETTINGS,
+  normalizeCashSalesVisibility,
   normalizeCustomerDisplaySettings,
   normalizeShiftReconciliation,
   normalizeShortcutSettings,
+  type POSDatabaseInfo,
   type POSDesktopBackupResult,
   type POSDesktopSettings,
   type POSPrinterConfig,
@@ -39,7 +41,7 @@ function getDesktopRuntimeRoot() {
   return ensureDirectory(path.join(app.getPath('userData'), 'backend'));
 }
 
-function getDefaultDatabasePath() {
+export function getDefaultDatabasePath() {
   return path.join(getDesktopRuntimeRoot(), 'jingles-pos.sqlite');
 }
 
@@ -185,6 +187,7 @@ function toSnapshot(value: StoredDesktopSettings | null | undefined): POSDesktop
     shortcuts: normalizeShortcutSettings(value?.shortcuts),
     shiftReconciliation: normalizeShiftReconciliation(value?.shiftReconciliation),
     customerDisplay: normalizeCustomerDisplaySettings(value?.customerDisplay),
+    cashSalesVisibility: normalizeCashSalesVisibility(value?.cashSalesVisibility),
   };
 }
 
@@ -267,6 +270,41 @@ export async function createDesktopBackup(): Promise<POSDesktopBackupResult> {
   return {
     filePath: backupPath,
     createdAt: new Date().toISOString(),
+  };
+}
+
+/** Same as {@link createDesktopBackup}, but to a caller-chosen destination (e.g. a save dialog). */
+export async function backupDatabaseTo(destinationPath: string): Promise<POSDesktopBackupResult> {
+  const settings = readDesktopSettings();
+  if (!fs.existsSync(settings.databasePath)) {
+    throw new Error(`No SQLite database was found at ${settings.databasePath}.`);
+  }
+
+  const resolvedDestination = path.resolve(destinationPath);
+  ensureDirectory(path.dirname(resolvedDestination));
+  await backupDatabaseFile(settings.databasePath, resolvedDestination);
+
+  return {
+    filePath: resolvedDestination,
+    createdAt: new Date().toISOString(),
+  };
+}
+
+export function getDatabaseInfo(): POSDatabaseInfo {
+  const settings = readDesktopSettings();
+  const currentPath = path.resolve(settings.databasePath);
+  const defaultPath = path.resolve(getDefaultDatabasePath());
+  const exists = fs.existsSync(currentPath);
+  const stats = exists ? fs.statSync(currentPath) : null;
+
+  return {
+    currentPath,
+    defaultPath,
+    directory: path.dirname(currentPath),
+    exists,
+    sizeBytes: stats?.size ?? 0,
+    lastModifiedAt: stats?.mtime.toISOString() ?? null,
+    usesCustomPath: currentPath !== defaultPath,
   };
 }
 

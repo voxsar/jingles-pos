@@ -15,10 +15,12 @@
 import {
   DECLARABLE_TENDER_METHODS,
   DEFAULT_POS_ACTION_SHORTCUTS,
+  DEFAULT_POS_CASH_SALES_VISIBILITY,
   DEFAULT_POS_SHIFT_RECONCILIATION,
   TENDER_TOTAL_KEY,
   type POSActionShortcutId,
   type POSActionShortcuts,
+  type POSCashSalesVisibilitySettings,
   type POSKeyBinding,
   type POSQuickKey,
   type POSShiftReconciliationSettings,
@@ -64,6 +66,7 @@ export const ACTION_SHORTCUT_IDS: POSActionShortcutId[] = [
   'cashMovement',
   'staff',
   'unit',
+  'tier',
   'discountValue',
   'discountPercent',
   'closePopup',
@@ -265,6 +268,24 @@ export function normalizeShiftReconciliation(value: unknown): POSShiftReconcilia
     ),
     requireConfirmationOnAlert: source.requireConfirmationOnAlert !== false,
     allowDrawerOverdraw: source.allowDrawerOverdraw === true,
+  };
+}
+
+export function normalizeCashSalesVisibility(value: unknown): POSCashSalesVisibilitySettings {
+  const source = (value && typeof value === 'object' ? value : {}) as
+    Partial<POSCashSalesVisibilitySettings>;
+
+  const parsedMinutes = typeof source.autoHideMinutes === 'number'
+    ? source.autoHideMinutes
+    : Number.parseFloat(String(source.autoHideMinutes ?? ''));
+
+  return {
+    autoHideEnabled: source.autoHideEnabled !== false,
+    // 1-120 minutes: long enough to cover a busy till round, short enough
+    // that a reveal can't be forgotten and left open for a whole shift.
+    autoHideMinutes: Number.isFinite(parsedMinutes) && parsedMinutes >= 1
+      ? Math.min(120, Math.round(parsedMinutes))
+      : DEFAULT_POS_CASH_SALES_VISIBILITY.autoHideMinutes,
   };
 }
 

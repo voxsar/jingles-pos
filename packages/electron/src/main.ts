@@ -1,11 +1,14 @@
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { app, BrowserWindow, dialog, ipcMain, Menu, type OpenDialogOptions } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, Menu, shell, type OpenDialogOptions, type SaveDialogOptions } from 'electron';
 import { getDesktopLocalApiUrl, startLocalApiServer, type LocalApiServer } from './backend/localApi';
 import {
+  backupDatabaseTo,
   copyDatabaseSnapshotIfNeeded,
   createDesktopBackup,
+  getDatabaseInfo,
+  getDefaultDatabasePath,
   readDesktopSettings,
   saveDesktopSettings,
 } from './desktopSettings';
@@ -30,7 +33,7 @@ import {
 import { cleanPrintingWorkDirectory } from './printing/transport';
 import { JinglesMdnsService, type DiscoveredJinglesDevice } from './network/mdns';
 import { writeLanSyncTarget } from './network/lanSyncTarget';
-import { DEFAULT_DEVICE_ID, DEFAULT_TERMINAL_ID } from '@jingles/shared';
+import { DEFAULT_DEVICE_ID, DEFAULT_TERMINAL_ID, type POSDatabaseSwitchMode } from '@jingles/shared';
 import { getUpdateMenu, initializeUpdater } from './updater';
 
 let mainWindow: BrowserWindow | null = null;
@@ -173,6 +176,120 @@ async function restartLocalApiServer() {
   return localApiServer;
 }
 
+function buildTimestampForFilename(date = new Date()) {
+  return [
+    date.getFullYear(),
+    String(date.getMonth() + 1).padStart(2, '0'),
+    String(date.getDate()).padStart(2, '0'),
+    '-',
+    String(date.getHours()).padStart(2, '0'),
+    String(date.getMinutes()).padStart(2, '0'),
+    String(date.getSeconds()).padStart(2, '0'),
+  ].join('');
+}
+
+async function pickBackupDestinationPath() {
+  const databaseInfo = getDatabaseInfo();
+  const dialogOptions: SaveDialogOptions = {
+    title: 'Backup POS Database',
+    defaultPath: path.join(
+      databaseInfo.directory,
+      `jingles-pos-backup-${buildTimestampForFilename()}.sqlite`,
+    ),
+    filters: [
+      { name: 'SQLite Database', extensions: ['sqlite', 'db'] },
+      { name: 'All Files', extensions: ['*'] },
+    ],
+    properties: ['createDirectory', 'showOverwriteConfirmation'],
+  };
+  const selection = mainWindow
+    ? await dialog.showSaveDialog(mainWindow, dialogOptions)
+    : await dialog.showSaveDialog(dialogOptions);
+
+  if (selection.canceled || !selection.filePath) {
+    return null;
+  }
+
+  return path.resolve(selection.filePath);
+}
+
+/** Opens the picker for a "Switch Database" action; 'new' creates an empty file path, 'existing' opens one. */
+async function pickDatabasePathForSwitch(mode: 'new' | 'existing') {
+  const databaseInfo = getDatabaseInfo();
+
+  if (mode === 'existing') {
+    const dialogOptions: OpenDialogOptions = {
+      title: 'Select POS database file',
+      defaultPath: databaseInfo.directory,
+      filters: [
+        { name: 'SQLite Database', extensions: ['sqlite', 'db'] },
+        { name: 'All Files', extensions: ['*'] },
+      ],
+      properties: ['openFile'],
+    };
+    const selection = mainWindow
+      ? await dialog.showOpenDialog(mainWindow, dialogOptions)
+      : await dialog.showOpenDialog(dialogOptions);
+
+    if (selection.canceled || selection.filePaths.length === 0) {
+      return null;
+    }
+
+    return path.resolve(selection.filePaths[0]);
+  }
+
+  const dialogOptions: SaveDialogOptions = {
+    title: 'Create new POS database file',
+    defaultPath: path.join(
+      databaseInfo.directory,
+      `jingles-pos-${buildTimestampForFilename()}.sqlite`,
+    ),
+    filters: [
+      { name: 'SQLite Database', extensions: ['sqlite', 'db'] },
+      { name: 'All Files', extensions: ['*'] },
+    ],
+    properties: ['createDirectory', 'showOverwriteConfirmation'],
+  };
+  const selection = mainWindow
+    ? await dialog.showSaveDialog(mainWindow, dialogOptions)
+    : await dialog.showSaveDialog(dialogOptions);
+
+  if (selection.canceled || !selection.filePath) {
+    return null;
+  }
+
+  return path.resolve(selection.filePath);
+}
+
+/**
+ * Points the desktop settings at a new database file and restarts the local
+ * backend against it, the same live-switch the settings form triggers when
+ * `databasePath` changes. If the new location doesn't exist yet, the current
+ * database is copied there first so the switch never starts from empty data.
+ */
+async function applyDatabasePathChange(nextDatabasePath: string) {
+  const previousSettings = readDesktopSettings();
+
+  if (path.normalize(nextDatabasePath) === path.normalize(previousSettings.databasePath)) {
+    return { settings: previousSettings, copiedDatabase: false };
+  }
+
+  const savedSettings = saveDesktopSettings({ databasePath: nextDatabasePath });
+  const copiedDatabase = await copyDatabaseSnapshotIfNeeded(
+    previousSettings.databasePath,
+    savedSettings.databasePath,
+  );
+
+  try {
+    await restartLocalApiServer();
+    return { settings: savedSettings, copiedDatabase };
+  } catch (error) {
+    saveDesktopSettings(previousSettings);
+    await restartLocalApiServer();
+    throw error;
+  }
+}
+
 app.whenReady().then(async () => {
   try {
     app.setAppUserModelId('com.jingles.pos');
@@ -274,6 +391,56 @@ ipcMain.handle('desktop-settings:pick-backup-directory', async (_event, currentP
 
 ipcMain.handle('desktop-settings:backup-now', async () => {
   return createDesktopBackup();
+});
+
+ipcMain.handle('desktop-settings:backup-as', async () => {
+  const backupPath = await pickBackupDestinationPath();
+  if (!backupPath) {
+    return { canceled: true, filePath: null, createdAt: null };
+  }
+
+  const result = await backupDatabaseTo(backupPath);
+  return { canceled: false, ...result };
+});
+
+ipcMain.handle('desktop-settings:get-database-info', () => {
+  return getDatabaseInfo();
+});
+
+ipcMain.handle('desktop-settings:reveal-database-file', async () => {
+  const info = getDatabaseInfo();
+
+  if (info.exists) {
+    shell.showItemInFolder(info.currentPath);
+    return;
+  }
+
+  const openError = await shell.openPath(info.directory);
+  if (openError) {
+    throw new Error(openError);
+  }
+});
+
+ipcMain.handle('desktop-settings:switch-database', async (_event, mode: POSDatabaseSwitchMode) => {
+  let nextPath: string;
+
+  if (mode === 'default') {
+    nextPath = getDefaultDatabasePath();
+  } else {
+    const picked = await pickDatabasePathForSwitch(mode);
+    if (!picked) {
+      return { canceled: true, mode, selectedPath: null, copiedDatabase: false };
+    }
+    nextPath = picked;
+  }
+
+  const { settings, copiedDatabase } = await applyDatabasePathChange(nextPath);
+  return {
+    canceled: false,
+    mode,
+    selectedPath: settings.databasePath,
+    copiedDatabase,
+  };
 });
 
 ipcMain.handle('customer-display:status', () => {

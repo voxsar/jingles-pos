@@ -717,6 +717,9 @@ button {
 }
 
 .metric-card span {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
   font-size: 10px;
   color: var(--ink-2);
   text-transform: uppercase;
@@ -725,6 +728,21 @@ button {
 
 .metric-card b {
   font-size: 13px;
+}
+
+.metric-card-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  flex: none;
+}
+
+.metric-card-dot.hidden {
+  background: var(--warning);
+}
+
+.metric-card-dot.visible {
+  background: #23a46d;
 }
 
 .workstation-grid {
@@ -1274,7 +1292,8 @@ button {
 .subcategory-tile.active,
 .scope-row button.active,
 .payment-method.active,
-.return-sale-row.active {
+.return-sale-row.active,
+.return-line.active {
   background: rgba(13, 122, 91, 0.12);
   border-color: rgba(13, 122, 91, 0.24);
   color: var(--accent);
@@ -1951,6 +1970,45 @@ button {
   gap: 10px;
 }
 
+.settings-info-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.settings-info-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 10px 12px;
+  border-radius: 14px;
+  background: var(--surface-card);
+  border: 1px solid rgba(77, 59, 38, 0.08);
+}
+
+.settings-info-label {
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink-2);
+}
+
+.settings-info-value {
+  font-size: 13px;
+  color: var(--ink-0);
+  word-break: break-all;
+}
+
+.settings-subsection {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px;
+  border-radius: 18px;
+  background: var(--surface-soft-strong);
+  border: 1px solid rgba(77, 59, 38, 0.08);
+}
+
 .theme-option {
   flex: 1;
   min-width: 180px;
@@ -2194,6 +2252,20 @@ button {
   align-items: center;
 }
 
+/* Only the main order history list is digit-navigable and carries a leading
+   number column; the customer-detail order list reuses the same row/head
+   classes without it, so the extra track is opt-in rather than shared. */
+.orders-list-head.numbered,
+.orders-row.numbered {
+  grid-template-columns: 32px 1.15fr 1.25fr 0.75fr 1fr 1fr 0.8fr 0.9fr;
+}
+
+.orders-row > .picker-number {
+  width: 28px;
+  height: 28px;
+  font-size: 13px;
+}
+
 .orders-list-head {
   padding: 10px 12px;
   background: var(--surface-soft-muted);
@@ -2294,14 +2366,28 @@ button {
 
 .customers-row {
   display: flex;
-  flex-direction: column;
-  gap: 2px;
+  align-items: center;
+  gap: 8px;
   border: 0;
   border-radius: 12px;
   padding: 9px 10px;
   background: transparent;
   color: var(--ink-0);
   text-align: left;
+}
+
+.customers-row > .picker-number {
+  width: 26px;
+  height: 26px;
+  flex: 0 0 26px;
+  font-size: 12px;
+}
+
+.customers-row-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
 }
 
 .customers-row span {
@@ -2315,6 +2401,14 @@ button {
 
 .customers-row.active {
   background: rgba(13, 122, 91, 0.12);
+}
+
+/* The keyboard cursor is independent of the selected (active) customer - it
+   marks where Digit/Up/Down will act, which is not always the account
+   currently shown in the detail pane. */
+.customers-row.cursor,
+.orders-row.cursor {
+  box-shadow: inset 0 0 0 2px rgba(13, 122, 91, 0.45);
 }
 
 .customers-detail-pane {
@@ -3057,6 +3151,13 @@ button {
   justify-content: space-between;
   gap: 12px;
   align-items: center;
+  text-align: left;
+}
+
+.held-main {
+  display: flex;
+  align-items: center;
+  gap: 12px;
   text-align: left;
 }
 

@@ -8,13 +8,17 @@ import {
   isValidQuickKeyBinding,
   normalizeActionShortcuts,
   normalizeBinding,
+  normalizeCashSalesVisibility,
   normalizeQuickKeys,
   normalizeShiftReconciliation,
 } from '@jingles/shared';
 import {
   cashDenominationShortcut,
+  digitRowIndex,
   findShortcutConflicts,
+  numpadRowIndex,
   popupNumberIndex,
+  returnReasonHotkeyIndex,
 } from '../utils/shortcuts';
 
 function keyEvent(
@@ -181,6 +185,46 @@ describe('popupNumberIndex', () => {
   });
 });
 
+describe('digitRowIndex', () => {
+  it('maps the number row and leaves the numpad alone', () => {
+    expect(digitRowIndex(keyEvent('Digit1'))).toBe(0);
+    expect(digitRowIndex(keyEvent('Digit9'))).toBe(8);
+    expect(digitRowIndex(keyEvent('Numpad1'))).toBeNull();
+  });
+
+  it('ignores modified key presses', () => {
+    expect(digitRowIndex(keyEvent('Digit1', { ctrlKey: true }))).toBeNull();
+  });
+});
+
+describe('numpadRowIndex', () => {
+  it('maps the numpad and leaves the number row alone', () => {
+    expect(numpadRowIndex(keyEvent('Numpad1'))).toBe(0);
+    expect(numpadRowIndex(keyEvent('Numpad9'))).toBe(8);
+    expect(numpadRowIndex(keyEvent('Digit1'))).toBeNull();
+  });
+
+  it('ignores modified key presses', () => {
+    expect(numpadRowIndex(keyEvent('Numpad1', { altKey: true }))).toBeNull();
+  });
+});
+
+describe('returnReasonHotkeyIndex', () => {
+  it('maps Q through Y left to right', () => {
+    expect(returnReasonHotkeyIndex(keyEvent('KeyQ'))).toBe(0);
+    expect(returnReasonHotkeyIndex(keyEvent('KeyW'))).toBe(1);
+    expect(returnReasonHotkeyIndex(keyEvent('KeyE'))).toBe(2);
+    expect(returnReasonHotkeyIndex(keyEvent('KeyR'))).toBe(3);
+    expect(returnReasonHotkeyIndex(keyEvent('KeyT'))).toBe(4);
+    expect(returnReasonHotkeyIndex(keyEvent('KeyY'))).toBe(5);
+  });
+
+  it('ignores unrelated and modified keys', () => {
+    expect(returnReasonHotkeyIndex(keyEvent('KeyU'))).toBeNull();
+    expect(returnReasonHotkeyIndex(keyEvent('KeyQ', { shiftKey: true }))).toBeNull();
+  });
+});
+
 describe('cashDenominationShortcut', () => {
   it('maps Digit1 through Digit9 to the notes and coins in use, largest first', () => {
     expect(cashDenominationShortcut(keyEvent('Digit1'))?.value).toBe(5000);
@@ -248,5 +292,24 @@ describe('normalizeShiftReconciliation', () => {
     expect(normalizeShiftReconciliation({ alertThresholdAmount: -50 }).alertThresholdAmount).toBe(500);
     expect(normalizeShiftReconciliation({ alertThresholdAmount: 0 }).alertThresholdAmount).toBe(0);
     expect(normalizeShiftReconciliation({ alertThresholdPercent: 400 }).alertThresholdPercent).toBe(100);
+  });
+});
+
+describe('normalizeCashSalesVisibility', () => {
+  it('defaults to auto-hide on after 5 minutes', () => {
+    expect(normalizeCashSalesVisibility({})).toEqual({ autoHideEnabled: true, autoHideMinutes: 5 });
+    expect(normalizeCashSalesVisibility(undefined)).toEqual({ autoHideEnabled: true, autoHideMinutes: 5 });
+  });
+
+  it('honours an explicit off switch', () => {
+    expect(normalizeCashSalesVisibility({ autoHideEnabled: false }).autoHideEnabled).toBe(false);
+  });
+
+  it('clamps the interval to 1-120 minutes and falls back on invalid input', () => {
+    expect(normalizeCashSalesVisibility({ autoHideMinutes: 0 }).autoHideMinutes).toBe(5);
+    expect(normalizeCashSalesVisibility({ autoHideMinutes: -3 }).autoHideMinutes).toBe(5);
+    expect(normalizeCashSalesVisibility({ autoHideMinutes: 500 }).autoHideMinutes).toBe(120);
+    expect(normalizeCashSalesVisibility({ autoHideMinutes: 'soon' }).autoHideMinutes).toBe(5);
+    expect(normalizeCashSalesVisibility({ autoHideMinutes: 12.6 }).autoHideMinutes).toBe(13);
   });
 });

@@ -1,6 +1,10 @@
 import type {
   POSCustomerDisplayState,
   POSCustomerDisplayStatus,
+  POSDatabaseInfo,
+  POSDatabaseSwitchMode,
+  POSDatabaseSwitchResult,
+  POSDesktopBackupAsResult,
   POSDesktopBackupResult,
   POSDesktopSettings,
   POSDesktopSettingsSaveResult,
@@ -23,6 +27,10 @@ declare global {
         pickDatabasePath: (currentPath?: string) => Promise<string | null>;
         pickBackupDirectory: (currentPath?: string) => Promise<string | null>;
         backupNow: () => Promise<POSDesktopBackupResult>;
+        backupAs: () => Promise<POSDesktopBackupAsResult>;
+        getDatabaseInfo: () => Promise<POSDatabaseInfo>;
+        revealDatabaseFile: () => Promise<void>;
+        switchDatabase: (mode: POSDatabaseSwitchMode) => Promise<POSDatabaseSwitchResult>;
       };
       customerDisplay?: {
         getStatus: () => Promise<POSCustomerDisplayStatus>;

@@ -731,6 +731,7 @@ export type POSActionShortcutId =
   | 'cashMovement'
   | 'staff'
   | 'unit'
+  | 'tier'
   | 'discountValue'
   | 'discountPercent'
   | 'closePopup';
@@ -886,6 +887,17 @@ export interface POSShiftReconciliationSettings {
   allowDrawerOverdraw: boolean;
 }
 
+export interface POSCashSalesVisibilitySettings {
+  /**
+   * Whether cash sales, revealed via the triple Ctrl tap, re-hide themselves
+   * automatically. Off means a reveal stays in effect until the cashier hides
+   * it again by hand.
+   */
+  autoHideEnabled: boolean;
+  /** Minutes a reveal stays visible before {@link autoHideEnabled} hides it again. */
+  autoHideMinutes: number;
+}
+
 export interface POSDesktopSettings {
   syncUrl: string;
   databasePath: string;
@@ -899,6 +911,7 @@ export interface POSDesktopSettings {
   shortcuts: POSShortcutSettings;
   shiftReconciliation: POSShiftReconciliationSettings;
   customerDisplay: POSCustomerDisplaySettings;
+  cashSalesVisibility: POSCashSalesVisibilitySettings;
 }
 
 /**
@@ -930,6 +943,7 @@ export const DEFAULT_POS_ACTION_SHORTCUTS: POSActionShortcuts = {
   discount: 'Alt+KeyD',
   staff: 'KeyS',
   unit: 'KeyU',
+  tier: 'KeyT',
   discountValue: 'BracketLeft',
   discountPercent: 'BracketRight',
   closePopup: 'Backslash',
@@ -948,6 +962,16 @@ export const DEFAULT_POS_SHIFT_RECONCILIATION: POSShiftReconciliationSettings = 
   alertThresholdPercent: 2,
   requireConfirmationOnAlert: true,
   allowDrawerOverdraw: false,
+};
+
+/**
+ * Cash sales stay hidden by default (a triple Ctrl tap reveals them for the
+ * cashier), and a reveal re-hides itself after five minutes unless a
+ * manager turns that off in Settings.
+ */
+export const DEFAULT_POS_CASH_SALES_VISIBILITY: POSCashSalesVisibilitySettings = {
+  autoHideEnabled: true,
+  autoHideMinutes: 5,
 };
 
 /** Tender types a cashier can be asked to declare alongside the cash count. */
@@ -1008,6 +1032,33 @@ export interface POSDesktopSettingsSaveResult {
 export interface POSDesktopBackupResult {
   filePath: string;
   createdAt: string;
+}
+
+/** A backup triggered from a file-save dialog, so the user can cancel it. */
+export interface POSDesktopBackupAsResult {
+  canceled: boolean;
+  filePath: string | null;
+  createdAt: string | null;
+}
+
+/** Mirrors the desktop inventory app's replica-switch modes. */
+export type POSDatabaseSwitchMode = 'new' | 'existing' | 'default';
+
+export interface POSDatabaseInfo {
+  currentPath: string;
+  defaultPath: string;
+  directory: string;
+  exists: boolean;
+  sizeBytes: number;
+  lastModifiedAt: string | null;
+  usesCustomPath: boolean;
+}
+
+export interface POSDatabaseSwitchResult {
+  canceled: boolean;
+  mode: POSDatabaseSwitchMode;
+  selectedPath: string | null;
+  copiedDatabase: boolean;
 }
 
 export interface SyncHandshakeRequest {
