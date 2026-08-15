@@ -17,9 +17,17 @@ import {
   digitRowIndex,
   findShortcutConflicts,
   numpadRowIndex,
+  PAYMENT_SUGGESTION_SHORTCUTS,
   popupNumberIndex,
   returnReasonHotkeyIndex,
 } from '../utils/shortcuts';
+
+describe('payment suggestion shortcuts', () => {
+  it('uses the QWERTY row while reserving R for payment references', () => {
+    expect(PAYMENT_SUGGESTION_SHORTCUTS.map((shortcut) => shortcut.code))
+      .toEqual(['KeyQ', 'KeyW', 'KeyE', 'KeyT', 'KeyY']);
+  });
+});
 
 function keyEvent(
   code: string,

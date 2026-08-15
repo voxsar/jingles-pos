@@ -38,6 +38,8 @@ type LocalAuthUser = {
   name: string;
   initials: string;
   role: string;
+  accessScope: string;
+  isSalesman: boolean;
   pin: string | null;
   passwordHash: string | null;
 };
@@ -47,6 +49,8 @@ type UpstreamAuthPayload = {
   id: string;
   email: string;
   role: string;
+  accessScope: string;
+  isSalesman: boolean;
 };
 
 type UpstreamLoginResult =
@@ -61,6 +65,8 @@ function mapAuthUser(user: LocalAuthUser) {
     name: user.name,
     initials: user.initials,
     role: user.role,
+    accessScope: user.accessScope ?? 'BOTH',
+    isSalesman: user.isSalesman !== false,
     hasPin: /^\d{4,6}$/.test(user.pin ?? ''),
   };
 }
@@ -187,6 +193,8 @@ function parseUpstreamAuthPayload(payload: unknown): UpstreamAuthPayload | null 
   const id = 'id' in user ? user.id : null;
   const email = 'email' in user ? user.email : null;
   const role = 'role' in user ? user.role : null;
+  const accessScope = 'accessScope' in user ? user.accessScope : 'BOTH';
+  const isSalesman = 'isSalesman' in user ? user.isSalesman : true;
 
   if (
     typeof token !== 'string' ||
@@ -202,6 +210,8 @@ function parseUpstreamAuthPayload(payload: unknown): UpstreamAuthPayload | null 
     id,
     email: email.toLowerCase(),
     role,
+    accessScope: typeof accessScope === 'string' ? accessScope : 'BOTH',
+    isSalesman: typeof isSalesman === 'boolean' ? isSalesman : true,
   };
 }
 
@@ -256,6 +266,7 @@ function mapInventoryRoleToPosRole(role: string) {
     case 'STAFF':
     case 'INSPECTOR':
     case 'CASHIER':
+    case 'BOTH':
       return 'CASHIER';
     case 'SALESPERSON':
       return 'SALESPERSON';
@@ -399,6 +410,8 @@ async function upsertInventoryBackedUser(
   existingUser: LocalAuthUser | null,
 ) {
   const mappedRole = mapInventoryRoleToPosRole(upstreamUser.role);
+  const accessScope = upstreamUser.accessScope.trim().toUpperCase();
+  if (!['CASHIER', 'BOTH', 'ADMIN'].includes(accessScope)) return null;
   if (!isSupportedPosRole(mappedRole)) {
     return null;
   }
@@ -424,6 +437,8 @@ async function upsertInventoryBackedUser(
         name,
         initials,
         role: mappedRole,
+        accessScope,
+        isSalesman: upstreamUser.isSalesman,
         passwordHash,
       },
     });
@@ -437,6 +452,8 @@ async function upsertInventoryBackedUser(
       name,
       initials,
       role: mappedRole,
+      accessScope,
+      isSalesman: upstreamUser.isSalesman,
       passwordHash,
     },
   });
@@ -593,6 +610,19 @@ router.post('/unlock', authenticate, async (req: AuthenticatedRequest, res: Resp
     console.error(error);
     return res.status(500).json({ error: 'Unable to unlock the workstation' });
   }
+});
+
+router.post('/pin', authenticate, async (req: AuthenticatedRequest, res: Response) => {
+  const currentPin = typeof req.body.currentPin === 'string' ? req.body.currentPin.trim() : '';
+  const newPin = typeof req.body.newPin === 'string' ? req.body.newPin.trim() : '';
+  if (!/^\d{4,6}$/.test(newPin) || newPin === newPin.split('').reverse().join('')) {
+    return res.status(422).json({ error: 'New PIN must contain 4 to 6 digits and cannot read the same backwards' });
+  }
+  const user = await prisma.pOSUser.findUnique({ where: { id: req.user!.id } });
+  if (!user) return res.status(404).json({ error: 'Authenticated user no longer exists' });
+  if (user.pin && user.pin !== currentPin) return res.status(422).json({ error: 'Current PIN is incorrect' });
+  await prisma.pOSUser.update({ where: { id: user.id }, data: { pin: newPin } });
+  return res.json({ ok: true });
 });
 
 router.post('/sync-token', authenticate, async (req: AuthenticatedRequest, res: Response) => {

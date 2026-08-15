@@ -33,6 +33,8 @@ model POSUser {
   name      String
   initials  String
   role      String
+  accessScope String @default("BOTH") @map("access_scope")
+  isSalesman Boolean @default(true) @map("is_salesman")
   pin       String?
   passwordHash String? @map("password_hash")
   createdAt DateTime @default(now())

@@ -31,6 +31,7 @@ import {
   ReturnInput,
   SaleLineSummary,
   SaleSummary,
+  SaleStatus,
   ShiftSummary,
   SyncStatusSummary,
   UpdateCustomerInput,
@@ -69,6 +70,7 @@ import {
 import {
   bootstrapPOS,
   closeShift,
+  changeOwnPin,
   createReturn,
   createSale,
   endActiveShift,
@@ -87,6 +89,7 @@ import {
   subscribeSyncStatus,
   syncNow,
   updateCustomer,
+  voidSale,
 } from './api';
 import { useAuth } from './auth/AuthContext';
 import HelpGuide from './help/HelpGuide';
@@ -116,6 +119,7 @@ import {
   hasDesktopSettingsBridge,
   loadDesktopSettings,
   persistThemeMode,
+  persistSessionLockMinutes,
   pickDesktopBackupDirectory,
   pickDesktopDatabasePath,
   readStoredThemeMode,
@@ -178,6 +182,7 @@ import {
   digitRowIndex,
   findShortcutConflicts,
   numpadRowIndex,
+  PAYMENT_SUGGESTION_SHORTCUTS,
   popupNumberIndex,
   RETURN_REASON_HOTKEYS,
   returnReasonHotkeyIndex,
@@ -282,15 +287,6 @@ const PAYMENT_OPTIONS: Array<{ method: PaymentMethod; label: string; short: stri
   { method: PaymentMethod.CHEQUE, label: 'Cheque', short: 'CH', keyCode: 'KeyH', keyLabel: 'H' },
   { method: PaymentMethod.BANK_TRANSFER, label: 'Online bank transfer', short: 'BT', keyCode: 'KeyB', keyLabel: 'B' },
 ];
-
-const PAYMENT_SUGGESTION_KEYS = [
-  { code: 'KeyQ', label: 'Q' },
-  { code: 'KeyW', label: 'W' },
-  { code: 'KeyE', label: 'E' },
-  { code: 'KeyR', label: 'R' },
-  { code: 'KeyT', label: 'T' },
-  { code: 'KeyY', label: 'Y' },
-] as const;
 
 const INSTALLMENT_COUNT_OPTIONS = [2, 3, 4, 6, 12] as const;
 
@@ -405,6 +401,9 @@ export default function PosWorkstation() {
   const [customersModalInitialId, setCustomersModalInitialId] = useState<string | null>(null);
   const [isCustomersOpen, setIsCustomersOpen] = useState(false);
   const [isVoidOpen, setIsVoidOpen] = useState(false);
+  const [isPinChangeOpen, setIsPinChangeOpen] = useState(false);
+  const [isVoidOrderOpen, setIsVoidOrderOpen] = useState(false);
+  const [isVoidingOrder, setIsVoidingOrder] = useState(false);
   const [voidLineId, setVoidLineId] = useState<string | null>(null);
   const [isLineDeleteMode, setIsLineDeleteMode] = useState(false);
   const [activeHeldSaleId, setActiveHeldSaleId] = useState<string | null>(null);
@@ -485,6 +484,7 @@ export default function PosWorkstation() {
     }
 
     const loaded = await loadDesktopSettings();
+    persistSessionLockMinutes(loaded.sessionLockMinutes);
     setDesktopSettings(loaded);
     setSettingsDraft(loaded);
     setAppliedThemeMode(loaded.themeMode);
@@ -644,11 +644,7 @@ export default function PosWorkstation() {
   );
 
   const salespeople = useMemo(() => {
-    const rows = users.filter((user) => user.role === UserRole.SALESPERSON);
-    if (rows.length > 0) {
-      return rows;
-    }
-    return users.filter((user) => user.role === UserRole.CASHIER);
+    return users.filter((user) => user.isSalesman !== false);
   }, [users]);
 
   const productMap = useMemo(() => new Map(products.map((product) => [product.id, product])), [products]);
@@ -1004,6 +1000,7 @@ export default function PosWorkstation() {
         setDesktopSettings(result.settings);
         setSettingsDraft(result.settings);
         setAppliedThemeMode(result.settings.themeMode);
+        persistSessionLockMinutes(result.settings.sessionLockMinutes);
         await refreshWorkspace({ includeSales: true });
         showNotice(
           'success',
@@ -1015,6 +1012,7 @@ export default function PosWorkstation() {
         setDesktopSettings(normalizedDraft);
         setSettingsDraft(normalizedDraft);
         setAppliedThemeMode(normalizedDraft.themeMode);
+        persistSessionLockMinutes(normalizedDraft.sessionLockMinutes);
         // Most desktop settings have nowhere to persist to in a browser, but the
         // customer display is driven entirely from this window, so its wording
         // and behaviour are kept in local storage the way the theme is.
@@ -1290,6 +1288,7 @@ export default function PosWorkstation() {
     setIsReturnOpen(false);
     setIsOrdersOpen(false);
     setIsVoidOpen(false);
+    setIsVoidOrderOpen(false);
     setIsLineDeleteMode(false);
     setIsCashMovementOpen(false);
     setIsCustomersOpen(false);
@@ -1470,7 +1469,12 @@ export default function PosWorkstation() {
       if (quantityToAdd > availableStock) {
         showNotice('error', `Only ${formatInteger(availableStock)} unit(s) are available.`);
       }
-      const created = createCartLine(product, salesperson, preferredTierLabels, variant);
+      const created = createCartLine(
+        product,
+        salesperson,
+        tierLabel ? [tierLabel, ...preferredTierLabels] : preferredTierLabels,
+        variant,
+      );
       return [...previous, recalculateCartLine({ ...created, quantity: Math.min(quantityToAdd, availableStock) })];
     });
   }, [preferredTierLabels, salespeople, showNotice, users]);
@@ -1974,6 +1978,26 @@ export default function PosWorkstation() {
     }
   }, [refreshWorkspace, session, showNotice, terminals]);
 
+  const handleVoidOrder = useCallback(async (sale: SaleSummary, reason: string) => {
+    setIsVoidingOrder(true);
+    try {
+      const updated = await voidSale(sale.id, {
+        reason: reason.trim() || 'Order voided at POS',
+        managerId: session?.user.role === UserRole.MANAGER ? session.user.id : undefined,
+        terminalId: currentTerminalId,
+      });
+      setSales((previous) => previous.map((row) => row.id === updated.id ? updated : row));
+      setIsVoidOrderOpen(false);
+      showNotice('success', `Order ${updated.receiptNumber} voided.`);
+      await refreshWorkspace({ includeSales: true });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to void order';
+      showNotice('error', message);
+    } finally {
+      setIsVoidingOrder(false);
+    }
+  }, [currentTerminalId, refreshWorkspace, session, showNotice]);
+
   const handleSyncNow = useCallback(async () => {
     setIsSyncing(true);
     try {
@@ -2159,6 +2183,7 @@ export default function PosWorkstation() {
     || isReturnOpen
     || isOrdersOpen
     || isVoidOpen
+    || isVoidOrderOpen
     || isLineDeleteMode
     || isSettingsOpen
     || isCashMovementOpen
@@ -2254,7 +2279,8 @@ export default function PosWorkstation() {
         return;
       case 'void':
         if (cart.length === 0) {
-          showNotice('error', 'There is nothing to void.');
+          setIsVoidOrderOpen(true);
+          void reloadSales();
           return;
         }
         setVoidLineId(null);
@@ -2286,6 +2312,7 @@ export default function PosWorkstation() {
     handleSaveHeldSale,
     holdMode,
     isHoldOpen,
+    reloadSales,
     showNotice,
   ]);
 
@@ -2460,6 +2487,8 @@ export default function PosWorkstation() {
         onCashMovement={handleOpenCashMovement}
         shortcuts={actionShortcuts}
         onOpenSettings={() => void handleOpenSettings()}
+        onLock={() => window.dispatchEvent(new CustomEvent('jingles:lock-now'))}
+        onChangePin={() => setIsPinChangeOpen(true)}
         onSignOut={handleSignOut}
         onOpenSync={() => navigate('/sync')}
         onSync={handleSyncNow}
@@ -2867,6 +2896,18 @@ export default function PosWorkstation() {
         />
       )}
 
+      {isVoidOrderOpen && (
+        <VoidOrderModal
+          isLoading={salesLoading}
+          isSubmitting={isVoidingOrder}
+          onClose={() => setIsVoidOrderOpen(false)}
+          onSubmit={(sale, reason) => void handleVoidOrder(sale, reason)}
+          sales={sales}
+        />
+      )}
+
+      {isPinChangeOpen && <ChangePinModal onClose={() => setIsPinChangeOpen(false)} />}
+
       {isHelpOpen && <HelpGuide onClose={() => setIsHelpOpen(false)} />}
 
       {/* Rendered last so it stacks on top of whatever list (orders, customer
@@ -3019,6 +3060,8 @@ type HeaderBarProps = {
   onCashMovement: () => void;
   shortcuts: POSActionShortcuts;
   onOpenSettings: () => void;
+  onLock: () => void;
+  onChangePin: () => void;
   needsSyncAuth: boolean;
   onOpenSync: () => void;
   onSignOut: () => void;
@@ -3153,6 +3196,12 @@ function HeaderBar(props: HeaderBarProps) {
                 role="menuitem"
               >
                 Settings
+              </button>
+              <button className="account-menu-item" onClick={() => handleAccountAction(props.onLock)} role="menuitem">
+                Lock <kbd>Alt+L</kbd>
+              </button>
+              <button className="account-menu-item" onClick={() => handleAccountAction(props.onChangePin)} role="menuitem">
+                Change PIN
               </button>
               <button
                 className="account-menu-item"
@@ -3708,7 +3757,7 @@ function ActionBar(props: ActionBarProps) {
           : `${ACTION_SHORTCUT_HINTS.quote} No receipt printer is configured, so this opens the system print dialog.`,
       })}
       {button('refund', 'Refund')}
-      {button('void', 'Void', { danger: true, disabled: props.cartItemCount === 0 })}
+      {button('void', 'Void', { danger: true })}
       {button('cashDrawer', 'Cash drawer')}
     </div>
   );
@@ -3911,6 +3960,26 @@ function SettingsModal(
                 <div className="field-hint">
                   Used by login refresh and playback-log sync against the hosted inventory backend.
                 </div>
+              </section>
+
+              <section className="settings-card">
+                <div className="settings-card-head">
+                  <div>
+                    <div className="section-kicker">Security</div>
+                    <div className="section-title">Automatic lock</div>
+                  </div>
+                  <div className="report-chip mono">Alt+L locks now</div>
+                </div>
+                <LabelBlock label="Lock after inactive minutes">
+                  <input
+                    className="glass-input"
+                    type="number"
+                    min={1}
+                    max={120}
+                    value={settings.sessionLockMinutes}
+                    onChange={(event) => updateDraft('sessionLockMinutes', Math.min(120, Math.max(1, Number(event.target.value) || 2)))}
+                  />
+                </LabelBlock>
               </section>
 
               <section className="settings-card">
@@ -6465,12 +6534,9 @@ function PaymentModal(
         return;
       }
 
-      // The tendered field stays exempt from isOtherTextEntry above so Esc and
-      // the complete-payment key still work while it's focused, but a digit
-      // shortcut match while it's the actual target must not win over typing
-      // a manual amount into it — otherwise every digit keystroke gets eaten
-      // as "add a note" instead of reaching the input.
-      if (method === PaymentMethod.CASH && target !== tenderedInputRef.current) {
+      // The tendered field stays exempt from isOtherTextEntry so the payment
+      // shortcuts keep working while the field has its normal autofocus.
+      if (method === PaymentMethod.CASH) {
         const cashShortcut = CASH_DENOMINATION_SHORTCUTS.find((shortcut) => shortcut.code === event.code);
         if (cashShortcut) {
           event.preventDefault();
@@ -6488,22 +6554,23 @@ function PaymentModal(
           return;
         }
 
-        const suggestionIndex = PAYMENT_SUGGESTION_KEYS.findIndex((shortcut) => shortcut.code === event.code);
-        if (suggestionIndex >= 0 && suggestedAmounts[suggestionIndex] != null) {
-          event.preventDefault();
-          event.stopPropagation();
-          setIsUnderpaymentWarning(false);
-          setIsTenderedManuallyEdited(false);
-          setDenominationCounts({});
-          setTendered(suggestedAmounts[suggestionIndex]);
-          focusTendered();
-          return;
-        }
       }
 
-      // R is CASH's 4th quick-amount suggestion (handled above), but for every
-      // other method it jumps to the Reference field instead - the field a
-      // non-cash payment almost always still needs filled in. Once the cursor
+      const suggestionIndex = PAYMENT_SUGGESTION_SHORTCUTS.findIndex((shortcut) => shortcut.code === event.code);
+      if (suggestionIndex >= 0 && suggestedAmounts[suggestionIndex] != null) {
+        event.preventDefault();
+        event.stopPropagation();
+        setIsUnderpaymentWarning(false);
+        setIsTenderedManuallyEdited(false);
+        setDenominationCounts({});
+        setTendered(suggestedAmounts[suggestionIndex]);
+        focusTendered();
+        return;
+      }
+
+      // R is deliberately skipped by the QWERTY tender suggestions. For every
+      // non-cash method it jumps to the Reference field - the field a payment
+      // almost always still needs filled in. Once the cursor
       // is actually inside Reference it reads as "other text entry" above and
       // this block is skipped, so typing the letter R there just types R.
       if (method !== PaymentMethod.CASH && method !== PaymentMethod.INSTALLMENT && event.code === 'KeyR') {
@@ -6687,7 +6754,7 @@ function PaymentModal(
           {method !== PaymentMethod.INSTALLMENT && <div className="quick-cash-row">
             {suggestedAmounts.map((amount, index) => (
               <button key={amount} className="quick-cash" onClick={() => { setIsUnderpaymentWarning(false); setIsTenderedManuallyEdited(false); setDenominationCounts({}); setTendered(amount); focusTendered(); }}>
-                {PAYMENT_SUGGESTION_KEYS[index] && <kbd>{PAYMENT_SUGGESTION_KEYS[index].label}</kbd>}
+                {PAYMENT_SUGGESTION_SHORTCUTS[index] && <kbd>{PAYMENT_SUGGESTION_SHORTCUTS[index].label}</kbd>}
                 {formatCurrency(amount)}
               </button>
             ))}
@@ -9008,6 +9075,159 @@ function ReturnModal(
               </div>
             </>
           )}
+        </div>
+      </div>
+    </ModalShell>
+  );
+}
+
+function ChangePinModal(props: { onClose: () => void }) {
+  const [currentPin, setCurrentPin] = useState('');
+  const [newPin, setNewPin] = useState('');
+  const [confirmPin, setConfirmPin] = useState('');
+  const [error, setError] = useState('');
+  const [isSaving, setIsSaving] = useState(false);
+
+  const save = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (newPin !== confirmPin) return setError('New PINs do not match.');
+    if (!/^\d{4,6}$/.test(newPin) || newPin === newPin.split('').reverse().join('')) {
+      return setError('Use 4 to 6 digits; the PIN cannot read the same backwards.');
+    }
+    setIsSaving(true);
+    setError('');
+    try {
+      await changeOwnPin(currentPin, newPin);
+      window.dispatchEvent(new Event('jingles:pin-configured'));
+      props.onClose();
+    } catch (nextError) {
+      setError(nextError instanceof Error ? nextError.message : 'Unable to change PIN.');
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  return (
+    <ModalShell onClose={props.onClose} title="Change workstation PIN" width="narrow">
+      <form className="auth-form-stack" onSubmit={save}>
+        <input autoFocus aria-label="Current PIN" className="glass-input" type="password" inputMode="numeric" placeholder="Current PIN" value={currentPin} onChange={(event) => setCurrentPin(event.target.value.replace(/\D/g, '').slice(0, 6))} />
+        <input aria-label="New PIN" className="glass-input" type="password" inputMode="numeric" placeholder="New PIN" value={newPin} onChange={(event) => setNewPin(event.target.value.replace(/\D/g, '').slice(0, 6))} />
+        <input aria-label="Confirm new PIN" className="glass-input" type="password" inputMode="numeric" placeholder="Confirm new PIN" value={confirmPin} onChange={(event) => setConfirmPin(event.target.value.replace(/\D/g, '').slice(0, 6))} />
+        {error && <div className="inline-alert error">{error}</div>}
+        <div className="modal-actions">
+          <button className="ghost-button" type="button" onClick={props.onClose}>Cancel</button>
+          <button className="btn-primary" disabled={isSaving} type="submit">{isSaving ? 'Saving...' : 'Change PIN'}</button>
+        </div>
+      </form>
+    </ModalShell>
+  );
+}
+
+function canVoidCompletedSale(sale: SaleSummary): boolean {
+  return sale.status === SaleStatus.COMPLETED
+    && sale.lines.every((line) => (line.returnedQuantity ?? 0) === 0);
+}
+
+function VoidOrderModal(
+  props: {
+    isLoading: boolean;
+    isSubmitting: boolean;
+    onClose: () => void;
+    onSubmit: (sale: SaleSummary, reason: string) => void;
+    sales: SaleSummary[];
+  },
+) {
+  const [query, setQuery] = useState('');
+  const [selectedSaleId, setSelectedSaleId] = useState('');
+  const [reason, setReason] = useState('Order cancellation');
+  const searchInputRef = useRef<HTMLInputElement>(null);
+  const eligibleSales = useMemo(() => {
+    const term = query.trim().toLowerCase();
+    return props.sales.filter((sale) => canVoidCompletedSale(sale) && (
+      !term
+      || sale.receiptNumber.toLowerCase().includes(term)
+      || (sale.customerName ?? '').toLowerCase().includes(term)
+      || sale.cashierName.toLowerCase().includes(term)
+    ));
+  }, [props.sales, query]);
+  const visibleSales = eligibleSales.slice(0, DIGIT_LIST_WINDOW_SIZE);
+  const selectedSale = eligibleSales.find((sale) => sale.id === selectedSaleId) ?? null;
+
+  useEffect(() => {
+    if (selectedSaleId && !eligibleSales.some((sale) => sale.id === selectedSaleId)) {
+      setSelectedSaleId('');
+    }
+  }, [eligibleSales, selectedSaleId]);
+
+  useEffect(() => {
+    const handleKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        event.stopPropagation();
+        props.onClose();
+        return;
+      }
+      if (document.activeElement === searchInputRef.current) return;
+      const index = digitRowIndex(event);
+      if (index == null || !visibleSales[index]) return;
+      event.preventDefault();
+      event.stopPropagation();
+      setSelectedSaleId(visibleSales[index].id);
+    };
+    window.addEventListener('keydown', handleKey, true);
+    return () => window.removeEventListener('keydown', handleKey, true);
+  }, [props, visibleSales]);
+
+  return (
+    <ModalShell onClose={props.onClose} title="Void completed order" width="wide">
+      <div className="modal-stack">
+        <input
+          ref={searchInputRef}
+          autoFocus
+          className="glass-input"
+          placeholder="Find receipt, customer or cashier"
+          value={query}
+          onChange={(event) => setQuery(event.target.value)}
+        />
+        <div className="field-hint">Clear the search, then use Digit 1-9 to select an order. Orders with returns cannot be voided.</div>
+        <div className="return-sales-list">
+          {props.isLoading && <div className="meta-label">Loading orders...</div>}
+          {!props.isLoading && visibleSales.map((sale, index) => (
+            <button
+              key={sale.id}
+              className={`return-sale-row ${sale.id === selectedSaleId ? 'active' : ''}`}
+              onClick={() => setSelectedSaleId(sale.id)}
+            >
+              <kbd className="picker-number">{index + 1}</kbd>
+              <div>{sale.receiptNumber}</div>
+              <div>{sale.customerName ?? 'Walk-in'}</div>
+              <span>{formatCurrency(sale.total)}</span>
+            </button>
+          ))}
+          {!props.isLoading && eligibleSales.length === 0 && (
+            <div className="orders-empty">No completed orders are available to void.</div>
+          )}
+        </div>
+        {selectedSale != null && (
+          <>
+            <div className="modal-copy">
+              Void {selectedSale.receiptNumber} from {formatDateTime(selectedSale.createdAt)} for {formatCurrency(selectedSale.total)}.
+              Stock from all {selectedSale.lines.length} line(s) will be restored.
+            </div>
+            <LabelBlock label="Reason">
+              <input className="glass-input" value={reason} onChange={(event) => setReason(event.target.value)} />
+            </LabelBlock>
+          </>
+        )}
+        <div className="modal-actions">
+          <button className="ghost-button" disabled={props.isSubmitting} onClick={props.onClose}>Esc - Cancel</button>
+          <button
+            className="ghost-button danger"
+            disabled={selectedSale == null || props.isSubmitting || reason.trim().length === 0}
+            onClick={() => selectedSale && props.onSubmit(selectedSale, reason)}
+          >
+            {props.isSubmitting ? 'Voiding...' : 'Void selected order'}
+          </button>
         </div>
       </div>
     </ModalShell>

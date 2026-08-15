@@ -5,6 +5,7 @@ import { app } from 'electron';
 import {
   DEFAULT_POS_PRINTER_CONFIG,
   DEFAULT_POS_SCANNER_SETTINGS,
+  DEFAULT_POS_SESSION_LOCK_MINUTES,
   normalizeCashSalesVisibility,
   normalizeCustomerDisplaySettings,
   normalizeShiftReconciliation,
@@ -175,6 +176,7 @@ function normalizeScanner(value: unknown): POSScannerSettings {
 
 function toSnapshot(value: StoredDesktopSettings | null | undefined): POSDesktopSettings {
   return {
+    sessionLockMinutes: clampNumber(value?.sessionLockMinutes, DEFAULT_POS_SESSION_LOCK_MINUTES, 1, 120),
     syncUrl: normalizeSyncUrl(value?.syncUrl),
     databasePath: normalizeAbsolutePath(value?.databasePath, getDefaultDatabasePath()),
     backupDirectory: normalizeAbsolutePath(value?.backupDirectory, getDefaultBackupDirectory()),

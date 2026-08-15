@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 import { unlockSession } from '../api';
 import { useAuth } from '../auth/AuthContext';
+import { readStoredSessionLockMinutes } from '../desktopSettings';
 
-const INACTIVITY_TIMEOUT_MS = 60_000;
 const CASH_VISIBILITY_STORAGE_KEY = 'jingles-pos-hide-cash-sales';
 const LAST_ACTIVITY_STORAGE_KEY = 'jingles-pos-last-activity-at';
 const ACTIVITY_EVENTS: Array<keyof WindowEventMap> = [
@@ -19,6 +19,7 @@ export default function SessionLock() {
   const [pin, setPin] = useState('');
   const [error, setError] = useState('');
   const [isUnlocking, setIsUnlocking] = useState(false);
+  const [canLock, setCanLock] = useState(Boolean(user?.hasPin));
   const timerRef = useRef<number | null>(null);
   const lockedRef = useRef(false);
   const lastActivityWriteRef = useRef(0);
@@ -30,25 +31,57 @@ export default function SessionLock() {
     }
   }, []);
 
-  const armTimer = useCallback((delay = INACTIVITY_TIMEOUT_MS) => {
+  const armTimer = useCallback((delay = readStoredSessionLockMinutes() * 60_000) => {
     clearTimer();
-    if (!user?.hasPin || lockedRef.current) return;
+    if (!canLock || lockedRef.current) return;
     timerRef.current = window.setTimeout(() => {
       lockedRef.current = true;
       setPin('');
       setError('');
       setIsLocked(true);
     }, Math.max(0, delay));
-  }, [clearTimer, user?.hasPin]);
+  }, [canLock, clearTimer]);
 
   useEffect(() => {
+    setCanLock(Boolean(user?.hasPin));
+  }, [user?.hasPin, user?.id]);
+
+  useEffect(() => {
+    const handleManualLock = () => {
+      if (!canLock) return;
+      lockedRef.current = true;
+      setPin('');
+      setError('');
+      setIsLocked(true);
+    };
+    const handleShortcut = (event: KeyboardEvent) => {
+      if (!event.altKey || event.ctrlKey || event.metaKey || event.key.toLowerCase() !== 'l') return;
+      event.preventDefault();
+      handleManualLock();
+    };
+    const handleSettings = () => armTimer();
+    const handlePinConfigured = () => setCanLock(true);
+    window.addEventListener('jingles:lock-now', handleManualLock);
+    window.addEventListener('keydown', handleShortcut, true);
+    window.addEventListener('jingles:session-lock-settings', handleSettings);
+    window.addEventListener('jingles:pin-configured', handlePinConfigured);
+    return () => {
+      window.removeEventListener('jingles:lock-now', handleManualLock);
+      window.removeEventListener('keydown', handleShortcut, true);
+      window.removeEventListener('jingles:session-lock-settings', handleSettings);
+      window.removeEventListener('jingles:pin-configured', handlePinConfigured);
+    };
+  }, [armTimer, canLock]);
+
+  useEffect(() => {
+    const timeoutMs = readStoredSessionLockMinutes() * 60_000;
     const lastActivityAt = Number(window.localStorage.getItem(LAST_ACTIVITY_STORAGE_KEY));
     const remaining = lastActivityAt
-      ? INACTIVITY_TIMEOUT_MS - (Date.now() - lastActivityAt)
+      ? timeoutMs - (Date.now() - lastActivityAt)
       : 0;
-    lockedRef.current = Boolean(user?.hasPin && remaining <= 0);
+    lockedRef.current = Boolean(canLock && remaining <= 0);
     setIsLocked(lockedRef.current);
-    if (!lockedRef.current) armTimer(remaining || INACTIVITY_TIMEOUT_MS);
+    if (!lockedRef.current) armTimer(remaining || timeoutMs);
     const handleActivity = () => {
       if (!lockedRef.current) {
         const now = Date.now();
@@ -64,7 +97,7 @@ export default function SessionLock() {
       clearTimer();
       ACTIVITY_EVENTS.forEach((eventName) => window.removeEventListener(eventName, handleActivity));
     };
-  }, [armTimer, clearTimer, user?.id]);
+  }, [armTimer, canLock, clearTimer, user?.id]);
 
   async function handleUnlock(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();

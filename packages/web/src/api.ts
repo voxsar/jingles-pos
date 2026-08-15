@@ -261,6 +261,10 @@ export async function voidSale(
 	return postJson<SaleSummary>(`/sales/${encodeURIComponent(saleId)}/void`, input ?? {});
 }
 
+export async function changeOwnPin(currentPin: string, newPin: string): Promise<void> {
+	await postJson('/auth/pin', { currentPin, newPin });
+}
+
 export async function createReturn(input: ReturnInput): Promise<{ id: string; saleId: string; totalRefund: number }> {
 	return postJson<{ id: string; saleId: string; totalRefund: number }>('/returns', input);
 }

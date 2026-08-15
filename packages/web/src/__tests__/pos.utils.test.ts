@@ -99,6 +99,25 @@ describe('createCartLine', () => {
     const line = createCartLine(product, { id: 'u1', code: 'U1', name: 'Cashier', initials: 'CA', role: UserRole.CASHIER }, [], product.variants![0]);
     expect(line.unitPrice).toBe(125);
   });
+
+  it('uses the explicitly selected price tier for a new cart line', () => {
+    const product: Product = {
+      id: 'prod-tier', sku: 'SKU-TIER', name: 'Tiered widget', categoryId: 'cat-1', subcategory: 'Tools',
+      packSize: 1, unitLabel: 'pcs', stockOnHand: 10,
+      priceTiers: [
+        { id: 'retail', label: 'Retail', price: 100, priority: 1, isDefault: true },
+        { id: 'wholesale', label: 'Wholesale', price: 80, priority: 2 },
+      ],
+    };
+    const line = createCartLine(
+      product,
+      { id: 'u1', code: 'U1', name: 'Cashier', initials: 'CA', role: UserRole.CASHIER },
+      ['Wholesale', 'Retail'],
+    );
+
+    expect(line.tierLabel).toBe('Wholesale');
+    expect(line.unitPrice).toBe(80);
+  });
 });
 
 describe('calcCartTotals', () => {

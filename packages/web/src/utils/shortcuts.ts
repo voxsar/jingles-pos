@@ -118,6 +118,18 @@ export const CASH_DENOMINATION_SHORTCUTS = [
   { code: 'Equal', value: 1, label: '=' },
 ] as const;
 
+/**
+ * Quick tender suggestions follow the QWERTY row, but R is deliberately left
+ * free for the payment reference field.
+ */
+export const PAYMENT_SUGGESTION_SHORTCUTS = [
+  { code: 'KeyQ', label: 'Q' },
+  { code: 'KeyW', label: 'W' },
+  { code: 'KeyE', label: 'E' },
+  { code: 'KeyT', label: 'T' },
+  { code: 'KeyY', label: 'Y' },
+] as const;
+
 /** Looks up the cash shortcut for a keydown event; modified key presses don't match. */
 export function cashDenominationShortcut(
   event: Pick<KeyboardEvent, 'code' | 'ctrlKey' | 'altKey' | 'shiftKey' | 'metaKey'>,

@@ -374,10 +374,11 @@ function replaceLocalCatalogSnapshotDirect(snapshot: SharedCatalogSnapshot) {
         branchId=excluded.branchId, updatedAt=CURRENT_TIMESTAMP
     `);
     const upsertUser = db.prepare(`
-      INSERT INTO "POSUser" (id, code, email, name, initials, role, createdAt, updatedAt)
-      VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+      INSERT INTO "POSUser" (id, code, email, name, initials, role, access_scope, is_salesman, createdAt, updatedAt)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
       ON CONFLICT(id) DO UPDATE SET code=excluded.code, email=excluded.email, name=excluded.name,
-        initials=excluded.initials, role=excluded.role, updatedAt=CURRENT_TIMESTAMP
+        initials=excluded.initials, role=excluded.role, access_scope=excluded.access_scope,
+        is_salesman=excluded.is_salesman, updatedAt=CURRENT_TIMESTAMP
     `);
     const upsertCustomer = db.prepare(`
       INSERT INTO "Customer" (id, code, name, tier, email, phone, notes, creditLimit, createdAt, updatedAt)
@@ -436,7 +437,7 @@ function replaceLocalCatalogSnapshotDirect(snapshot: SharedCatalogSnapshot) {
           }
           db.prepare('DELETE FROM "POSUser" WHERE email=? AND id<>?').run(user.email, user.id);
         }
-        upsertUser.run(user.id, user.code, user.email ?? null, user.name, user.initials, user.role);
+        upsertUser.run(user.id, user.code, user.email ?? null, user.name, user.initials, user.role, user.accessScope ?? 'BOTH', user.isSalesman !== false ? 1 : 0);
       }
       for (const customer of snapshot.customers ?? []) {
         const duplicate = customer.code
@@ -640,7 +641,7 @@ export async function replaceLocalCatalogSnapshot(snapshot: SharedCatalogSnapsho
       await tx.pOSUser.upsert({
         where: { id: user.id },
         create: user,
-        update: { code: user.code, email: user.email, name: user.name, initials: user.initials, role: user.role },
+        update: { code: user.code, email: user.email, name: user.name, initials: user.initials, role: user.role, accessScope: user.accessScope ?? 'BOTH', isSalesman: user.isSalesman !== false },
       });
     }
     for (const customer of snapshot.customers ?? []) {

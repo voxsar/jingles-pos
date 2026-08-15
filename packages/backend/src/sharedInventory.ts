@@ -411,7 +411,7 @@ async function fetchSharedCatalogSnapshotFromSource(): Promise<SharedCatalogSnap
       [SHELF_READY_STATE],
     ),
     inventory.query<{ id: string; code: string; name: string }>(`SELECT id, code, name FROM branches WHERE is_active = TRUE ORDER BY code`),
-    inventory.query<{ id: string; email: string; role: string }>(`SELECT id, email, role FROM users WHERE is_active = TRUE AND role IN ('Admin','Manager','Staff') ORDER BY email`),
+    inventory.query<{ id: string; email: string; role: string; access_scope: string; is_salesman: boolean }>(`SELECT id, email, role, access_scope, is_salesman FROM users WHERE is_active = TRUE AND access_scope IN ('CASHIER','BOTH','ADMIN') ORDER BY email`),
     inventory.query<any>(`SELECT id, name, type, value, applies_to, conditions, priority, stackable, valid_from, valid_to FROM pricing_overlays WHERE status = 'active' AND (valid_from IS NULL OR valid_from <= NOW()) AND (valid_to IS NULL OR valid_to >= NOW()) ORDER BY priority DESC`),
   ]);
 
@@ -494,7 +494,9 @@ async function fetchSharedCatalogSnapshotFromSource(): Promise<SharedCatalogSnap
       return {
         id: user.id, code: `INV-${user.id.slice(0, 8).toUpperCase()}`, email: user.email, name,
         initials: name.split(/\s+/).map((part) => part[0]).join('').slice(0, 3).toUpperCase(),
-        role: user.role === 'Staff' ? UserRole.CASHIER : UserRole.MANAGER,
+        role: user.access_scope === 'ADMIN' ? UserRole.MANAGER : UserRole.CASHIER,
+        accessScope: user.access_scope as 'CASHIER' | 'BOTH' | 'ADMIN',
+        isSalesman: user.is_salesman,
       };
     }),
     categories: categories
@@ -558,7 +560,7 @@ async function syncProjection(snapshot: SharedCatalogSnapshot): Promise<void> {
     for (const user of snapshot.users ?? []) {
       await tx.pOSUser.upsert({
         where: { id: user.id }, create: user,
-        update: { code: user.code, email: user.email, name: user.name, initials: user.initials, role: user.role },
+        update: { code: user.code, email: user.email, name: user.name, initials: user.initials, role: user.role, accessScope: user.accessScope ?? 'BOTH', isSalesman: user.isSalesman !== false },
       });
     }
     if (snapshot.branches?.length) {

@@ -1703,8 +1703,14 @@ function mapHeldSaleRows(db: Database.Database, userMap: Map<string, POSUser>): 
 function mapSales(db: Database.Database, userMap: Map<string, POSUser>): SaleSummary[] {
   const lineRows = db.prepare('SELECT * FROM sale_lines').all() as any[];
   const paymentRows = db.prepare('SELECT * FROM payments').all() as any[];
+  const returnedQuantityRows = db.prepare(`
+    SELECT sale_line_id, COALESCE(SUM(quantity), 0) AS returned_quantity
+    FROM return_lines
+    GROUP BY sale_line_id
+  `).all() as any[];
   const groupedLines = new Map<string, any[]>();
   const groupedPayments = new Map<string, any[]>();
+  const returnedQuantities = new Map<string, number>();
 
   for (const row of lineRows) {
     const list = groupedLines.get(row.sale_id) ?? [];
@@ -1715,6 +1721,9 @@ function mapSales(db: Database.Database, userMap: Map<string, POSUser>): SaleSum
     const list = groupedPayments.get(row.sale_id) ?? [];
     list.push(row);
     groupedPayments.set(row.sale_id, list);
+  }
+  for (const row of returnedQuantityRows) {
+    returnedQuantities.set(row.sale_line_id, Number(row.returned_quantity));
   }
 
   const rows = db.prepare('SELECT * FROM sales ORDER BY created_at DESC').all() as any[];
@@ -1750,6 +1759,7 @@ function mapSales(db: Database.Database, userMap: Map<string, POSUser>): SaleSum
       variantAttributes: parseJson(line.variant_attributes_json, undefined),
       subcategory: line.subcategory,
       quantity: line.quantity,
+      returnedQuantity: returnedQuantities.get(line.id) ?? 0,
       unitPrice: line.unit_price,
       tierLabel: line.tier_label,
       discountPercent: line.discount_percent,

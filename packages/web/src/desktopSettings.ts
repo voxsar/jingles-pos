@@ -2,6 +2,7 @@ import {
   DEFAULT_POS_CASH_SALES_VISIBILITY,
   DEFAULT_POS_PRINTER_CONFIG,
   DEFAULT_POS_SCANNER_SETTINGS,
+  DEFAULT_POS_SESSION_LOCK_MINUTES,
   DEFAULT_POS_SHIFT_RECONCILIATION,
   DEFAULT_POS_SHORTCUT_SETTINGS,
   type POSDatabaseInfo,
@@ -19,6 +20,18 @@ import { readStoredCustomerDisplaySettings } from './customerDisplay';
 
 export const DEFAULT_POS_SYNC_URL = 'https://inv.theredsun.org';
 const THEME_STORAGE_KEY = 'jingles-pos-theme-mode';
+export const SESSION_LOCK_MINUTES_KEY = 'jingles-pos-session-lock-minutes';
+
+export function readStoredSessionLockMinutes() {
+  const value = typeof window === 'undefined' ? NaN : Number(window.localStorage.getItem(SESSION_LOCK_MINUTES_KEY));
+  return Number.isFinite(value) ? Math.min(120, Math.max(1, Math.round(value))) : DEFAULT_POS_SESSION_LOCK_MINUTES;
+}
+
+export function persistSessionLockMinutes(minutes: number) {
+  const normalized = Math.min(120, Math.max(1, Math.round(minutes)));
+  window.localStorage.setItem(SESSION_LOCK_MINUTES_KEY, String(normalized));
+  window.dispatchEvent(new CustomEvent('jingles:session-lock-settings'));
+}
 
 export function hasDesktopSettingsBridge() {
   return typeof window !== 'undefined' && typeof window.electronAPI?.desktopSettings !== 'undefined';
@@ -50,6 +63,7 @@ export function persistThemeMode(themeMode: POSThemeMode) {
 
 export function buildFallbackDesktopSettings(themeMode: POSThemeMode): POSDesktopSettings {
   return {
+    sessionLockMinutes: readStoredSessionLockMinutes(),
     syncUrl: DEFAULT_POS_SYNC_URL,
     databasePath: '',
     backupDirectory: '',

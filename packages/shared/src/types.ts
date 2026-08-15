@@ -33,6 +33,8 @@ export interface POSUser {
   name: string;
   initials: string;
   role: UserRole;
+  accessScope?: 'CASHIER' | 'INVENTORY' | 'BOTH' | 'ADMIN';
+  isSalesman?: boolean;
   pin?: string;
   hasPin?: boolean;
 }
@@ -907,6 +909,7 @@ export interface POSCashSalesVisibilitySettings {
 }
 
 export interface POSDesktopSettings {
+  sessionLockMinutes: number;
   syncUrl: string;
   databasePath: string;
   backupDirectory: string;
@@ -981,6 +984,8 @@ export const DEFAULT_POS_CASH_SALES_VISIBILITY: POSCashSalesVisibilitySettings =
   autoHideEnabled: true,
   autoHideMinutes: 5,
 };
+
+export const DEFAULT_POS_SESSION_LOCK_MINUTES = 2;
 
 /** Tender types a cashier can be asked to declare alongside the cash count. */
 export const DECLARABLE_TENDER_METHODS: PaymentMethod[] = [
