@@ -5028,6 +5028,30 @@ function PrinterSettingsCard(
   const [testingPrinterId, setTestingPrinterId] = useState<string | null>(null);
   const [testResult, setTestResult] = useState<{ ok: boolean; text: string } | null>(null);
 
+  useEffect(() => {
+    if (!props.hasPrintingBridge) return undefined;
+
+    let cancelled = false;
+    void discoverPrinters({ includeNetwork: false })
+      .then((result) => {
+        if (cancelled) return;
+        setDiscovered(result.printers);
+        setDiscoveryNote([
+          `Found ${formatInteger(result.printers.length)} installed printer(s) and device port(s)`,
+          ...result.warnings,
+        ].filter(Boolean).join(' - '));
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        reportCaughtClientError(error, 'pos.printer.discovery-initial');
+        setDiscoveryNote(error instanceof Error ? error.message : 'Printer discovery failed.');
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [props.hasPrintingBridge]);
+
   const runDiscovery = async (includeNetwork: boolean) => {
     setIsDiscovering(true);
     setDiscoveryNote(includeNetwork ? 'Scanning printers, device ports, and the local network...' : 'Reading installed printers and device ports...');
@@ -5158,6 +5182,7 @@ function PrinterSettingsCard(
           {props.printers.map((printer) => (
             <PrinterConfigRow
               key={printer.id}
+              discovered={discovered}
               disabled={props.disabled}
               isTesting={testingPrinterId === printer.id}
               printer={printer}
@@ -5174,6 +5199,7 @@ function PrinterSettingsCard(
 
 function PrinterConfigRow(
   props: {
+    discovered: POSDiscoveredPrinter[];
     disabled: boolean;
     isTesting: boolean;
     printer: POSPrinterConfig;
@@ -5184,6 +5210,13 @@ function PrinterConfigRow(
 ) {
   const { printer } = props;
   const isLabelPrinter = printer.role === 'label';
+  const availableEndpoints = props.discovered.filter((candidate) => candidate.transport === printer.transport);
+  const endpointOptions = availableEndpoints.map((candidate) => ({
+    value: candidate.address,
+    label: candidate.transport === 'network'
+      ? `${candidate.name} - ${candidate.address}:${candidate.port}`
+      : `${candidate.name} - ${candidate.address}`,
+  }));
 
   return (
     <div className={`printer-config-row ${printer.enabled ? '' : 'disabled'}`}>
@@ -5267,6 +5300,27 @@ function PrinterConfigRow(
       </div>
 
       <div className="settings-field-row">
+        {endpointOptions.length > 0 && (
+          <LabelBlock label={printer.transport === 'device' ? 'Available port' : 'Available printer'}>
+            <SearchableSelect
+              ariaLabel={printer.transport === 'device' ? 'Available printer port' : 'Available printer'}
+              className="glass-input"
+              options={endpointOptions}
+              placeholder={printer.transport === 'device' ? 'Select a port' : 'Select a printer'}
+              value={availableEndpoints.some((candidate) => candidate.address === printer.address) ? printer.address : ''}
+              disabled={props.disabled}
+              onChange={(address) => {
+                const candidate = availableEndpoints.find((entry) => entry.address === address);
+                props.onChange({
+                  address,
+                  name: candidate?.name ?? printer.name,
+                  port: candidate?.port ?? printer.port,
+                });
+              }}
+            />
+          </LabelBlock>
+        )}
+
         <LabelBlock
           label={
             printer.transport === 'network'
