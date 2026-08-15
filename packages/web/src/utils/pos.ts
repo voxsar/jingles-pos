@@ -66,7 +66,7 @@ export function findSaleByReceiptScan(sales: SaleSummary[], code: string) {
  * or `@`, so detecting this unconditionally ahead of a lookup is safe.
  */
 export function parseQuantityPrefixedCode(input: string): { quantity: number; code: string } | null {
-  const match = /^\s*(\d+)\s*[*@]\s*(.+)$/.exec(input);
+  const match = /^\s*(\d+(?:\.\d+)?)\s*[*@]\s*(.+)$/.exec(input);
   if (!match) return null;
 
   const quantity = Number(match[1]);
@@ -74,6 +74,70 @@ export function parseQuantityPrefixedCode(input: string): { quantity: number; co
   if (!Number.isFinite(quantity) || quantity <= 0 || !code) return null;
 
   return { quantity, code };
+}
+
+export type ProductCodeModifier = 'quantity' | 'price';
+
+export interface ParsedModifiedProductCode {
+  code: string;
+  quantity?: number;
+  price?: number;
+  order: ProductCodeModifier[];
+}
+
+/** Parses quantity and price modifiers in either order. Try an exact code first. */
+export function parseModifiedProductCode(input: string, priceSeparator = '-'): ParsedModifiedProductCode | null {
+  const separator = priceSeparator.trim().slice(0, 1);
+  const number = '(\\d+(?:\\.\\d+)?)';
+  const quantitySeparator = '([*@])';
+  const escapedPriceSeparator = separator.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const validPriceSeparator = separator && !RESERVED_PRICE_PREFIX_SEPARATORS.has(separator);
+  const patterns: Array<{
+    regex: RegExp;
+    order: ProductCodeModifier[];
+    quantityGroup?: number;
+    priceGroup?: number;
+    codeGroup: number;
+  }> = [];
+
+  if (validPriceSeparator) {
+    patterns.push(
+      { regex: new RegExp(`^\\s*${number}\\s*${quantitySeparator}\\s*${number}\\s*${escapedPriceSeparator}\\s*(.+)$`), order: ['quantity', 'price'], quantityGroup: 1, priceGroup: 3, codeGroup: 4 },
+      { regex: new RegExp(`^\\s*${number}\\s*${escapedPriceSeparator}\\s*${number}\\s*${quantitySeparator}\\s*(.+)$`), order: ['price', 'quantity'], priceGroup: 1, quantityGroup: 2, codeGroup: 4 },
+    );
+  }
+  patterns.push({ regex: new RegExp(`^\\s*${number}\\s*${quantitySeparator}\\s*(.+)$`), order: ['quantity'], quantityGroup: 1, codeGroup: 3 });
+  if (validPriceSeparator) {
+    patterns.push({ regex: new RegExp(`^\\s*${number}\\s*${escapedPriceSeparator}\\s*(.+)$`), order: ['price'], priceGroup: 1, codeGroup: 2 });
+  }
+
+  for (const pattern of patterns) {
+    const match = pattern.regex.exec(input);
+    if (!match) continue;
+    const quantity = pattern.quantityGroup == null ? undefined : Number(match[pattern.quantityGroup]);
+    const price = pattern.priceGroup == null ? undefined : Number(match[pattern.priceGroup]);
+    const code = match[pattern.codeGroup]?.trim() ?? '';
+    if (!code || (quantity != null && (!Number.isFinite(quantity) || quantity <= 0))) continue;
+    if (price != null && (!Number.isFinite(price) || price <= 0)) continue;
+    return { code, quantity, price, order: pattern.order };
+  }
+  return null;
+}
+
+/** Recognises complete and in-progress prefixes for live colour feedback. */
+export function detectProductCodeModifierOrder(input: string, priceSeparator = '-'): ProductCodeModifier[] {
+  const parsed = parseModifiedProductCode(input, priceSeparator);
+  if (parsed) return parsed.order;
+  const separator = priceSeparator.trim().slice(0, 1);
+  if (!separator || RESERVED_PRICE_PREFIX_SEPARATORS.has(separator)) {
+    return /^\s*\d+(?:\.\d+)?\s*[*@]/.test(input) ? ['quantity'] : [];
+  }
+  const escaped = separator.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const quantityFirst = new RegExp(`^\\s*\\d+(?:\\.\\d+)?\\s*[*@](?:\\s*\\d+(?:\\.\\d+)?\\s*${escaped})?`).exec(input);
+  if (quantityFirst) return quantityFirst[0].includes(separator) ? ['quantity', 'price'] : ['quantity'];
+  const priceFirst = new RegExp(`^\\s*\\d+(?:\\.\\d+)?\\s*${escaped}(?:\\s*\\d+(?:\\.\\d+)?\\s*[*@])?`).exec(input);
+  if (priceFirst) return /[*@]/.test(priceFirst[0]) ? ['price', 'quantity'] : ['price'];
+  return [];
 }
 
 /**
@@ -100,18 +164,22 @@ export function appendScanToPendingBarcodeModifier(
   const pending = pendingInput.trim();
   if (!code || !pending) return code;
 
-  const quantityMatch = /^(\d+)\s*[*@]\s*$/.exec(pending);
-  if (quantityMatch && Number(quantityMatch[1]) > 0) {
-    return `${pending}${code}`;
-  }
-
   const separator = priceSeparator?.trim().slice(0, 1) ?? '';
+  const number = '\\d+(?:\\.\\d+)?';
+  const candidate = `${pending}${code}`;
+  if (new RegExp(`^${number}\\s*[*@]\\s*$`).test(pending)) {
+    const parsed = parseModifiedProductCode(candidate, '');
+    return parsed?.code === code ? candidate : code;
+  }
   if (!separator || RESERVED_PRICE_PREFIX_SEPARATORS.has(separator)) return code;
 
   const escaped = separator.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const priceMatch = new RegExp(`^(\\d+(?:\\.\\d+)?)\\s*${escaped}\\s*$`).exec(pending);
-  if (priceMatch && Number(priceMatch[1]) > 0) {
-    return `${pending}${code}`;
+  const pendingModifier = new RegExp(
+    `^(?:${number}\\s*[*@]\\s*(?:${number}\\s*${escaped}\\s*)?|${number}\\s*${escaped}\\s*(?:${number}\\s*[*@]\\s*)?)$`,
+  );
+  if (pendingModifier.test(pending)) {
+    const parsed = parseModifiedProductCode(candidate, separator);
+    if (parsed?.code === code) return candidate;
   }
 
   return code;

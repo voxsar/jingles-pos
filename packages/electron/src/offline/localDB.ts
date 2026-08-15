@@ -322,7 +322,7 @@ function initSchema(db: Database.Database): void {
       subcategory TEXT NOT NULL DEFAULT '',
       pack_size INTEGER NOT NULL DEFAULT 1,
       unit_label TEXT NOT NULL DEFAULT 'pcs',
-      stock_on_hand INTEGER NOT NULL DEFAULT 0,
+      stock_on_hand REAL NOT NULL DEFAULT 0,
       description TEXT,
       variants_json TEXT,
       last_vector_clock TEXT DEFAULT '{}'
@@ -394,7 +394,7 @@ function initSchema(db: Database.Database): void {
       variant_name TEXT,
       variant_attributes_json TEXT,
       subcategory TEXT NOT NULL,
-      quantity INTEGER NOT NULL,
+      quantity REAL NOT NULL,
       unit_price REAL NOT NULL,
       tier_label TEXT NOT NULL,
       discount_percent REAL NOT NULL DEFAULT 0,
@@ -438,7 +438,7 @@ function initSchema(db: Database.Database): void {
       variant_name TEXT,
       variant_attributes_json TEXT,
       subcategory TEXT NOT NULL,
-      quantity INTEGER NOT NULL,
+      quantity REAL NOT NULL,
       unit_price REAL NOT NULL,
       tier_label TEXT NOT NULL,
       discount_percent REAL NOT NULL DEFAULT 0,
@@ -479,7 +479,7 @@ function initSchema(db: Database.Database): void {
       sale_line_id TEXT NOT NULL,
       product_id TEXT NOT NULL,
       variant_id TEXT,
-      quantity INTEGER NOT NULL,
+      quantity REAL NOT NULL,
       refund_amount REAL NOT NULL
     );
 

@@ -68,7 +68,7 @@ model Product {
   subcategory     String      @default("")
   packSize        Int         @default(1)
   unitLabel       String      @default("pcs")
-  stockOnHand     Int         @default(0)
+  stockOnHand     Float       @default(0)
   stockByBranchJson String?   @map("stock_by_branch_json")
   pricingRulesJson String?    @map("pricing_rules_json")
   description     String?
@@ -85,7 +85,7 @@ model BatchPrice {
   id        String   @id
   productId String
   label     String?
-  minQty    Int
+  minQty    Float
   price     Float
   priority  Int      @default(0)
   isDefault Boolean  @default(false)
@@ -97,7 +97,7 @@ model InventoryEvent {
   id          String   @id
   productId   String
   eventType   String
-  quantity    Int
+  quantity    Float
   reference   String?
   notes       String?
   createdAt   DateTime @default(now())
@@ -215,7 +215,7 @@ model SaleLine {
   variantAttributesJson String? @map("variant_attributes_json")
   subcategory      String   @default("")
   salespersonId    String?
-  quantity         Int
+  quantity         Float
   unitPrice        Float
   tierLabel        String   @default("Retail")
   discountPercent  Float    @default(0)
@@ -273,7 +273,7 @@ model HeldSaleLine {
   variantAttributesJson String? @map("variant_attributes_json")
   subcategory     String   @default("")
   salespersonId   String?
-  quantity        Int
+  quantity        Float
   unitPrice       Float
   tierLabel       String   @default("Retail")
   discountPercent Float    @default(0)
@@ -304,7 +304,7 @@ model ReturnLine {
   saleLineId   String
   productId    String
   variantId    String?
-  quantity     Int
+  quantity     Float
   refundAmount Float
   return       Return   @relation(fields: [returnId], references: [id])
   saleLine     SaleLine @relation(fields: [saleLineId], references: [id])

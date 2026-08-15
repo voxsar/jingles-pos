@@ -2673,6 +2673,8 @@ button {
 }
 
 .barcode-focus-input {
+  grid-column: 1;
+  grid-row: 1;
   min-height: 48px;
   border-width: 2px;
   font-family: var(--mono);
@@ -2695,6 +2697,57 @@ button {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 14px;
+}
+
+.barcode-focus-input.understood-price {
+  border-color: var(--danger);
+  color: var(--danger);
+  background: rgba(176, 68, 45, 0.09);
+}
+
+.barcode-focus-input.understood-quantity {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: rgba(13, 122, 91, 0.09);
+}
+
+.barcode-focus-input.understood-price-quantity {
+  border-color: var(--accent);
+  color: var(--ink-0);
+  background: linear-gradient(90deg, rgba(176, 68, 45, 0.13) 0 50%, rgba(13, 122, 91, 0.13) 50% 100%);
+}
+
+.barcode-focus-input.understood-quantity-price {
+  border-color: var(--danger);
+  color: var(--ink-0);
+  background: linear-gradient(90deg, rgba(13, 122, 91, 0.13) 0 50%, rgba(176, 68, 45, 0.13) 50% 100%);
+}
+
+.barcode-understanding {
+  display: flex;
+  z-index: 1;
+  grid-column: 1;
+  grid-row: 1;
+  align-self: end;
+  justify-self: end;
+  gap: 4px;
+  padding: 0 8px 5px 0;
+  pointer-events: none;
+}
+
+.barcode-understanding span {
+  padding: 2px 5px;
+  border-radius: 5px;
+  background: var(--surface-card);
+  font: 800 8px var(--mono);
+}
+
+.barcode-understanding .price { color: var(--danger); }
+.barcode-understanding .quantity { color: var(--accent); }
+
+.barcode-focus-row > .search-trigger {
+  grid-column: 2;
+  grid-row: 1;
 }
 
 .keyboard-picker-viewport {
@@ -3735,6 +3788,7 @@ button {
 
 .receipt-screen-amount,
 .receipt-screen-detail,
+.receipt-screen-tendered,
 .receipt-screen-balance,
 .receipt-screen-change {
   display: flex;
@@ -3763,6 +3817,7 @@ button {
   gap: 8px;
 }
 
+.receipt-screen-tendered,
 .receipt-screen-balance,
 .receipt-screen-change {
   padding: 16px;
@@ -3771,6 +3826,11 @@ button {
   color: var(--danger);
   font-size: 26px;
   font-weight: 800;
+}
+
+.receipt-screen-tendered {
+  background: var(--surface-soft-strong);
+  color: var(--ink-0);
 }
 
 .receipt-screen-balance.settled,

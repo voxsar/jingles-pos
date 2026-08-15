@@ -46,6 +46,7 @@ import {
   applySharedInventoryVoid,
 } from '../sharedInventory';
 import {
+  applyLocalCatalogPriceOverride,
   getLocalCatalogSnapshot,
   replaceLocalCatalogSnapshot,
 } from './localCatalog';
@@ -565,8 +566,8 @@ async function applySaleCompletedEvent(
   if (existingSale) {
     return;
   }
-  if (!payload.lines.length || payload.lines.some((line) => !Number.isInteger(line.quantity) || line.quantity <= 0)) {
-    throw new Error('A sale requires at least one line with a positive whole-number quantity');
+  if (!payload.lines.length || payload.lines.some((line) => !Number.isFinite(line.quantity) || line.quantity <= 0)) {
+    throw new Error('A sale requires at least one line with a positive quantity');
   }
   if (!payload.payments.length || payload.payments.some((payment) => !Number.isFinite(payment.amount) || payment.amount < 0)) {
     throw new Error('A sale requires valid payment amounts');
@@ -776,8 +777,8 @@ async function applyReturnCreatedEvent(tx: Tx, event: SyncEvent<ReturnInput>): P
 
   const normalizedLines = [] as ReturnInput['lines'];
   for (const line of payload.lines) {
-    if (!Number.isInteger(line.quantity) || line.quantity <= 0) {
-      throw new Error('Return quantities must be positive whole numbers');
+    if (!Number.isFinite(line.quantity) || line.quantity <= 0) {
+      throw new Error('Return quantities must be positive numbers');
     }
     const saleLine = sale.lines.find((entry) => entry.id === line.saleLineId);
     if (!saleLine || saleLine.productId !== line.productId) {
@@ -1715,11 +1716,19 @@ export interface PriceOverrideResult {
  * LAN-hub peer cannot accept it either, per the matching endpoint).
  */
 export async function submitPriceOverride(input: PriceOverrideSubmission): Promise<PriceOverrideResult> {
-  return fetchUpstreamJson<PriceOverrideResult>('/api/pos/pricing/override', {
+  const result = await fetchUpstreamJson<PriceOverrideResult>('/api/pos/pricing/override', {
     method: 'POST',
     body: input,
     cloudOnly: true,
   });
+  await applyLocalCatalogPriceOverride({
+    productId: result.sku.id,
+    variantId: result.variant?.id,
+    tierLabel: input.tierLabel,
+    price: input.price,
+    batchId: result.batch.id,
+  });
+  return result;
 }
 
 type LegacyRecordPage = {

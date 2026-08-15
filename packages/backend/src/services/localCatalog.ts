@@ -414,6 +414,10 @@ function replaceLocalCatalogSnapshotDirect(snapshot: SharedCatalogSnapshot) {
       db.prepare('DELETE FROM product_search').run();
       db.prepare('DELETE FROM "BatchPrice"').run();
 
+      // Keep historical foreign keys valid, but remove users absent from the
+      // authoritative Inventory snapshot from active POS staff lists.
+      db.prepare('UPDATE "POSUser" SET is_salesman=0, access_scope=\'INVENTORY\', updatedAt=CURRENT_TIMESTAMP').run();
+
       db.exec('CREATE TEMP TABLE IF NOT EXISTS catalog_snapshot_products (id TEXT PRIMARY KEY);');
       db.prepare('DELETE FROM catalog_snapshot_products').run();
       const markSnapshotProduct = db.prepare('INSERT INTO catalog_snapshot_products (id) VALUES (?)');
@@ -506,7 +510,7 @@ function replaceLocalCatalogSnapshotDirect(snapshot: SharedCatalogSnapshot) {
           product.subcategory,
           Math.max(1, Math.round(product.packSize || 1)),
           product.unitLabel,
-          Math.max(0, Math.round(product.stockOnHand)),
+          Math.max(0, product.stockOnHand),
           JSON.stringify(product.stockByBranch ?? {}),
           JSON.stringify(product.pricingRules ?? []),
           product.description ?? null,
@@ -624,7 +628,7 @@ export async function replaceLocalCatalogSnapshot(snapshot: SharedCatalogSnapsho
     subcategory: product.subcategory,
     packSize: Math.max(1, Math.round(product.packSize || 1)),
     unitLabel: product.unitLabel,
-    stockOnHand: Math.max(0, Math.round(product.stockOnHand)),
+    stockOnHand: Math.max(0, product.stockOnHand),
     stockByBranchJson: JSON.stringify(product.stockByBranch ?? {}),
     pricingRulesJson: JSON.stringify(product.pricingRules ?? []),
     description: product.description ?? null,
@@ -647,6 +651,7 @@ export async function replaceLocalCatalogSnapshot(snapshot: SharedCatalogSnapsho
     for (const branch of snapshot.branches ?? []) {
       await tx.branch.upsert({ where: { id: branch.id }, create: branch, update: { code: branch.code, name: branch.name } });
     }
+    await tx.pOSUser.updateMany({ data: { isSalesman: false, accessScope: 'INVENTORY' } });
     for (const user of snapshot.users ?? []) {
       await tx.pOSUser.upsert({
         where: { id: user.id },
@@ -701,6 +706,62 @@ export async function replaceLocalCatalogSnapshot(snapshot: SharedCatalogSnapsho
   }, LOCAL_CATALOG_REPLACE_TRANSACTION_OPTIONS);
 
   await rebuildLocalCatalogSearchIndex();
+}
+
+/** Makes an accepted upstream price visible to the very next local lookup. */
+export async function applyLocalCatalogPriceOverride(input: {
+  productId: string;
+  variantId?: string | null;
+  tierLabel: string;
+  price: number;
+  batchId: string;
+}) {
+  const tierKey = input.tierLabel.trim().toLowerCase();
+  const db = isLocalPosBackendMode() ? openDirectCatalogDatabase() : null;
+  if (db) {
+    try {
+      if (input.variantId) {
+        const row = db.prepare('SELECT variants_json AS variantsJson FROM "Product" WHERE id=?').get(input.productId) as { variantsJson?: string | null } | undefined;
+        const variants = JSON.parse(row?.variantsJson || '[]') as ProductVariant[];
+        const updated = variants.map((variant) => variant.id !== input.variantId ? variant : {
+          ...variant,
+          priceTiers: (variant.priceTiers ?? []).map((tier) => tier.label.trim().toLowerCase() === tierKey ? { ...tier, price: input.price } : tier),
+        });
+        db.prepare('UPDATE "Product" SET variants_json=?, updatedAt=CURRENT_TIMESTAMP WHERE id=?').run(JSON.stringify(updated), input.productId);
+      } else {
+        const existing = db.prepare('SELECT id FROM "BatchPrice" WHERE productId=? AND lower(label)=? ORDER BY priority, minQty LIMIT 1').get(input.productId, tierKey) as { id?: string } | undefined;
+        if (existing?.id) {
+          db.prepare('UPDATE "BatchPrice" SET price=? WHERE id=?').run(input.price, existing.id);
+        } else {
+          db.prepare('INSERT INTO "BatchPrice" (id, productId, label, minQty, price, priority, isDefault, createdAt) VALUES (?, ?, ?, 0, ?, 0, 0, CURRENT_TIMESTAMP)').run(input.batchId, input.productId, input.tierLabel, input.price);
+        }
+        if (tierKey === 'retail') db.prepare('UPDATE "Product" SET price=?, updatedAt=CURRENT_TIMESTAMP WHERE id=?').run(input.price, input.productId);
+      }
+      return;
+    } finally {
+      db.close();
+    }
+  }
+
+  if (input.variantId) {
+    const product = await prisma.product.findUnique({ where: { id: input.productId } });
+    const variants = JSON.parse(product?.variantsJson || '[]') as ProductVariant[];
+    await prisma.product.update({
+      where: { id: input.productId },
+      data: {
+        variantsJson: JSON.stringify(variants.map((variant) => variant.id !== input.variantId ? variant : {
+          ...variant,
+          priceTiers: (variant.priceTiers ?? []).map((tier) => tier.label.trim().toLowerCase() === tierKey ? { ...tier, price: input.price } : tier),
+        })),
+      },
+    });
+    return;
+  }
+
+  const existing = await prisma.batchPrice.findFirst({ where: { productId: input.productId, label: input.tierLabel } });
+  if (existing) await prisma.batchPrice.update({ where: { id: existing.id }, data: { price: input.price } });
+  else await prisma.batchPrice.create({ data: { id: input.batchId, productId: input.productId, label: input.tierLabel, minQty: 0, price: input.price } });
+  if (tierKey === 'retail') await prisma.product.update({ where: { id: input.productId }, data: { price: input.price } });
 }
 
 export function buildFtsQuery(query: string) {

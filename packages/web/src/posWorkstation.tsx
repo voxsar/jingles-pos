@@ -155,6 +155,7 @@ import {
   calcCartTotals,
   createCartLine,
   createEmptyDenominationCounts,
+  detectProductCodeModifierOrder,
   DENOMINATIONS,
   formatCurrency,
   formatDateTime,
@@ -171,8 +172,7 @@ import {
   getNameInitials,
   NON_CASH_PAYMENT_METHODS,
   PAYMENT_METHOD_LABELS,
-  parsePricePrefixedCode,
-  parseQuantityPrefixedCode,
+  parseModifiedProductCode,
   pickPriceTier,
   recalculateCartLine,
   resolveDefaultCustomerId,
@@ -244,6 +244,8 @@ type VariantSelectionRequest = {
 type UnitSelectionRequest = {
   product: Product;
   variant?: ProductVariant;
+  initialQuantity?: number;
+  priceOverride?: number;
 };
 
 /**
@@ -1495,7 +1497,9 @@ export default function PosWorkstation() {
       }
       const effectivePriceTiers = variant?.priceTiers?.length ? variant.priceTiers : product.priceTiers;
       const tier = pickPriceTier(effectivePriceTiers, tierLabel ? [tierLabel, ...preferredTierLabels] : preferredTierLabels);
-      const quantityToAdd = Math.max(1, Math.floor(requestedQuantity));
+      const quantityToAdd = Number.isFinite(requestedQuantity) && requestedQuantity > 0
+        ? Math.round(requestedQuantity * 1000) / 1000
+        : 1;
       const existing = previous.find((line) => (
         line.productId === product.id
         && (line.variantId ?? null) === (variant?.id ?? null)
@@ -1589,7 +1593,7 @@ export default function PosWorkstation() {
     const prompt = priceOverridePrompt;
     setIsSavingPriceOverride(true);
     try {
-      await submitPriceOverride({
+      const result = await submitPriceOverride({
         code: prompt.code,
         price: prompt.price,
         tierLabel: tier.label,
@@ -1597,7 +1601,27 @@ export default function PosWorkstation() {
         terminalId: session?.terminalId,
         cashierName: session?.user.name,
       });
-      showNotice('success', `${prompt.productName} ${tier.label} will use Rs ${prompt.price} from the next catalog sync.`);
+      setBootstrapData((previous) => previous ? {
+        ...previous,
+        products: previous.products.map((product) => {
+          if (product.id !== result.sku.id) return product;
+          const updateTiers = (tiers: ProductPriceTier[]) => tiers.map((entry) => (
+            entry.label.trim().toLowerCase() === tier.label.trim().toLowerCase()
+              ? { ...entry, price: prompt.price }
+              : entry
+          ));
+          if (result.variant?.id) {
+            return {
+              ...product,
+              variants: (product.variants ?? []).map((variant) => variant.id === result.variant?.id
+                ? { ...variant, priceTiers: updateTiers(variant.priceTiers ?? []) }
+                : variant),
+            };
+          }
+          return { ...product, priceTiers: updateTiers(product.priceTiers) };
+        }),
+      } : previous);
+      showNotice('success', `${prompt.productName} ${tier.label} is now Rs ${prompt.price} in this POS and the inventory database.`);
       setPriceOverridePrompt(null);
     } catch (error) {
       reportCaughtClientError(error, 'pos.pricing.override');
@@ -1660,17 +1684,16 @@ export default function PosWorkstation() {
       return;
     }
 
-    if (priceOverride != null) {
-      // Price was typed up front (the "150-code" shorthand), so add straight
-      // to the cart at that price instead of asking again in the unit modal.
-      addPriceOverrideToCart(product, undefined, priceOverride, explicitQuantity ?? 1);
+    if (explicitQuantity != null) {
+      // Always show the unit dialog, even when the shorthand already supplied
+      // the quantity. It is prefilled so the cashier can verify decimals and a
+      // combined price override can continue into its own confirmation dialog.
+      setUnitSelection({ product, initialQuantity: explicitQuantity, priceOverride });
       return;
     }
 
-    if (explicitQuantity != null) {
-      // Quantity was typed up front (the "25*code" shorthand), so add
-      // straight to the cart instead of asking again in the unit modal.
-      addProductToCart(product, undefined, explicitQuantity);
+    if (priceOverride != null) {
+      addPriceOverrideToCart(product, undefined, priceOverride);
       return;
     }
 
@@ -1713,45 +1736,41 @@ export default function PosWorkstation() {
       return;
     }
 
-    // Sales staff type "qty*code" or "qty@code" ahead of the product code to
-    // add a known quantity in one shot, the shorthand the previous POS used.
-    const prefixed = parseQuantityPrefixedCode(code);
-    const lookupCode = prefixed?.code ?? code;
-    const match = productsByScanCode.get(lookupCode.trim().toLowerCase());
-
-    if (match) {
-      if (match.variant) {
-        addProductToCart(match.product, match.variant, prefixed?.quantity ?? 1);
-        return;
-      }
-
-      handleProductPick(match.product, prefixed ? { quantity: prefixed.quantity } : undefined);
+    const directMatch = productsByScanCode.get(code.trim().toLowerCase());
+    if (directMatch) {
+      if (directMatch.variant) addProductToCart(directMatch.product, directMatch.variant);
+      else handleProductPick(directMatch.product);
       return;
     }
 
-    // No direct or quantity-prefixed match. Sales staff also type
-    // "<price>-<code>" ahead of the General Item (or any other product) to
-    // ring it up at a hand-set price instead of its normal tier — tried only
-    // now, after a direct match has already failed, because a real SKU or
-    // barcode can itself contain the separator (a product coded "7-Up" must
-    // still resolve as itself, not "price 7 for Up").
-    if (priceOverrideSettings.enabled) {
-      // Quantity and price can be combined: `5*150-barcode` means five units
-      // at Rs 150. Strip quantity first, then interpret the configured price
-      // separator only after the whole remaining code failed an exact match.
-      const pricePrefixed = parsePricePrefixedCode(lookupCode, priceOverrideSettings.separator);
-      const priceMatch = pricePrefixed && productsByScanCode.get(pricePrefixed.code.trim().toLowerCase());
-      if (pricePrefixed && priceMatch) {
-        if (priceMatch.variant) {
-          addPriceOverrideToCart(priceMatch.product, priceMatch.variant, pricePrefixed.price, prefixed?.quantity ?? 1);
-        } else {
-          handleProductPick(priceMatch.product, {
-            quantity: prefixed?.quantity,
-            priceOverride: pricePrefixed.price,
+    const modified = parseModifiedProductCode(
+      code,
+      priceOverrideSettings.enabled ? priceOverrideSettings.separator : '',
+    );
+    const match = modified && productsByScanCode.get(modified.code.trim().toLowerCase());
+
+    if (match) {
+      if (match.variant) {
+        if (modified?.quantity != null) {
+          setUnitSelection({
+            product: match.product,
+            variant: match.variant,
+            initialQuantity: modified.quantity,
+            priceOverride: modified.price,
           });
+        } else if (modified?.price != null) {
+          addPriceOverrideToCart(match.product, match.variant, modified.price);
+        } else {
+          addProductToCart(match.product, match.variant);
         }
         return;
       }
+
+      handleProductPick(match.product, {
+        quantity: modified?.quantity,
+        priceOverride: modified?.price,
+      });
+      return;
     }
 
     // An exact scan adds immediately. Anything less exact now follows the
@@ -1806,7 +1825,10 @@ export default function PosWorkstation() {
 
       // Scanner capture owns this submission. Clear the pending modifier just
       // like pressing Enter in the barcode field does after a manual entry.
-      if (barcodeInput) barcodeInput.value = '';
+      if (barcodeInput) {
+        barcodeInput.value = '';
+        barcodeInput.dispatchEvent(new Event('input', { bubbles: true }));
+      }
       handleBarcodeScan(submission);
     },
   });
@@ -1861,10 +1883,15 @@ export default function PosWorkstation() {
 
     if (variantSelection.lineId) {
       applyVariantToCartLine(variantSelection.lineId, variantSelection.product, variant);
-    } else if (variantSelection.priceOverride != null) {
-      addPriceOverrideToCart(variantSelection.product, variant, variantSelection.priceOverride, variantSelection.quantity ?? 1);
     } else if (variantSelection.quantity != null) {
-      addProductToCart(variantSelection.product, variant, variantSelection.quantity);
+      setUnitSelection({
+        product: variantSelection.product,
+        variant,
+        initialQuantity: variantSelection.quantity,
+        priceOverride: variantSelection.priceOverride,
+      });
+    } else if (variantSelection.priceOverride != null) {
+      addPriceOverrideToCart(variantSelection.product, variant, variantSelection.priceOverride);
     } else {
       setUnitSelection({ product: variantSelection.product, variant });
     }
@@ -2417,6 +2444,7 @@ export default function PosWorkstation() {
     || moneyMode != null
     || variantSelection != null
     || unitSelection != null
+    || priceOverridePrompt != null
     || receiptSale != null;
 
   const focusBarcodeInput = useCallback(() => {
@@ -2755,6 +2783,7 @@ export default function PosWorkstation() {
             setIsSearchOpen(true);
           }}
           onHideOutOfStockChange={setHideOutOfStock}
+          priceSeparator={priceOverrideSettings.enabled ? priceOverrideSettings.separator : ''}
           onSubcategoryChange={setActiveSubcategory}
           products={visibleProducts}
           subcategories={subcategoryTiles}
@@ -2895,12 +2924,17 @@ export default function PosWorkstation() {
 
       {unitSelection != null && (
         <UnitSelectionModal
+          initialQuantity={unitSelection.initialQuantity}
           product={unitSelection.product}
           variant={unitSelection.variant}
           shortcuts={actionShortcuts}
           onClose={() => setUnitSelection(null)}
           onConfirm={(quantity, tierLabel) => {
-            addProductQuantityToCart(unitSelection.product, unitSelection.variant, quantity, tierLabel);
+            if (unitSelection.priceOverride != null) {
+              addPriceOverrideToCart(unitSelection.product, unitSelection.variant, unitSelection.priceOverride, quantity);
+            } else {
+              addProductQuantityToCart(unitSelection.product, unitSelection.variant, quantity, tierLabel);
+            }
             setUnitSelection(null);
           }}
         />
@@ -3501,11 +3535,17 @@ type ProductPanelProps = {
   onHideOutOfStockChange: (hideOutOfStock: boolean) => void;
   onOpenSearch: () => void;
   onSubcategoryChange: (nextSubcategory: string | null) => void;
+  priceSeparator: string;
   products: Product[];
   subcategories: CatalogSubcategoryTile[];
 };
 
 function ProductPanel(props: ProductPanelProps) {
+  const [barcodeEntry, setBarcodeEntry] = useState('');
+  const modifierOrder = useMemo(
+    () => detectProductCodeModifierOrder(barcodeEntry, props.priceSeparator),
+    [barcodeEntry, props.priceSeparator],
+  );
   const isRootView = props.activeCategoryId === 'all';
   const isSubcategoryView = props.activeSubcategory != null;
   const selectedCategory = isRootView ? null : props.activeCategory;
@@ -3531,10 +3571,11 @@ function ProductPanel(props: ProductPanelProps) {
         <div className="barcode-focus-row">
           <input
             ref={props.barcodeInputRef}
-            className="glass-input barcode-focus-input"
+            className={`glass-input barcode-focus-input ${modifierOrder.length ? `understood-${modifierOrder.join('-')}` : ''}`}
             aria-label="Barcode entry"
             placeholder="Scan or enter barcode"
-            title="Use qty*code, price-code, or combine both as qty*price-code (for example 5*150-GENERAL)."
+            title="Use qty*code, price-code, or either combined order: 2.5*150-code / 150-2.5*code."
+            onInput={(event) => setBarcodeEntry(event.currentTarget.value)}
             onKeyDown={(event) => {
               if (event.key !== 'Enter') return;
               event.preventDefault();
@@ -3542,8 +3583,18 @@ function ProductPanel(props: ProductPanelProps) {
               if (!code) return;
               props.onBarcodeSubmit(code);
               event.currentTarget.value = '';
+              setBarcodeEntry('');
             }}
           />
+          {modifierOrder.length > 0 && (
+            <div className="barcode-understanding" aria-live="polite">
+              {modifierOrder.map((modifier, index) => (
+                <span className={modifier} key={`${modifier}-${index}`}>
+                  {modifier === 'price' ? 'PRICE UNDERSTOOD' : 'QUANTITY UNDERSTOOD'}
+                </span>
+              ))}
+            </div>
+          )}
           <button className="search-trigger" onClick={props.onOpenSearch}>
             <span className="search-copy">Product search</span>
             <kbd className="kbd">F3</kbd>
@@ -5869,19 +5920,18 @@ function SearchOverlay(
   // "25*code" / "5@code" adds that quantity the moment a result is picked,
   // the same shorthand the barcode field accepts, while the digits before
   // it are stripped so the search itself still runs against the code alone.
-  const prefixedQuery = useMemo(() => parseQuantityPrefixedCode(query), [query]);
-  const queryWithoutQuantity = prefixedQuery?.code ?? query;
+  const modifiedQuery = useMemo(() => parseModifiedProductCode(
+    query,
+    props.priceOverrideSettings.enabled ? props.priceOverrideSettings.separator : '',
+  ), [props.priceOverrideSettings, query]);
+  const queryWithoutQuantity = modifiedQuery?.price == null ? (modifiedQuery?.code ?? query) : query;
 
   // "150-code" / "150-barcode" rings a result up at that price the moment
   // it's picked, the same shorthand the barcode field accepts. Unlike the
   // quantity shorthand, a hyphen can be part of a real SKU or name (e.g.
   // "7-Up", "3M tape"), so this is only ever used as a fallback below, once
   // the typed text has already come up empty as itself.
-  const pricePrefixedQuery = useMemo(() => (
-    !props.priceOverrideSettings.enabled
-      ? null
-      : parsePricePrefixedCode(queryWithoutQuantity, props.priceOverrideSettings.separator)
-  ), [props.priceOverrideSettings, queryWithoutQuantity]);
+  const pricePrefixedQuery = modifiedQuery?.price == null ? null : modifiedQuery;
 
   useEffect(() => {
     const rawTerm = queryWithoutQuantity.trim().toLowerCase();
@@ -5952,10 +6002,15 @@ function SearchOverlay(
         })
         .catch((error) => {
           reportCaughtClientError(error, 'pos.product-search.load');
-          if (!cancelled) {
-            setResults(filterByScope(props.products, rawTerm).slice(0, 24));
-            setIsPriceFallback(false);
+          if (cancelled) return;
+          if (fallbackTerm) {
+            const fallbackRows = filterByScope(props.products, fallbackTerm).slice(0, 24);
+            setResults(fallbackRows);
+            setIsPriceFallback(fallbackRows.length > 0);
+            return;
           }
+          setResults(filterByScope(props.products, rawTerm).slice(0, 24));
+          setIsPriceFallback(false);
         })
         .finally(() => {
           if (!cancelled) {
@@ -5998,11 +6053,11 @@ function SearchOverlay(
       if (index == null) return;
       if (!results[index]) return;
       event.preventDefault();
-      props.onPick(results[index], prefixedQuery?.quantity, priceOverride);
+      props.onPick(results[index], modifiedQuery?.quantity, priceOverride);
     };
     window.addEventListener('keydown', handlePickerKey, true);
     return () => window.removeEventListener('keydown', handlePickerKey, true);
-  }, [pickerWindow, prefixedQuery, priceOverride, props, results]);
+  }, [modifiedQuery, pickerWindow, priceOverride, props, results]);
 
   return (
     <ModalShell onClose={props.onClose} title="Search products" width="wide">
@@ -6019,7 +6074,7 @@ function SearchOverlay(
             onChange={(event) => setQuery(event.target.value)}
             onKeyDown={(event) => {
               if (event.key === 'Enter' && results[0]) {
-                props.onPick(results[0], prefixedQuery?.quantity, priceOverride);
+                props.onPick(results[0], modifiedQuery?.quantity, priceOverride);
               }
             }}
           />
@@ -6033,7 +6088,7 @@ function SearchOverlay(
             <>
               {' '}Or lead with a price - 150{props.priceOverrideSettings.separator}GENERAL - to ring it up at that
               price; tried only once the text as typed matches nothing on its own.
-              {' '}Combine both as 5*150{props.priceOverrideSettings.separator}barcode.
+              {' '}Combine either way as 2.5*150{props.priceOverrideSettings.separator}barcode or 150{props.priceOverrideSettings.separator}2.5*barcode.
             </>
           )}
         </div>
@@ -6096,13 +6151,18 @@ function SearchOverlay(
 }
 
 function UnitSelectionModal(props: {
+  initialQuantity?: number;
   product: Product;
   variant?: ProductVariant;
   shortcuts: POSActionShortcuts;
   onClose: () => void;
   onConfirm: (quantity: number, tierLabel?: string) => void;
 }) {
-  const [quantity, setQuantity] = useState(1);
+  const [quantity, setQuantity] = useState(() => (
+    Number.isFinite(props.initialQuantity) && (props.initialQuantity ?? 0) > 0
+      ? props.initialQuantity!
+      : 1
+  ));
   const quantityRef = useRef<HTMLInputElement>(null);
   const unitLabel = props.product.unitLabel || 'unit';
 
@@ -6182,10 +6242,14 @@ function UnitSelectionModal(props: {
             ref={quantityRef}
             className="glass-input quick-quantity-input"
             type="number"
-            min={1}
+            min={0.001}
+            step="any"
             max={Math.max(1, props.variant?.stockOnHand ?? props.product.stockOnHand)}
             value={quantity}
-            onChange={(event) => setQuantity(Math.max(1, Number(event.target.value) || 1))}
+            onChange={(event) => {
+              const next = Number(event.target.value);
+              setQuantity(Number.isFinite(next) && next > 0 ? next : 0.001);
+            }}
           />
         </LabelBlock>
         <div className="quick-picker-help">
@@ -6365,14 +6429,17 @@ function StaffSelectionModal(props: {
 
 function StaffDirectoryModal(props: { users: POSUser[]; onClose: () => void }) {
   const [query, setQuery] = useState('');
-  const visible = props.users.filter((person) => (
+  const syncedStaff = props.users.filter((person) => (
+    person.isSalesman !== false || ['CASHIER', 'BOTH', 'ADMIN'].includes(person.accessScope ?? 'BOTH')
+  ));
+  const visible = syncedStaff.filter((person) => (
     `${person.code} ${person.name} ${person.initials} ${person.email ?? ''} ${person.role}`
       .toLowerCase()
       .includes(query.trim().toLowerCase())
   ));
 
   return (
-    <ModalShell onClose={props.onClose} title={`Staff (${props.users.length})`} width="wide">
+    <ModalShell onClose={props.onClose} title={`Staff (${syncedStaff.length})`} width="wide">
       <div className="quick-picker-stack">
         <input
           autoFocus
@@ -9492,6 +9559,10 @@ function ReceiptModal(
                 <strong>{formatCurrency(payment.amount)}</strong>
               </div>
             ))}
+          </div>
+          <div className="receipt-screen-tendered">
+            <span>Tendered</span>
+            <strong>{formatCurrency(tenderedAmount)}</strong>
           </div>
           <div className={`receipt-screen-balance ${balanceDue === 0 ? 'settled' : ''}`}>
             <span>Balance</span>

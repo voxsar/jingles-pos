@@ -9,6 +9,7 @@ import {
   findSaleByReceiptScan,
   formatShiftReference,
   generateReceiptNumber,
+  parseModifiedProductCode,
   parsePricePrefixedCode,
   parseQuantityPrefixedCode,
   pickPriceTier,
@@ -25,6 +26,11 @@ describe('appendScanToPendingBarcodeModifier', () => {
   it('appends a scan to a pending enabled price override', () => {
     expect(appendScanToPendingBarcodeModifier('150-', '1234567890123')).toBe('150-1234567890123');
     expect(appendScanToPendingBarcodeModifier('99.50 # ', 'GENERAL', '#')).toBe('99.50 #GENERAL');
+  });
+
+  it('appends a scan after combined decimal modifiers in either direction', () => {
+    expect(appendScanToPendingBarcodeModifier('2.5*150-', '285')).toBe('2.5*150-285');
+    expect(appendScanToPendingBarcodeModifier('3-500*', '285')).toBe('3-500*285');
   });
 
   it('does not append arbitrary input or a disabled price modifier', () => {
@@ -63,6 +69,10 @@ describe('parseQuantityPrefixedCode', () => {
     expect(parseQuantityPrefixedCode(' 12 * SKU-1 ')).toEqual({ quantity: 12, code: 'SKU-1' });
   });
 
+  it('supports decimal quantities', () => {
+    expect(parseQuantityPrefixedCode('2.5*285')).toEqual({ quantity: 2.5, code: '285' });
+  });
+
   it('returns null for a plain code, so ordinary scans and searches pass through', () => {
     expect(parseQuantityPrefixedCode('3RL')).toBeNull();
     expect(parseQuantityPrefixedCode('1234567890123')).toBeNull();
@@ -72,6 +82,13 @@ describe('parseQuantityPrefixedCode', () => {
   it('rejects a zero quantity or an empty code', () => {
     expect(parseQuantityPrefixedCode('0*SKU-1')).toBeNull();
     expect(parseQuantityPrefixedCode('25*')).toBeNull();
+  });
+});
+
+describe('parseModifiedProductCode', () => {
+  it('detects quantity and price in either order without losing the product code', () => {
+    expect(parseModifiedProductCode('2.5*150-285')).toEqual({ code: '285', quantity: 2.5, price: 150, order: ['quantity', 'price'] });
+    expect(parseModifiedProductCode('3-500*285')).toEqual({ code: '285', quantity: 500, price: 3, order: ['price', 'quantity'] });
   });
 });
 

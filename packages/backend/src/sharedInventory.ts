@@ -427,7 +427,7 @@ async function fetchSharedCatalogSnapshotFromSource(): Promise<SharedCatalogSnap
       [SHELF_READY_STATE],
     ),
     inventory.query<{ id: string; code: string; name: string }>(`SELECT id, code, name FROM branches WHERE is_active = TRUE ORDER BY code`),
-    inventory.query<{ id: string; email: string; role: string; access_scope: string; is_salesman: boolean }>(`SELECT id, email, role, access_scope, is_salesman FROM users WHERE is_active = TRUE AND access_scope IN ('CASHIER','BOTH','ADMIN') ORDER BY email`),
+    inventory.query<{ id: string; email: string; role: string; access_scope: string; is_salesman: boolean }>(`SELECT id, email, role, access_scope, is_salesman FROM users WHERE is_active = TRUE AND (access_scope IN ('CASHIER','BOTH','ADMIN') OR is_salesman = TRUE) ORDER BY email`),
     inventory.query<any>(`SELECT id, name, type, value, applies_to, conditions, priority, stackable, valid_from, valid_to FROM pricing_overlays WHERE status = 'active' AND (valid_from IS NULL OR valid_from <= NOW()) AND (valid_to IS NULL OR valid_to >= NOW()) ORDER BY priority DESC`),
   ]);
 
@@ -512,7 +512,7 @@ async function fetchSharedCatalogSnapshotFromSource(): Promise<SharedCatalogSnap
         id: user.id, code: `INV-${user.id.slice(0, 8).toUpperCase()}`, email: user.email, name,
         initials: name.split(/\s+/).map((part) => part[0]).join('').slice(0, 3).toUpperCase(),
         role: user.access_scope === 'ADMIN' ? UserRole.MANAGER : UserRole.CASHIER,
-        accessScope: user.access_scope as 'CASHIER' | 'BOTH' | 'ADMIN',
+        accessScope: user.access_scope as 'CASHIER' | 'INVENTORY' | 'BOTH' | 'ADMIN',
         isSalesman: user.is_salesman,
       };
     }),
