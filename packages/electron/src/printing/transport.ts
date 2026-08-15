@@ -203,9 +203,32 @@ async function sendThroughCups(payload: Buffer, printerName: string, documentNam
   }
 }
 
+function normalizeWindowsPortPath(devicePath: string) {
+  if (os.platform() !== 'win32') return null;
+  const match = /^(?:\\\\\.\\)?(COM|LPT)([1-9]\d*)$/i.exec(devicePath.trim());
+  return match ? `\\\\.\\${match[1]!.toUpperCase()}${match[2]}` : null;
+}
+
+async function openWindowsPort(devicePath: string) {
+  // r+ maps to OPEN_EXISTING. Windows communication devices cannot be opened
+  // with the create/truncate semantics used by writeFile(..., { flag: 'w' }).
+  return fs.promises.open(devicePath, 'r+');
+}
+
 async function sendToDevice(payload: Buffer, devicePath: string) {
-  await fs.promises.writeFile(devicePath, payload);
-  return payload.length;
+  const windowsPortPath = normalizeWindowsPortPath(devicePath);
+  if (!windowsPortPath) {
+    await fs.promises.writeFile(devicePath, payload);
+    return payload.length;
+  }
+
+  const handle = await openWindowsPort(windowsPortPath);
+  try {
+    const { bytesWritten } = await handle.write(payload, 0, payload.length, null);
+    return bytesWritten;
+  } finally {
+    await handle.close();
+  }
 }
 
 /** Removes spool files left behind by a crash or a killed job. */
@@ -302,6 +325,12 @@ export async function probePrinter(printer: POSPrinterConfig): Promise<void> {
 
   if (printer.transport === 'device') {
     const devicePath = printer.address.trim();
+    const windowsPortPath = normalizeWindowsPortPath(devicePath);
+    if (windowsPortPath) {
+      const handle = await openWindowsPort(windowsPortPath);
+      await handle.close();
+      return;
+    }
     if (!devicePath || !fs.existsSync(devicePath)) {
       throw new Error(`No device exists at ${devicePath || '(unset)'}.`);
     }
@@ -312,3 +341,5 @@ export async function probePrinter(printer: POSPrinterConfig): Promise<void> {
     throw new Error('No spooler printer name is configured.');
   }
 }
+
+export const __testing = { normalizeWindowsPortPath };

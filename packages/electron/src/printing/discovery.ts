@@ -14,6 +14,8 @@
 import dns from 'dns';
 import net from 'net';
 import os from 'os';
+import { execFile } from 'child_process';
+import { promisify } from 'util';
 import type {
   POSDiscoveredPrinter,
   POSPrinterDiscoveryResult,
@@ -39,6 +41,7 @@ const RAW_PRINT_PORT = 9100;
 const SCAN_CONCURRENCY = 48;
 const SCAN_TIMEOUT_MS = 400;
 const MAX_SCANNED_HOSTS = 1024;
+const execFileAsync = promisify(execFile);
 
 const LABEL_PRINTER_HINTS = [
   'zebra', 'zpl', 'zd220', 'zd230', 'zd420', 'zd421', 'zd621', 'zt230', 'zt411',
@@ -89,6 +92,59 @@ async function listSystemPrinters(webContents: PrinterEnumerationSource | null):
       source: 'system' as const,
     };
   });
+}
+
+type WindowsDevicePort = {
+  address: string;
+  deviceName: string;
+  kind: 'serial' | 'parallel';
+};
+
+function parseWindowsDeviceMap(output: string, kind: WindowsDevicePort['kind']): WindowsDevicePort[] {
+  const expectedPrefix = kind === 'serial' ? 'COM' : 'LPT';
+  return output
+    .split(/\r?\n/)
+    .map((line) => /^\s*(\S+)\s+REG_\w+\s+(\S+)\s*$/.exec(line))
+    .filter((match): match is RegExpExecArray => Boolean(match))
+    .map((match) => ({ deviceName: match[1]!, address: match[2]!.toUpperCase(), kind }))
+    .filter((port) => port.address.startsWith(expectedPrefix))
+    .sort((left, right) => left.address.localeCompare(right.address, undefined, { numeric: true }));
+}
+
+async function queryWindowsDeviceMap(registryPath: string, kind: WindowsDevicePort['kind']) {
+  try {
+    const { stdout } = await execFileAsync('reg.exe', ['query', registryPath], {
+      windowsHide: true,
+      encoding: 'utf8',
+    });
+    return parseWindowsDeviceMap(stdout, kind);
+  } catch (error: any) {
+    // reg.exe uses exit code 1 when the device-map key does not exist, which is
+    // normal on systems without serial or parallel hardware.
+    if (error?.code === 1) return [];
+    throw error;
+  }
+}
+
+async function listWindowsDevicePorts(): Promise<POSDiscoveredPrinter[]> {
+  if (os.platform() !== 'win32') return [];
+
+  const [serial, parallel] = await Promise.all([
+    queryWindowsDeviceMap('HKLM\\HARDWARE\\DEVICEMAP\\SERIALCOMM', 'serial'),
+    queryWindowsDeviceMap('HKLM\\HARDWARE\\DEVICEMAP\\PARALLEL PORTS', 'parallel'),
+  ]);
+
+  return [...serial, ...parallel].map((port) => ({
+    name: `${port.kind === 'serial' ? 'Serial' : 'Parallel'} port ${port.address}`,
+    transport: 'device' as const,
+    address: port.address,
+    port: 0,
+    description: `Windows device ${port.deviceName}`,
+    suggestedLanguage: 'escpos' as const,
+    suggestedRole: 'receipt' as const,
+    isSystemDefault: false,
+    source: 'device' as const,
+  }));
 }
 
 /** IPv4 networks worth sweeping: local, non-loopback, and no larger than a /22. */
@@ -247,8 +303,14 @@ export async function discoverPrinters(
     return [] as POSDiscoveredPrinter[];
   });
 
+  const devicePorts = await listWindowsDevicePorts().catch((error: unknown) => {
+    reportElectronError(error, 'electron.printer.discovery-device-ports');
+    warnings.push(`Could not read Windows device ports: ${error instanceof Error ? error.message : String(error)}`);
+    return [] as POSDiscoveredPrinter[];
+  });
+
   if (options.includeNetwork === false) {
-    return { printers: systemPrinters, scannedSubnets: [], warnings };
+    return { printers: [...systemPrinters, ...devicePorts], scannedSubnets: [], warnings };
   }
 
   const network = await scanNetworkPrinters().catch((error: unknown) => {
@@ -258,8 +320,10 @@ export async function discoverPrinters(
   });
 
   return {
-    printers: [...systemPrinters, ...network.printers],
+    printers: [...systemPrinters, ...devicePorts, ...network.printers],
     scannedSubnets: network.subnets,
     warnings: [...warnings, ...network.warnings],
   };
 }
+
+export const __testing = { parseWindowsDeviceMap };

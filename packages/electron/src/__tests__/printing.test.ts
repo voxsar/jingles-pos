@@ -1,6 +1,8 @@
 import { DEFAULT_POS_PRINTER_CONFIG, type POSPrinterConfig } from '@jingles/shared';
 import { encodeReceipt, encodeDrawerKick, __testing as escposTesting } from '../printing/escpos';
 import { encodeLabel, __testing as zplTesting } from '../printing/zpl';
+import { __testing as discoveryTesting } from '../printing/discovery';
+import { __testing as transportTesting } from '../printing/transport';
 
 const receiptPrinter: POSPrinterConfig = {
   ...DEFAULT_POS_PRINTER_CONFIG,
@@ -19,6 +21,30 @@ const labelPrinter: POSPrinterConfig = {
   labelHeightMm: 25,
   dpi: 203,
 };
+
+describe('Windows printer port discovery', () => {
+  it('parses serial and parallel device-map entries', () => {
+    const serial = discoveryTesting.parseWindowsDeviceMap(`
+HKEY_LOCAL_MACHINE\\HARDWARE\\DEVICEMAP\\SERIALCOMM
+    \\Device\\Serial0    REG_SZ    COM3
+    \\Device\\VCP0       REG_SZ    COM12
+`, 'serial');
+    const parallel = discoveryTesting.parseWindowsDeviceMap(`
+HKEY_LOCAL_MACHINE\\HARDWARE\\DEVICEMAP\\PARALLEL PORTS
+    \\Device\\Parallel0  REG_SZ    LPT1
+`, 'parallel');
+
+    expect(serial.map((port) => port.address)).toEqual(['COM3', 'COM12']);
+    expect(parallel.map((port) => port.address)).toEqual(['LPT1']);
+  });
+
+  it('normalizes Windows COM and LPT names to device namespace paths', () => {
+    expect(transportTesting.normalizeWindowsPortPath('COM3')).toBe('\\\\.\\COM3');
+    expect(transportTesting.normalizeWindowsPortPath('\\\\.\\COM12')).toBe('\\\\.\\COM12');
+    expect(transportTesting.normalizeWindowsPortPath('LPT1')).toBe('\\\\.\\LPT1');
+    expect(transportTesting.normalizeWindowsPortPath('USB001')).toBeNull();
+  });
+});
 
 describe('ESC/POS encoding', () => {
   it('opens with an initialize command and closes with a cut', () => {

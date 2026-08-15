@@ -681,7 +681,7 @@ export interface POSDiscoveredPrinter {
   suggestedLanguage: POSPrinterLanguage;
   suggestedRole: POSPrinterRole;
   isSystemDefault: boolean;
-  source: 'system' | 'network';
+  source: 'system' | 'network' | 'device';
 }
 
 export interface POSPrinterDiscoveryResult {

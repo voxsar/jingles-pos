@@ -5011,7 +5011,7 @@ function CustomerDisplayCard(
 const TRANSPORT_LABELS: Record<POSPrinterTransport, string> = {
   network: 'Network (TCP 9100)',
   system: 'Installed printer (USB)',
-  device: 'Device path / serial port',
+  device: 'Serial / parallel / device port',
 };
 
 function PrinterSettingsCard(
@@ -5030,7 +5030,7 @@ function PrinterSettingsCard(
 
   const runDiscovery = async (includeNetwork: boolean) => {
     setIsDiscovering(true);
-    setDiscoveryNote(includeNetwork ? 'Scanning the local network for printers...' : 'Reading installed printers...');
+    setDiscoveryNote(includeNetwork ? 'Scanning printers, device ports, and the local network...' : 'Reading installed printers and device ports...');
     try {
       const result = await discoverPrinters({ includeNetwork });
       setDiscovered(result.printers);
@@ -5104,7 +5104,7 @@ function PrinterSettingsCard(
         <>
           <div className="settings-inline-actions">
             <button className="ghost-button" disabled={isDiscovering} onClick={() => void runDiscovery(false)}>
-              Find installed printers
+              Find printers and ports
             </button>
             <button className="ghost-button" disabled={isDiscovering} onClick={() => void runDiscovery(true)}>
               {isDiscovering ? 'Scanning...' : 'Scan network too'}
@@ -5273,7 +5273,7 @@ function PrinterConfigRow(
               ? 'Host or IP address'
               : printer.transport === 'system'
                 ? 'Installed printer name'
-                : 'Device path or port'
+                : 'Serial, parallel, or device port'
           }
         >
           <input
@@ -5284,7 +5284,7 @@ function PrinterConfigRow(
                 ? '192.168.1.50'
                 : printer.transport === 'system'
                   ? 'EPSON TM-T88VI Receipt'
-                  : '/dev/usb/lp0'
+                  : 'COM3, LPT1, or /dev/usb/lp0'
             }
             value={printer.address}
             onChange={(event) => props.onChange({ address: event.target.value })}
@@ -5421,7 +5421,7 @@ function PrinterConfigRow(
           ? 'Sent through the Windows spooler as a RAW job, so the vendor driver does not re-render the bytes.'
           : printer.transport === 'network'
             ? 'Sent as raw bytes over a TCP socket, the standard port for Epson and Zebra network printers.'
-            : 'Written directly to the device. Serial printers must already be configured at the right baud rate.'}
+            : 'Written directly to the selected device. Serial printers must already be configured at the right baud rate.'}
       </div>
     </div>
   );
