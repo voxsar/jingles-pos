@@ -39,6 +39,8 @@ export async function ensureLocalSchemaCompat() {
   await ensureColumn('SyncDeviceState', 'online', 'BOOLEAN NOT NULL DEFAULT false');
   await ensureColumn('SyncDeviceState', 'lastError', 'TEXT');
   await ensureColumn('POSUser', 'password_hash', 'TEXT');
+  await ensureColumn('POSUser', 'access_scope', "TEXT NOT NULL DEFAULT 'BOTH'");
+  await ensureColumn('POSUser', 'is_salesman', 'BOOLEAN NOT NULL DEFAULT true');
   await ensureColumn('Product', 'variants_json', 'TEXT');
   await ensureColumn('HeldSaleLine', 'variantId', 'TEXT');
   await ensureColumn('HeldSaleLine', 'variantCode', 'TEXT');
