@@ -31,6 +31,46 @@ import { reportClientError } from './clientErrorReporter';
 const BASE = resolveBackendUrl('/api/pos');
 const TOKEN_STORAGE_KEY = 'jingles-pos-auth-token';
 
+type ApiErrorPayload = {
+	error?: string;
+	diagnosticId?: string;
+	diagnostic?: {
+		name?: string;
+		message?: string;
+		stack?: string;
+		code?: string;
+	};
+};
+
+function buildResponseError(payload: ApiErrorPayload, status: number) {
+	const diagnosticId = payload.diagnosticId?.trim();
+	const message = payload.error || `HTTP ${status}`;
+	const requestError = new Error(
+		diagnosticId ? `${message} (Diagnostic ID: ${diagnosticId})` : message,
+	);
+	if (payload.diagnostic?.stack) {
+		requestError.stack = [
+			requestError.stack,
+			`--- POS backend stack${diagnosticId ? ` [${diagnosticId}]` : ''} ---`,
+			payload.diagnostic.stack,
+		].filter(Boolean).join('\n');
+	}
+	return { requestError, diagnosticId, diagnostic: payload.diagnostic };
+}
+
+function buildErrorContext(
+	response: Response,
+	payload: ApiErrorPayload,
+): Record<string, string | number | boolean | null | undefined> {
+	return {
+		statusText: response.statusText,
+		diagnosticId: payload.diagnosticId,
+		backendErrorName: payload.diagnostic?.name,
+		backendErrorCode: payload.diagnostic?.code,
+		backendMessage: payload.diagnostic?.message,
+	};
+}
+
 function readStoredToken(): string | null {
 	if (typeof window === 'undefined') return null;
 	return window.localStorage.getItem(TOKEN_STORAGE_KEY);
@@ -57,12 +97,14 @@ async function getJson<T>(path: string, options?: { token?: string | null }): Pr
 		throw error;
 	}
 	if (!response.ok) {
-		const error = await response.json().catch(() => ({ error: `HTTP ${response.status}` })) as { error?: string };
-		const requestError = new Error(error.error || `HTTP ${response.status}`);
+		const error = await response.json().catch(() => ({ error: `HTTP ${response.status}` })) as ApiErrorPayload;
+		const { requestError, diagnosticId } = buildResponseError(error, response.status);
 		console.error(`[POS API] GET ${path} failed`, {
 			status: response.status,
 			statusText: response.statusText,
 			message: requestError.message,
+			diagnosticId,
+			backendDiagnostic: error.diagnostic,
 		});
 		if (response.status >= 500) {
 			reportClientError(requestError, {
@@ -70,7 +112,7 @@ async function getJson<T>(path: string, options?: { token?: string | null }): Pr
 				route: path,
 				method: 'GET',
 				status: response.status,
-				context: { statusText: response.statusText },
+				context: buildErrorContext(response, error),
 			});
 		}
 		throw requestError;
@@ -95,12 +137,14 @@ async function postJson<T>(path: string, payload: unknown, options?: { token?: s
 		throw error;
 	}
 	if (!response.ok) {
-		const error = await response.json().catch(() => ({ error: `HTTP ${response.status}` })) as { error?: string };
-		const requestError = new Error(error.error || `HTTP ${response.status}`);
+		const error = await response.json().catch(() => ({ error: `HTTP ${response.status}` })) as ApiErrorPayload;
+		const { requestError, diagnosticId } = buildResponseError(error, response.status);
 		console.error(`[POS API] POST ${path} failed`, {
 			status: response.status,
 			statusText: response.statusText,
 			message: requestError.message,
+			diagnosticId,
+			backendDiagnostic: error.diagnostic,
 		});
 		if (response.status >= 500) {
 			reportClientError(requestError, {
@@ -108,7 +152,7 @@ async function postJson<T>(path: string, payload: unknown, options?: { token?: s
 				route: path,
 				method: 'POST',
 				status: response.status,
-				context: { statusText: response.statusText },
+				context: buildErrorContext(response, error),
 			});
 		}
 		throw requestError;
@@ -133,12 +177,14 @@ async function patchJson<T>(path: string, payload: unknown, options?: { token?: 
 		throw error;
 	}
 	if (!response.ok) {
-		const error = await response.json().catch(() => ({ error: `HTTP ${response.status}` })) as { error?: string };
-		const requestError = new Error(error.error || `HTTP ${response.status}`);
+		const error = await response.json().catch(() => ({ error: `HTTP ${response.status}` })) as ApiErrorPayload;
+		const { requestError, diagnosticId } = buildResponseError(error, response.status);
 		console.error(`[POS API] PATCH ${path} failed`, {
 			status: response.status,
 			statusText: response.statusText,
 			message: requestError.message,
+			diagnosticId,
+			backendDiagnostic: error.diagnostic,
 		});
 		if (response.status >= 500) {
 			reportClientError(requestError, {
@@ -146,7 +192,7 @@ async function patchJson<T>(path: string, payload: unknown, options?: { token?: 
 				route: path,
 				method: 'PATCH',
 				status: response.status,
-				context: { statusText: response.statusText },
+				context: buildErrorContext(response, error),
 			});
 		}
 		throw requestError;

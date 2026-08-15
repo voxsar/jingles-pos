@@ -13,6 +13,7 @@ import {
   getCachedAuthUserForToken,
   storeAuthSession,
 } from '../services/authCache';
+import { respondWithServerError } from '../services/serverErrorLog';
 
 const router = Router();
 const AUTH_SECRET =
@@ -547,7 +548,12 @@ router.post('/login', async (req: Request, res: Response) => {
 
       const refreshedUser = await prisma.pOSUser.findUnique({ where: { id: user.id } });
       if (!refreshedUser) {
-        return res.status(500).json({ error: 'POS login failed' });
+        return respondWithServerError(
+          req,
+          res,
+          new Error(`POS user ${user.id} disappeared while issuing a local session`),
+          'POS login failed',
+        );
       }
 
       return res.json(await issueLocalSession(refreshedUser));
@@ -585,8 +591,7 @@ router.post('/login', async (req: Request, res: Response) => {
 
     return res.status(401).json({ error: buildUnknownWorkstationUserError() });
   } catch (error) {
-    console.error(error);
-    return res.status(500).json({ error: 'POS login failed' });
+    return respondWithServerError(req, res, error, 'POS login failed');
   }
 });
 
@@ -607,8 +612,7 @@ router.post('/unlock', authenticate, async (req: AuthenticatedRequest, res: Resp
 
     return res.status(422).json({ error: 'Incorrect PIN' });
   } catch (error) {
-    console.error(error);
-    return res.status(500).json({ error: 'Unable to unlock the workstation' });
+    return respondWithServerError(req, res, error, 'Unable to unlock the workstation');
   }
 });
 
@@ -671,8 +675,7 @@ router.post('/sync-token', authenticate, async (req: AuthenticatedRequest, res: 
       syncAuthIdentity: upstreamLogin.user.email,
     });
   } catch (error) {
-    console.error(error);
-    return res.status(500).json({ error: 'Failed to refresh host sync authentication' });
+    return respondWithServerError(req, res, error, 'Failed to refresh host sync authentication');
   }
 });
 
@@ -689,8 +692,7 @@ router.get('/me', authenticate, async (req: AuthenticatedRequest, res: Response)
 
     return res.json(mapAuthUser(user));
   } catch (error) {
-    console.error(error);
-    return res.status(500).json({ error: 'Failed to load the authenticated POS user' });
+    return respondWithServerError(req, res, error, 'Failed to load the authenticated POS user');
   }
 });
 

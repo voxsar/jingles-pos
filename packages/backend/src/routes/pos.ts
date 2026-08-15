@@ -44,6 +44,7 @@ import {
   searchLocalCatalog,
 } from '../services/localCatalog';
 import { authenticate } from './auth';
+import { respondWithServerError } from '../services/serverErrorLog';
 
 const router = Router();
 
@@ -87,7 +88,7 @@ router.use((req: Request, res: Response, next: NextFunction) => {
   void authenticate(req, res, next);
 });
 
-router.use(async (_req: Request, res: Response, next: NextFunction) => {
+router.use(async (req: Request, res: Response, next: NextFunction) => {
   try {
     await ensureSeedData();
     if (!isLocalPosBackendMode()) {
@@ -95,12 +96,14 @@ router.use(async (_req: Request, res: Response, next: NextFunction) => {
     }
     next();
   } catch (error) {
-    console.error(error);
-    res.status(500).json({
-      error: isLocalPosBackendMode()
+    return respondWithServerError(
+      req,
+      res,
+      error,
+      isLocalPosBackendMode()
         ? 'The local POS backend could not prepare its catalog cache.'
         : 'Shared inventory catalog is unavailable',
-    });
+    );
   }
 });
 
@@ -595,8 +598,7 @@ router.get('/bootstrap', async (req: Request, res: Response) => {
 
     return res.json(payload);
   } catch (error) {
-    console.error(error);
-    return res.status(500).json({ error: 'Failed to bootstrap POS workstation' });
+    return respondWithServerError(req, res, error, 'Failed to bootstrap POS workstation');
   }
 });
 
@@ -643,8 +645,7 @@ router.get('/products/search', async (req: Request, res: Response) => {
 
     return res.json(rows);
   } catch (error) {
-    console.error(error);
-    return res.status(500).json({ error: 'Product search failed' });
+    return respondWithServerError(req, res, error, 'Product search failed');
   }
 });
 
@@ -660,8 +661,7 @@ router.get('/products/barcode/:barcode', async (req: Request, res: Response) => 
 
     return res.json(row);
   } catch (error) {
-    console.error(error);
-    return res.status(500).json({ error: 'Barcode lookup failed' });
+    return respondWithServerError(req, res, error, 'Barcode lookup failed');
   }
 });
 
@@ -716,12 +716,7 @@ router.post('/shifts/open', async (req: Request, res: Response) => {
       }
     }
 
-    logPosRouteError('Open shift', error, {
-      terminalId: req.body.terminalId,
-      cashierId: req.body.cashierId,
-      requestedShiftId: req.body.shiftId,
-    });
-    return res.status(500).json({ error: 'Failed to open shift' });
+    return respondWithServerError(req, res, error, 'Failed to open shift');
   }
 });
 
@@ -748,8 +743,7 @@ router.post('/shifts/:id/close', async (req: Request, res: Response) => {
     const shift = await prisma.pOSShift.findUnique({ where: { id: req.params.id } });
     return res.json(shift ? mapShift(shift, userMap) : null);
   } catch (error) {
-    console.error(error);
-    return res.status(500).json({ error: 'Failed to close shift' });
+    return respondWithServerError(req, res, error, 'Failed to close shift');
   }
 });
 
@@ -853,8 +847,7 @@ router.post('/shifts/:id/cash-movement', async (req: Request, res: Response) => 
     const report = await buildZReport(shift.id);
     return res.status(201).json(report);
   } catch (error) {
-    console.error(error);
-    return res.status(500).json({ error: 'Failed to record the cash movement' });
+    return respondWithServerError(req, res, error, 'Failed to record the cash movement');
   }
 });
 
@@ -863,8 +856,7 @@ router.get('/shifts/:id/drawer', async (req: Request, res: Response) => {
   try {
     return res.json(await buildDrawerContents(req.params.id));
   } catch (error) {
-    console.error(error);
-    return res.status(500).json({ error: 'Failed to read the drawer contents' });
+    return respondWithServerError(req, res, error, 'Failed to read the drawer contents');
   }
 });
 
@@ -904,8 +896,7 @@ router.post('/shifts/:id/end-session', async (req: Request, res: Response) => {
     const closedShift = await prisma.pOSShift.findUnique({ where: { id: shift.id } });
     return res.json(closedShift ? mapShift(closedShift, userMap) : null);
   } catch (error) {
-    console.error(error);
-    return res.status(500).json({ error: 'Failed to end the active session' });
+    return respondWithServerError(req, res, error, 'Failed to end the active session');
   }
 });
 
@@ -928,8 +919,7 @@ router.get('/shifts/active', async (req: Request, res: Response) => {
     const userMap = await getUserMap();
     return res.json(mapShift(shift, userMap));
   } catch (error) {
-    console.error(error);
-    return res.status(500).json({ error: 'Failed to load active shift' });
+    return respondWithServerError(req, res, error, 'Failed to load active shift');
   }
 });
 
@@ -939,11 +929,10 @@ router.get('/shifts/:id/z-report', async (req: Request, res: Response) => {
     const report = await buildZReport(req.params.id);
     return res.json(report);
   } catch (error: any) {
-    console.error(error);
     if (error.message === 'Shift not found') {
       return res.status(404).json({ error: error.message });
     }
-    return res.status(500).json({ error: 'Failed to build Z-report' });
+    return respondWithServerError(req, res, error, 'Failed to build Z-report');
   }
 });
 
@@ -988,8 +977,7 @@ router.get('/z-reports', async (req: Request, res: Response) => {
     })).filter((slot) => slot.report != null);
     return res.json(slots);
   } catch (error) {
-    console.error(error);
-    return res.status(500).json({ error: 'Failed to load Z-report slots' });
+    return respondWithServerError(req, res, error, 'Failed to load Z-report slots');
   }
 });
 
@@ -1015,7 +1003,7 @@ router.get('/legacy-records', async (req: Request, res: Response) => {
       items: items.map((item) => ({ ...item, payload: JSON.parse(item.payload) })),
     });
   } catch (error: any) {
-    return res.status(500).json({ error: error.message ?? 'Failed to load legacy POS records' });
+    return respondWithServerError(req, res, error, 'Failed to load legacy POS records');
   }
 });
 
@@ -1049,12 +1037,11 @@ router.post('/held-sales', async (req: Request, res: Response) => {
 
     return res.status(201).json(held ? mapHeldSale(held, userMap) : null);
   } catch (error) {
-    console.error(error);
-    return res.status(500).json({ error: 'Failed to hold bill' });
+    return respondWithServerError(req, res, error, 'Failed to hold bill');
   }
 });
 
-router.get('/held-sales', async (_req: Request, res: Response) => {
+router.get('/held-sales', async (req: Request, res: Response) => {
   try {
     await ensureSeedData();
     const userMap = await getUserMap();
@@ -1065,8 +1052,7 @@ router.get('/held-sales', async (_req: Request, res: Response) => {
     });
     return res.json(held.map((sale) => mapHeldSale(sale, userMap)));
   } catch (error) {
-    console.error(error);
-    return res.status(500).json({ error: 'Failed to load held bills' });
+    return respondWithServerError(req, res, error, 'Failed to load held bills');
   }
 });
 
@@ -1094,8 +1080,7 @@ router.post('/held-sales/:id/recall', async (req: Request, res: Response) => {
     const userMap = await getUserMap();
     return res.json(mapHeldSale(held, userMap));
   } catch (error) {
-    console.error(error);
-    return res.status(500).json({ error: 'Failed to recall held bill' });
+    return respondWithServerError(req, res, error, 'Failed to recall held bill');
   }
 });
 
@@ -1158,8 +1143,7 @@ router.post('/sales', async (req: Request, res: Response) => {
     const userMap = await getUserMap();
     return res.status(201).json(sale ? mapSale(sale, userMap) : null);
   } catch (error) {
-    console.error(error);
-    return res.status(500).json({ error: 'Failed to complete sale' });
+    return respondWithServerError(req, res, error, 'Failed to complete sale');
   }
 });
 
@@ -1185,8 +1169,7 @@ router.get('/sales', async (req: Request, res: Response) => {
     const userMap = await getUserMap();
     return res.json(sales.map((sale) => mapSale(sale, userMap)));
   } catch (error) {
-    console.error(error);
-    return res.status(500).json({ error: 'Failed to load sales' });
+    return respondWithServerError(req, res, error, 'Failed to load sales');
   }
 });
 
@@ -1205,8 +1188,7 @@ router.get('/sales/:id', async (req: Request, res: Response) => {
     const userMap = await getUserMap();
     return res.json(mapSale(sale, userMap));
   } catch (error) {
-    console.error(error);
-    return res.status(500).json({ error: 'Failed to load sale' });
+    return respondWithServerError(req, res, error, 'Failed to load sale');
   }
 });
 
@@ -1236,8 +1218,7 @@ router.post('/sales/:id/void', async (req: Request, res: Response) => {
     const userMap = await getUserMap();
     return res.json(mapSale(sale, userMap));
   } catch (error) {
-    console.error(error);
-    return res.status(500).json({ error: 'Failed to void sale' });
+    return respondWithServerError(req, res, error, 'Failed to void sale');
   }
 });
 
@@ -1304,8 +1285,7 @@ router.patch('/customers/:id', async (req: Request, res: Response) => {
     const updated = await prisma.customer.findUnique({ where: { id: customerId } });
     return res.json(updated ? mapCustomer(updated) : null);
   } catch (error) {
-    console.error(error);
-    return res.status(500).json({ error: 'Failed to update customer' });
+    return respondWithServerError(req, res, error, 'Failed to update customer');
   }
 });
 
@@ -1354,8 +1334,7 @@ router.post('/customers/:id/credit-payments', async (req: Request, res: Response
     const userMap = await getUserMap();
     return res.status(201).json(record ? mapCreditPayment(record, userMap) : null);
   } catch (error) {
-    console.error(error);
-    return res.status(500).json({ error: 'Failed to record credit payment' });
+    return respondWithServerError(req, res, error, 'Failed to record credit payment');
   }
 });
 
@@ -1394,8 +1373,7 @@ router.get('/customers/:id/account', async (req: Request, res: Response) => {
       creditPayments: payments.map((payment) => mapCreditPayment(payment, userMap)),
     });
   } catch (error) {
-    console.error(error);
-    return res.status(500).json({ error: 'Failed to load customer account' });
+    return respondWithServerError(req, res, error, 'Failed to load customer account');
   }
 });
 
@@ -1409,8 +1387,7 @@ router.get('/local/sync/status', async (req: Request, res: Response) => {
       ),
     );
   } catch (error) {
-    console.error(error);
-    return res.status(500).json({ error: 'Failed to load local sync status' });
+    return respondWithServerError(req, res, error, 'Failed to load local sync status');
   }
 });
 
@@ -1426,8 +1403,7 @@ router.get('/local/sync/dashboard', async (req: Request, res: Response) => {
       ),
     );
   } catch (error) {
-    console.error(error);
-    return res.status(500).json({ error: 'Failed to load local sync dashboard' });
+    return respondWithServerError(req, res, error, 'Failed to load local sync dashboard');
   }
 });
 
@@ -1441,8 +1417,7 @@ router.post('/local/sync/now', async (req: Request, res: Response) => {
       }),
     );
   } catch (error) {
-    console.error(error);
-    return res.status(500).json({ error: 'Local sync failed' });
+    return respondWithServerError(req, res, error, 'Local sync failed');
   }
 });
 
@@ -1467,8 +1442,7 @@ router.post('/sync/handshake', async (req: Request, res: Response) => {
       conflictCount,
     });
   } catch (error) {
-    console.error(error);
-    return res.status(500).json({ error: 'Sync handshake failed' });
+    return respondWithServerError(req, res, error, 'Sync handshake failed');
   }
 });
 
@@ -1483,8 +1457,7 @@ router.post('/sync/playback', async (req: Request, res: Response) => {
     });
     return res.json(result);
   } catch (error) {
-    console.error(error);
-    return res.status(500).json({ error: 'Playback sync failed' });
+    return respondWithServerError(req, res, error, 'Playback sync failed');
   }
 });
 
@@ -1498,8 +1471,7 @@ router.post('/sync/confirm', async (req: Request, res: Response) => {
     });
     return res.json({ serverVectorClock: serverClock });
   } catch (error) {
-    console.error(error);
-    return res.status(500).json({ error: 'Sync confirm failed' });
+    return respondWithServerError(req, res, error, 'Sync confirm failed');
   }
 });
 

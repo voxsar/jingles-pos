@@ -35,6 +35,7 @@ const DESKTOP_LOCAL_API_URL = readDesktopLocalApiUrl();
 contextBridge.exposeInMainWorld('electronAPI', {
   app: {
     backendUrl: DESKTOP_LOCAL_API_URL,
+    version: ipcRenderer.sendSync('app:version-sync') as string,
   },
   desktopSettings: {
     get: () => ipcRenderer.invoke('desktop-settings:get') as Promise<POSDesktopSettings>,

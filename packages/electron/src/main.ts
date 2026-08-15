@@ -352,6 +352,10 @@ ipcMain.on('app:backend-url-sync', (event) => {
   event.returnValue = localApiServer?.url ?? getDesktopLocalApiUrl();
 });
 
+ipcMain.on('app:version-sync', (event) => {
+  event.returnValue = app.getVersion();
+});
+
 ipcMain.handle('app:backend-url', () => {
   return localApiServer?.url ?? getDesktopLocalApiUrl();
 });

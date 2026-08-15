@@ -57,4 +57,43 @@ describe('client error reporting', () => {
       });
     });
   });
+
+  it('correlates an API 500 with the backend diagnostic ID and stack', async () => {
+    Object.defineProperty(window, 'electronAPI', {
+      configurable: true,
+      value: { app: { version: '1.0.13' } },
+    });
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce({
+        ok: false,
+        status: 500,
+        statusText: 'Internal Server Error',
+        json: async () => ({
+          error: 'Failed to complete sale',
+          diagnosticId: 'diagnostic-123',
+          diagnostic: {
+            name: 'PrismaClientKnownRequestError',
+            message: 'Database write failed',
+            code: 'P2010',
+            stack: 'BackendError: database write failed\n  at applySale',
+          },
+        }),
+      })
+      .mockResolvedValue({ ok: true, status: 202 });
+    vi.stubGlobal('fetch', fetchMock);
+    const { createSale } = await import('./api');
+
+    await expect(createSale({} as never)).rejects.toThrow(
+      'Failed to complete sale (Diagnostic ID: diagnostic-123)',
+    );
+
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    const report = JSON.parse(fetchMock.mock.calls[1][1].body as string);
+    expect(report.appVersion).toBe('1.0.13');
+    expect(report.stack).toContain('BackendError: database write failed');
+    expect(report.context).toMatchObject({
+      diagnosticId: 'diagnostic-123',
+      backendErrorCode: 'P2010',
+    });
+  });
 });

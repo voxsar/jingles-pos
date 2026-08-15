@@ -26,6 +26,7 @@ type ClientErrorPayload = {
   status?: number;
   deviceId?: string;
   terminalId?: string;
+  appVersion?: string;
   userAgent?: string;
   timestamp: string;
   context?: PrimitiveContext;
@@ -36,7 +37,9 @@ type QueuedClientError = {
   payload: ClientErrorPayload;
 };
 
-let identity: { deviceId?: string; terminalId?: string } = {};
+let identity: { deviceId?: string; terminalId?: string; appVersion?: string } = {
+  appVersion: typeof window === 'undefined' ? undefined : window.electronAPI?.app?.version,
+};
 let centralReportEndpoint: string | null = null;
 let installed = false;
 let flushPromise: Promise<void> | null = null;
@@ -110,10 +113,11 @@ function enqueue(report: QueuedClientError) {
   writeQueue([...readQueue(), report]);
 }
 
-export function setClientErrorIdentity(nextIdentity: { deviceId?: string; terminalId?: string }) {
+export function setClientErrorIdentity(nextIdentity: { deviceId?: string; terminalId?: string; appVersion?: string }) {
   identity = {
     deviceId: nextIdentity.deviceId?.trim() || undefined,
     terminalId: nextIdentity.terminalId?.trim() || undefined,
+    appVersion: nextIdentity.appVersion?.trim() || identity.appVersion,
   };
 }
 
@@ -136,6 +140,7 @@ export function reportClientError(error: unknown, details: ClientErrorDetails) {
     status: details.status,
     deviceId: identity.deviceId,
     terminalId: identity.terminalId,
+    appVersion: identity.appVersion,
     userAgent: typeof navigator === 'undefined' ? undefined : navigator.userAgent,
     timestamp: new Date().toISOString(),
     context: details.context,

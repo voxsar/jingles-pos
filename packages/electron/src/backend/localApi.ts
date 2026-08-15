@@ -242,6 +242,7 @@ export async function startLocalApiServer(options: LocalApiServerOptions = {}): 
           PORT: String(LOCAL_API_PORT),
           DATABASE_URL: getDesktopSqliteDatabaseUrl(),
           JINGLES_POS_LOCAL_MODE: 'true',
+          JINGLES_POS_APP_VERSION: app.getVersion(),
           JINGLES_POS_DEVICE_ID: baseEnv.JINGLES_POS_DEVICE_ID?.trim() || DEFAULT_DEVICE_ID,
           JINGLES_POS_TERMINAL_ID: baseEnv.JINGLES_POS_TERMINAL_ID?.trim() || DEFAULT_TERMINAL_ID,
           JINGLES_POS_UPSTREAM_URL: desktopSettings.syncUrl,

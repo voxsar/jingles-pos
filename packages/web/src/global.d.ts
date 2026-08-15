@@ -20,6 +20,7 @@ declare global {
     electronAPI?: {
       app?: {
         backendUrl?: string;
+        version?: string;
       };
       desktopSettings?: {
         get: () => Promise<POSDesktopSettings>;
