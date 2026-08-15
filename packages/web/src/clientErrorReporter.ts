@@ -45,6 +45,11 @@ let installed = false;
 let flushPromise: Promise<void> | null = null;
 let memoryQueue: QueuedClientError[] = [];
 
+type ReportableError = Error & {
+  posApiStatus?: number;
+  posErrorReported?: boolean;
+};
+
 function describeError(error: unknown) {
   if (error instanceof Error) {
     return {
@@ -130,6 +135,11 @@ export function setCentralClientErrorServer(serverUrl: string | null | undefined
 }
 
 export function reportClientError(error: unknown, details: ClientErrorDetails) {
+  if (error instanceof Error) {
+    const reportable = error as ReportableError;
+    if (reportable.posErrorReported) return;
+    reportable.posErrorReported = true;
+  }
   const described = describeError(error);
   const payload: ClientErrorPayload = {
     ...described,
@@ -155,6 +165,23 @@ export function reportClientError(error: unknown, details: ClientErrorDetails) {
       enqueue(report);
     });
   }
+}
+
+export function reportCaughtClientError(
+  error: unknown,
+  source: string,
+  context?: PrimitiveContext,
+) {
+  const status = error instanceof Error ? (error as ReportableError).posApiStatus : undefined;
+  if (typeof status === 'number' && status >= 400 && status < 500) {
+    return;
+  }
+  reportClientError(error, {
+    source,
+    route: typeof window === 'undefined' ? undefined : window.location.hash || window.location.pathname,
+    status,
+    context,
+  });
 }
 
 export function flushQueuedClientErrors() {

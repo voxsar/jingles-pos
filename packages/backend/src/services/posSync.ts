@@ -32,6 +32,7 @@ import {
   ZReportSummary,
 } from '@jingles/shared';
 import prisma from '../prisma';
+import { reportBackgroundServerError } from './serverErrorLog';
 import {
   getLocalPosDeviceId,
   getLocalPosTerminalId,
@@ -1217,6 +1218,11 @@ export async function appendEvent(
       await applyProjectionEvent(tx, event, options);
     } catch (error) {
       if (!options?.ignoreProjectionErrors) throw error;
+      void reportBackgroundServerError(error, 'backend.sync.projection-skipped', {
+        eventId: event.id,
+        eventType: event.eventType,
+        aggregateId: event.aggregateId,
+      });
       console.warn('[POS sync] Remote event projection was skipped without stopping sync', {
         eventId: event.id,
         eventType: event.eventType,
@@ -1746,8 +1752,8 @@ function queueLegacyPosRecordRefresh() {
   }
 
   legacyRefreshInFlight = refreshLegacyPosRecordsFromUpstream()
-    .catch((error) => {
-      console.error('Background legacy POS record refresh failed', error);
+    .catch(async (error) => {
+      await reportBackgroundServerError(error, 'backend.sync.legacy-refresh');
       return 0;
     })
     .finally(() => {
@@ -1884,6 +1890,7 @@ async function runSyncWithUpstream(options?: {
       await refreshLocalCatalogFromUpstream();
       queueLegacyPosRecordRefresh();
     } catch (catalogError: any) {
+      await reportBackgroundServerError(catalogError, 'backend.sync.catalog-refresh', { deviceId, terminalId });
       await recordLocalSyncFailure(`Projection refresh failed: ${catalogError.message}`, deviceId, terminalId);
       updateSyncProgress({
         running: false,
@@ -1901,6 +1908,7 @@ async function runSyncWithUpstream(options?: {
       status: await getLocalSyncStatus(deviceId, terminalId),
     };
   } catch (error: any) {
+    await reportBackgroundServerError(error, 'backend.sync.transactional', { deviceId, terminalId });
     // Catalog projection is independent from transactional event playback. A
     // rejected sale/shift event must not leave the workstation on a stale SKU
     // list or stale inventory quantities indefinitely.
@@ -1915,6 +1923,7 @@ async function runSyncWithUpstream(options?: {
     try {
       await refreshLocalCatalogFromUpstream();
     } catch (catalogError: any) {
+      await reportBackgroundServerError(catalogError, 'backend.sync.recovery-catalog', { deviceId, terminalId });
       failureMessage = `${failureMessage}; Projection refresh failed: ${catalogError.message}`;
     }
 

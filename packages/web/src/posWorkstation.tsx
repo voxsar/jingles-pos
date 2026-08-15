@@ -94,7 +94,7 @@ import {
 import { useAuth } from './auth/AuthContext';
 import HelpGuide from './help/HelpGuide';
 import SearchableSelect, { type SearchableSelectHandle } from './components/SearchableSelect';
-import { setCentralClientErrorServer, setClientErrorIdentity } from './clientErrorReporter';
+import { reportCaughtClientError, setCentralClientErrorServer, setClientErrorIdentity } from './clientErrorReporter';
 import { resolveBootstrapTerminal } from './terminalBootstrap';
 import {
   closeCustomerDisplay,
@@ -554,7 +554,8 @@ export default function PosWorkstation() {
   }, [authUser]);
 
   useEffect(() => {
-    void loadDesktopSettingsIntoState().catch(() => {
+    void loadDesktopSettingsIntoState().catch((error) => {
+      reportCaughtClientError(error, 'pos.settings.load-initial');
       setDesktopSettings(buildFallbackDesktopSettings(readStoredThemeMode()));
       setSettingsDraft(buildFallbackDesktopSettings(readStoredThemeMode()));
     });
@@ -858,6 +859,7 @@ export default function PosWorkstation() {
         : await openCustomerDisplay();
       setCustomerDisplayStatus(status);
     } catch (error) {
+      reportCaughtClientError(error, 'pos.customer-display.toggle');
       const message = error instanceof Error ? error.message : 'Failed to open the customer display';
       showNotice('error', message);
     }
@@ -917,6 +919,7 @@ export default function PosWorkstation() {
         if (requestId !== bootstrapRequestIdRef.current) {
           return;
         }
+        reportCaughtClientError(error, 'pos.bootstrap.load');
         const message = error instanceof Error ? error.message : 'Failed to load POS workstation';
         setBootError(message);
       } finally {
@@ -937,6 +940,7 @@ export default function PosWorkstation() {
       });
       setSales(rows);
     } catch (error) {
+      reportCaughtClientError(error, 'pos.sales-history.load');
       const message = error instanceof Error ? error.message : 'Failed to load sales history';
       showNotice('error', message);
     } finally {
@@ -969,6 +973,7 @@ export default function PosWorkstation() {
       setSettingsDraft(loaded);
       await refreshDatabaseInfo();
     } catch (error) {
+      reportCaughtClientError(error, 'pos.settings.load');
       const message = error instanceof Error ? error.message : 'Failed to load workstation settings';
       showNotice('error', message);
     } finally {
@@ -1025,6 +1030,7 @@ export default function PosWorkstation() {
 
       setIsSettingsOpen(false);
     } catch (error) {
+      reportCaughtClientError(error, 'pos.settings.save');
       const message = error instanceof Error ? error.message : 'Failed to save workstation settings';
       showNotice('error', message);
     } finally {
@@ -1045,6 +1051,7 @@ export default function PosWorkstation() {
         ));
       }
     } catch (error) {
+      reportCaughtClientError(error, 'pos.settings.pick-database');
       const message = error instanceof Error ? error.message : 'Failed to pick a database file';
       showNotice('error', message);
     }
@@ -1063,6 +1070,7 @@ export default function PosWorkstation() {
         ));
       }
     } catch (error) {
+      reportCaughtClientError(error, 'pos.settings.pick-backup-directory');
       const message = error instanceof Error ? error.message : 'Failed to pick a backup directory';
       showNotice('error', message);
     }
@@ -1075,6 +1083,7 @@ export default function PosWorkstation() {
       const result = await createDesktopBackup();
       showNotice('success', `Backup created at ${result.filePath}`);
     } catch (error) {
+      reportCaughtClientError(error, 'pos.database.backup');
       const message = error instanceof Error ? error.message : 'Failed to create a database backup';
       showNotice('error', message);
     } finally {
@@ -1091,6 +1100,7 @@ export default function PosWorkstation() {
         showNotice('success', `Backup created at ${result.filePath}`);
       }
     } catch (error) {
+      reportCaughtClientError(error, 'pos.database.backup-as');
       const message = error instanceof Error ? error.message : 'Failed to create a database backup';
       showNotice('error', message);
     } finally {
@@ -1104,6 +1114,7 @@ export default function PosWorkstation() {
     try {
       await revealDesktopDatabaseFile();
     } catch (error) {
+      reportCaughtClientError(error, 'pos.database.reveal');
       const message = error instanceof Error ? error.message : 'Failed to open the database location';
       showNotice('error', message);
     } finally {
@@ -1129,6 +1140,7 @@ export default function PosWorkstation() {
       await loadDesktopSettingsIntoState();
       await refreshDatabaseInfo();
     } catch (error) {
+      reportCaughtClientError(error, 'pos.database.switch');
       const message = error instanceof Error ? error.message : 'Failed to switch the database file';
       showNotice('error', message);
     } finally {
@@ -1403,6 +1415,7 @@ export default function PosWorkstation() {
       showNotice('success', 'The abandoned shift was ended. This terminal is available again.');
       await reloadBootstrap(selectedTerminalId, { silent: true });
     } catch (error) {
+      reportCaughtClientError(error, 'pos.shift.end-abandoned');
       const message = error instanceof Error ? error.message : 'Failed to end the active session';
       showNotice('error', message);
     }
@@ -1681,6 +1694,7 @@ export default function PosWorkstation() {
       showNotice('success', 'Shift opened.');
       await refreshWorkspace();
     } catch (error) {
+      reportCaughtClientError(error, 'pos.shift.open');
       const message = error instanceof Error ? error.message : 'Failed to open shift';
       showNotice('error', message);
     }
@@ -1732,6 +1746,7 @@ export default function PosWorkstation() {
       showNotice('success', 'Shift closed. Session ended.');
       await refreshWorkspace({ includeSales: true });
     } catch (error) {
+      reportCaughtClientError(error, 'pos.shift.close');
       const message = error instanceof Error ? error.message : 'Failed to close shift';
       showNotice('error', message);
     }
@@ -1774,6 +1789,7 @@ export default function PosWorkstation() {
       showNotice('success', `Held bill ${heldSale.holdNumber}.`);
       await refreshWorkspace();
     } catch (error) {
+      reportCaughtClientError(error, 'pos.held-sale.hold');
       const message = error instanceof Error ? error.message : 'Failed to hold bill';
       showNotice('error', message);
     }
@@ -1833,6 +1849,7 @@ export default function PosWorkstation() {
       showNotice('success', `Recalled ${recalled.holdNumber}.`);
       await refreshWorkspace();
     } catch (error) {
+      reportCaughtClientError(error, 'pos.held-sale.recall');
       const message = error instanceof Error ? error.message : 'Failed to recall held bill';
       showNotice('error', message);
     }
@@ -1901,6 +1918,7 @@ export default function PosWorkstation() {
 
       await refreshWorkspace({ includeSales: true });
     } catch (error) {
+      reportCaughtClientError(error, 'pos.sale.complete');
       const message = error instanceof Error ? error.message : 'Failed to complete sale';
       showNotice('error', message);
     }
@@ -1973,6 +1991,7 @@ export default function PosWorkstation() {
 
       await refreshWorkspace({ includeSales: true });
     } catch (error) {
+      reportCaughtClientError(error, 'pos.return.create');
       const message = error instanceof Error ? error.message : 'Failed to create return';
       showNotice('error', message);
     }
@@ -1991,6 +2010,7 @@ export default function PosWorkstation() {
       showNotice('success', `Order ${updated.receiptNumber} voided.`);
       await refreshWorkspace({ includeSales: true });
     } catch (error) {
+      reportCaughtClientError(error, 'pos.sale.void');
       const message = error instanceof Error ? error.message : 'Failed to void order';
       showNotice('error', message);
     } finally {
@@ -2011,6 +2031,7 @@ export default function PosWorkstation() {
 
       showNotice('success', formatSyncRunSuccess(result));
     } catch (error) {
+      reportCaughtClientError(error, 'pos.sync.run');
       const message = error instanceof Error ? error.message : 'Sync failed';
       showNotice('error', message);
     } finally {
@@ -2038,6 +2059,7 @@ export default function PosWorkstation() {
       setZReport(report);
       return report;
     } catch (error) {
+      reportCaughtClientError(error, 'pos.z-report.load-current');
       const message = error instanceof Error ? error.message : 'Failed to build the current Z-report';
       setZReport(null);
       setZReportError(message);
@@ -2123,6 +2145,7 @@ export default function PosWorkstation() {
         `${input.direction === 'in' ? 'Cash in' : 'Cash out'} of ${formatCurrency(declaration.total)} recorded. Expected drawer is now ${formatCurrency(report.expectedDrawer)}.`,
       );
     } catch (error) {
+      reportCaughtClientError(error, 'pos.cash-movement.record');
       const message = error instanceof Error ? error.message : 'Failed to record the cash movement';
       showNotice('error', message);
     } finally {
@@ -5014,6 +5037,7 @@ function PrinterSettingsCard(
         ...result.warnings,
       ].filter(Boolean).join(' - '));
     } catch (error) {
+      reportCaughtClientError(error, 'pos.printer.discovery');
       setDiscoveryNote(error instanceof Error ? error.message : 'Printer discovery failed.');
     } finally {
       setIsDiscovering(false);
@@ -5051,6 +5075,7 @@ function PrinterSettingsCard(
           : result.message ?? 'The test failed.',
       });
     } catch (error) {
+      reportCaughtClientError(error, 'pos.printer.test');
       setTestResult({ ok: false, text: error instanceof Error ? error.message : 'The test failed.' });
     } finally {
       setTestingPrinterId(null);
@@ -5473,7 +5498,8 @@ function SearchOverlay(
             setResults(filterByScope(rows).slice(0, 24));
           }
         })
-        .catch(() => {
+        .catch((error) => {
+          reportCaughtClientError(error, 'pos.product-search.load');
           if (!cancelled) {
             setResults(filterByScope(props.products).slice(0, 24));
           }
@@ -7598,7 +7624,12 @@ function ZReportModal(props: {
         setSlots(rows);
         setSelectedShiftId((current) => rows.some((row) => row.shift.id === current) ? current : (rows[0]?.shift.id ?? ''));
       })
-      .catch((error) => { if (!cancelled) setLoadError(error instanceof Error ? error.message : 'Failed to load Z-report slots'); })
+      .catch((error) => {
+        if (!cancelled) {
+          reportCaughtClientError(error, 'pos.z-report.load-slots');
+          setLoadError(error instanceof Error ? error.message : 'Failed to load Z-report slots');
+        }
+      })
       .finally(() => { if (!cancelled) setIsLoadingSlots(false); });
     return () => { cancelled = true; };
   }, [props.terminalId, range.start.getTime(), range.end.getTime()]);
@@ -8153,6 +8184,7 @@ function CustomerDirectoryModal(
       const detail = await getCustomerAccount(customerId);
       setAccount(detail);
     } catch (error) {
+      reportCaughtClientError(error, 'pos.customer-account.load');
       setAccountError(error instanceof Error ? error.message : 'Failed to load the customer account');
       setAccount(null);
     } finally {
@@ -8320,6 +8352,7 @@ function CustomerDirectoryModal(
       setIsEditing(false);
       await loadAccount(selectedCustomer.id);
     } catch (error) {
+      reportCaughtClientError(error, 'pos.customer-account.save');
       setAccountError(error instanceof Error ? error.message : 'Failed to save the changes');
     } finally {
       setIsSaving(false);
@@ -8346,6 +8379,7 @@ function CustomerDirectoryModal(
       setCollectionNotice(`Bill collection of ${formatCurrency(amount)} recorded for ${selectedCustomer.name}.`);
       await loadAccount(selectedCustomer.id);
     } catch (error) {
+      reportCaughtClientError(error, 'pos.customer-account.payment');
       setAccountError(error instanceof Error ? error.message : 'Failed to record the payment');
     } finally {
       setIsRecordingPayment(false);
@@ -9101,6 +9135,7 @@ function ChangePinModal(props: { onClose: () => void }) {
       window.dispatchEvent(new Event('jingles:pin-configured'));
       props.onClose();
     } catch (nextError) {
+      reportCaughtClientError(nextError, 'pos.user.change-pin');
       setError(nextError instanceof Error ? nextError.message : 'Unable to change PIN.');
     } finally {
       setIsSaving(false);

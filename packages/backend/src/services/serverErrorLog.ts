@@ -15,6 +15,8 @@ type ErrorDetails = {
   cause?: ErrorDetails;
 };
 
+type PrimitiveContext = Record<string, string | number | boolean | null | undefined>;
+
 function redact(value: string) {
   return value
     .replace(/Bearer\s+[A-Za-z0-9._~+\/-]+/gi, 'Bearer [REDACTED]')
@@ -88,6 +90,64 @@ async function appendServerError(entry: Record<string, unknown>) {
   };
   writeQueue = writeQueue.then(write, write);
   return writeQueue;
+}
+
+async function uploadDesktopError(
+  diagnosticId: string,
+  details: ErrorDetails,
+  source: string,
+  context?: PrimitiveContext,
+) {
+  if (!isLocalPosBackendMode()) return;
+  const upstream = process.env.JINGLES_POS_UPSTREAM_URL?.trim().replace(/\/+$/, '');
+  if (!upstream || !/^https?:\/\//i.test(upstream)) return;
+  const response = await fetch(`${upstream}/api/pos/client-errors`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      message: details.message,
+      name: details.name,
+      stack: details.stack,
+      source,
+      deviceId: process.env.JINGLES_POS_DEVICE_ID,
+      terminalId: process.env.JINGLES_POS_TERMINAL_ID,
+      appVersion: process.env.JINGLES_POS_APP_VERSION,
+      timestamp: new Date().toISOString(),
+      context: { diagnosticId, errorCode: details.code, ...context },
+    }),
+  });
+  if (!response.ok) throw new Error(`Central error collector returned HTTP ${response.status}`);
+}
+
+export async function reportBackgroundServerError(
+  error: unknown,
+  source: string,
+  context?: PrimitiveContext,
+) {
+  const diagnosticId = randomUUID();
+  const details = describeError(error);
+  const entry = {
+    id: diagnosticId,
+    occurredAt: new Date().toISOString(),
+    source,
+    appVersion: bounded(process.env.JINGLES_POS_APP_VERSION, 64),
+    runtime: {
+      node: process.version,
+      platform: process.platform,
+      arch: process.arch,
+      localMode: isLocalPosBackendMode(),
+    },
+    error: details,
+    context,
+  };
+  console.error(`[POSServerError:${diagnosticId}] ${source}`, entry);
+  await appendServerError(entry).catch((logError) => {
+    console.error(`[POSServerError:${diagnosticId}] Failed to persist diagnostic`, logError);
+  });
+  await uploadDesktopError(diagnosticId, details, source, context).catch((uploadError) => {
+    console.error(`[POSServerError:${diagnosticId}] Failed to upload diagnostic`, uploadError);
+  });
+  return diagnosticId;
 }
 
 export async function respondWithServerError(

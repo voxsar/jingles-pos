@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
 import { unlockSession } from '../api';
 import { useAuth } from '../auth/AuthContext';
 import { readStoredSessionLockMinutes } from '../desktopSettings';
+import { reportCaughtClientError } from '../clientErrorReporter';
 
 const CASH_VISIBILITY_STORAGE_KEY = 'jingles-pos-hide-cash-sales';
 const LAST_ACTIVITY_STORAGE_KEY = 'jingles-pos-last-activity-at';
@@ -121,6 +122,7 @@ export default function SessionLock() {
       setPin('');
       armTimer();
     } catch (nextError) {
+      reportCaughtClientError(nextError, 'auth.unlock');
       setError(nextError instanceof Error ? nextError.message : 'Unable to unlock.');
     } finally {
       setIsUnlocking(false);

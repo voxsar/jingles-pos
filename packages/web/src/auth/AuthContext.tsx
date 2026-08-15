@@ -13,6 +13,7 @@ import {
   login as requestLogin,
   logout as requestLogout,
 } from '../api';
+import { reportCaughtClientError } from '../clientErrorReporter';
 
 const TOKEN_STORAGE_KEY = 'jingles-pos-auth-token';
 const LAST_ACTIVITY_STORAGE_KEY = 'jingles-pos-last-activity-at';
@@ -53,7 +54,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         setToken(storedToken);
         setUser(nextUser);
       })
-      .catch(() => {
+      .catch((nextError) => {
+        reportCaughtClientError(nextError, 'auth.restore-session');
         localStorage.removeItem(TOKEN_STORAGE_KEY);
       })
       .finally(() => {
@@ -78,6 +80,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       setToken(result.token);
       setUser(result.user);
     } catch (nextError) {
+      reportCaughtClientError(nextError, 'auth.login');
       const message = nextError instanceof Error ? nextError.message : 'Login failed';
       setError(message);
       throw nextError;
@@ -91,7 +94,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     if (currentToken) {
       try {
         await requestLogout(currentToken);
-      } catch {
+      } catch (nextError) {
+        reportCaughtClientError(nextError, 'auth.logout');
         // Clear the local session even if the remote/logout bridge path fails.
       }
     }

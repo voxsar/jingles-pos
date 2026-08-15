@@ -44,7 +44,7 @@ import {
   searchLocalCatalog,
 } from '../services/localCatalog';
 import { authenticate } from './auth';
-import { respondWithServerError } from '../services/serverErrorLog';
+import { reportBackgroundServerError, respondWithServerError } from '../services/serverErrorLog';
 
 const router = Router();
 
@@ -1246,7 +1246,10 @@ router.post('/returns', async (req: Request, res: Response) => {
     });
     return res.status(201).json(record);
   } catch (error) {
-    console.error(error);
+    await reportBackgroundServerError(error, 'backend.return.rejected', {
+      saleId: typeof req.body?.saleId === 'string' ? req.body.saleId : undefined,
+      terminalId: typeof req.body?.terminalId === 'string' ? req.body.terminalId : undefined,
+    });
     // Rejections here are almost always the "only N remain returnable" /
     // "only a completed sale can be returned" validation thrown while
     // applying the event — surface that instead of a generic message so the

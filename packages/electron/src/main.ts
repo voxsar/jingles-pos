@@ -35,6 +35,7 @@ import { JinglesMdnsService, type DiscoveredJinglesDevice } from './network/mdns
 import { writeLanSyncTarget } from './network/lanSyncTarget';
 import { DEFAULT_DEVICE_ID, DEFAULT_TERMINAL_ID, type POSDatabaseSwitchMode } from '@jingles/shared';
 import { getUpdateMenu, initializeUpdater } from './updater';
+import { flushElectronErrorReports, reportElectronError } from './errorReporter';
 
 let mainWindow: BrowserWindow | null = null;
 let localApiServer: LocalApiServer | null = null;
@@ -106,10 +107,12 @@ function showStartupError(title: string, message: string, error: unknown) {
 }
 
 process.on('uncaughtException', (error) => {
+  reportElectronError(error, 'electron.process.uncaught-exception');
   showStartupError('Jingles POS failed to start', 'The Electron main process crashed.', error);
 });
 
 process.on('unhandledRejection', (reason) => {
+  reportElectronError(reason, 'electron.process.unhandled-rejection');
   showStartupError('Jingles POS failed to start', 'The Electron main process hit an unhandled rejection.', reason);
 });
 
@@ -149,6 +152,7 @@ async function createWindow() {
       await mainWindow.loadFile(rendererTarget.value);
     }
   } catch (error) {
+    reportElectronError(error, 'electron.renderer.load');
     appendStartupLog(`Failed to load renderer target ${rendererTarget.value}`, error);
     throw error;
   }
@@ -164,6 +168,7 @@ async function stopLocalApiServer() {
   try {
     await server.close();
   } catch (error) {
+    reportElectronError(error, 'electron.backend.stop');
     appendStartupLog('Failed to stop the POS desktop backend cleanly.', error);
   }
 }
@@ -284,6 +289,7 @@ async function applyDatabasePathChange(nextDatabasePath: string) {
     await restartLocalApiServer();
     return { settings: savedSettings, copiedDatabase };
   } catch (error) {
+    reportElectronError(error, 'electron.database.switch');
     saveDesktopSettings(previousSettings);
     await restartLocalApiServer();
     throw error;
@@ -296,7 +302,10 @@ app.whenReady().then(async () => {
     initializeUpdater('JINGLES_POS_UPDATE_URL');
     configureCustomerDisplay({
       getMainWindow: () => mainWindow,
-      onError: (message, error) => appendStartupLog(message, error),
+      onError: (message, error) => {
+        reportElectronError(error, 'electron.customer-display', { message });
+        appendStartupLog(message, error);
+      },
     });
     Menu.setApplicationMenu(Menu.buildFromTemplate([
       { role: 'fileMenu' },
@@ -308,6 +317,7 @@ app.whenReady().then(async () => {
             label: 'Toggle customer display',
             click: () => {
               void toggleCustomerDisplayWindow().catch((error) => {
+                reportElectronError(error, 'electron.customer-display.toggle-menu');
                 appendStartupLog('Failed to toggle the customer display window.', error);
               });
             },
@@ -320,15 +330,18 @@ app.whenReady().then(async () => {
     startLanDiscovery();
     cleanPrintingWorkDirectory();
     localApiServer = await restartLocalApiServer();
+    void flushElectronErrorReports();
     await createWindow();
 
     if (readDesktopSettings().customerDisplay.enabled) {
       // A failed customer display must not take the till down with it.
       await openCustomerDisplayWindow().catch((error) => {
+        reportElectronError(error, 'electron.customer-display.open-startup');
         appendStartupLog('Failed to open the customer display window at startup.', error);
       });
     }
   } catch (error) {
+    reportElectronError(error, 'electron.startup');
     showStartupError('Jingles POS failed to start', 'Desktop startup aborted before the window was ready.', error);
     await stopLocalApiServer();
     app.quit();
@@ -518,6 +531,7 @@ ipcMain.handle('desktop-settings:save', async (_event, nextSettings) => {
     if (savedSettings.customerDisplay.enabled !== previousSettings.customerDisplay.enabled) {
       if (savedSettings.customerDisplay.enabled) {
         await openCustomerDisplayWindow().catch((error) => {
+          reportElectronError(error, 'electron.customer-display.open-settings');
           appendStartupLog('Failed to open the customer display window after a settings change.', error);
         });
       } else {
@@ -531,6 +545,7 @@ ipcMain.handle('desktop-settings:save', async (_event, nextSettings) => {
       copiedDatabase,
     };
   } catch (error) {
+    reportElectronError(error, 'electron.settings.save');
     saveDesktopSettings(previousSettings);
     if (shouldRestartBackend) {
       await restartLocalApiServer();

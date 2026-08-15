@@ -4,6 +4,7 @@ import { useNavigate } from 'react-router-dom';
 import { getSyncDashboard, refreshHostSyncAuth, subscribeSyncStatus, syncNow } from '../api';
 import { useAuth } from '../auth/AuthContext';
 import { formatDateTime, formatInteger } from '../utils/pos';
+import { reportCaughtClientError } from '../clientErrorReporter';
 
 const REFRESH_INTERVAL_MS = 2000;
 
@@ -52,6 +53,7 @@ export default function SyncPage() {
       setDashboard(nextDashboard);
       setError(null);
     } catch (nextError) {
+      reportCaughtClientError(nextError, 'sync.dashboard.load');
       setError(nextError instanceof Error ? nextError.message : 'Failed to load sync dashboard');
     } finally {
       if (!options?.silent) {
@@ -91,6 +93,7 @@ export default function SyncPage() {
       setError(getSyncRunError(result));
       await loadDashboard({ silent: true });
     } catch (nextError) {
+      reportCaughtClientError(nextError, 'sync.run');
       setError(nextError instanceof Error ? nextError.message : 'Sync failed');
     } finally {
       setIsSyncing(false);
@@ -120,6 +123,7 @@ export default function SyncPage() {
       setError(null);
       await loadDashboard({ silent: true });
     } catch (nextError) {
+      reportCaughtClientError(nextError, 'sync.authentication.refresh');
       setError(nextError instanceof Error ? nextError.message : 'Failed to refresh host sync authentication');
     } finally {
       setIsRefreshingSyncAuth(false);

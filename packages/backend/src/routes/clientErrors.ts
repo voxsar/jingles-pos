@@ -4,6 +4,7 @@ import {
   sanitizeClientErrorReport,
   type ClientErrorReportInput,
 } from '../services/clientErrorLog';
+import { respondWithServerError } from '../services/serverErrorLog';
 
 const router = Router();
 const RATE_LIMIT_WINDOW_MS = 60_000;
@@ -65,8 +66,7 @@ router.post('/', clientErrorRateLimit, async (req: Request, res: Response) => {
       return res.status(400).json({ error: error.message });
     }
 
-    console.error('Failed to persist a POS client error report', error);
-    return res.status(500).json({ error: 'Failed to persist client error report' });
+    return respondWithServerError(req, res, error, 'Failed to persist client error report');
   }
 });
 

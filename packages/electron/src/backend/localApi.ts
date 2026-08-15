@@ -4,6 +4,7 @@ import path from 'path';
 import { spawn } from 'child_process';
 import { app } from 'electron';
 import { DEFAULT_DEVICE_ID, DEFAULT_TERMINAL_ID } from '@jingles/shared';
+import { reportElectronError } from '../errorReporter';
 import {
   getDesktopBackendEntryPath,
   getDesktopBackendResourcePath,
@@ -215,6 +216,9 @@ export async function startLocalApiServer(options: LocalApiServerOptions = {}): 
       console.warn(`[POSBackend] ${message}`);
     } else {
       console.error(`[POSBackend] ${message}`, error);
+    }
+    if (typeof error !== 'undefined' || /\b(?:failed|exited|unhealthy)\b/i.test(message)) {
+      reportElectronError(error ?? new Error(message), 'electron.backend.supervisor', { message });
     }
     options.onDiagnostic?.(message, error);
   };

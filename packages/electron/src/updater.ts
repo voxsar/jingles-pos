@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import { app, BrowserWindow, dialog, ipcMain, type MenuItemConstructorOptions } from 'electron';
 import { autoUpdater, type ProgressInfo, type UpdateInfo } from 'electron-updater';
+import { reportElectronError } from './errorReporter';
 
 export type UpdatePolicy = 'automatic' | 'ask' | 'manual';
 
@@ -85,6 +86,7 @@ async function downloadUpdate() {
   try {
     await autoUpdater.downloadUpdate();
   } catch (error) {
+    reportElectronError(error, 'electron.updater.download');
     broadcast({ state: 'error', message: `Update download failed: ${String(error)}` });
   }
 }
@@ -124,6 +126,7 @@ export async function checkForUpdates(showResult = true) {
   try {
     await autoUpdater.checkForUpdates();
   } catch (error) {
+    reportElectronError(error, 'electron.updater.check');
     broadcast({ state: 'error', message: `Update check failed: ${String(error)}` });
     if (showResult) await showMessage({ type: 'error', title: 'Update check failed', message: status.message });
   } finally {
@@ -233,9 +236,13 @@ export function initializeUpdater(environmentVariable: string) {
         });
         if (result.response === 0) autoUpdater.quitAndInstall(false, true);
       });
-      autoUpdater.on('error', (error) => broadcast({ state: 'error', message: `Updater error: ${error.message}` }));
+      autoUpdater.on('error', (error) => {
+        reportElectronError(error, 'electron.updater.event');
+        broadcast({ state: 'error', message: `Updater error: ${error.message}` });
+      });
     }
   } catch (error) {
+    reportElectronError(error, 'electron.updater.configure');
     broadcast({ state: 'error', message: `Invalid update configuration: ${String(error)}` });
   }
 

@@ -58,10 +58,26 @@ describe('client error reporting', () => {
     });
   });
 
+  it('reports a caught operational failure once and ignores expected 4xx responses', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 202 });
+    vi.stubGlobal('fetch', fetchMock);
+    const reporter = await import('./clientErrorReporter');
+    const failure = new Error('Printer bridge crashed');
+
+    reporter.reportCaughtClientError(failure, 'pos.printer.test');
+    reporter.reportCaughtClientError(failure, 'pos.printer.test-again');
+    const validation = Object.assign(new Error('Wrong PIN'), { posApiStatus: 401 });
+    reporter.reportCaughtClientError(validation, 'auth.unlock');
+
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body as string);
+    expect(body).toMatchObject({ message: 'Printer bridge crashed', source: 'pos.printer.test' });
+  });
+
   it('correlates an API 500 with the backend diagnostic ID and stack', async () => {
     Object.defineProperty(window, 'electronAPI', {
       configurable: true,
-      value: { app: { version: '1.0.13' } },
+      value: { app: { version: '1.0.14' } },
     });
     const fetchMock = vi.fn()
       .mockResolvedValueOnce({
@@ -89,7 +105,7 @@ describe('client error reporting', () => {
 
     await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
     const report = JSON.parse(fetchMock.mock.calls[1][1].body as string);
-    expect(report.appVersion).toBe('1.0.13');
+    expect(report.appVersion).toBe('1.0.14');
     expect(report.stack).toContain('BackendError: database write failed');
     expect(report.context).toMatchObject({
       diagnosticId: 'diagnostic-123',

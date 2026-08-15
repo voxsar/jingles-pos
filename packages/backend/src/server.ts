@@ -10,6 +10,7 @@ import { ensureLocalCatalogSearchIndex } from './services/localCatalog';
 import { ensureLocalSchemaCompat } from './services/schemaCompat';
 import { syncWithUpstream } from './services/posSync';
 import { syncSharedCatalogProjection } from './sharedInventory';
+import { reportBackgroundServerError, respondWithServerError } from './services/serverErrorLog';
 
 const app = express();
 const PORT = Number(process.env.PORT || 3001);
@@ -18,18 +19,20 @@ app.use(cors());
 app.use('/api/pos/client-errors', express.json({ limit: '32kb' }), clientErrorsRouter);
 app.use(express.json({ limit: '2mb' }));
 
-app.get('/health', async (_req, res) => {
+app.get('/health', async (req, res) => {
   try {
     await prisma.$queryRaw`SELECT 1`;
     return res.json({ status: 'ok' });
   } catch (error) {
-    console.error(error);
-    return res.status(500).json({ status: 'error' });
+    return respondWithServerError(req, res, error, 'Backend health check failed');
   }
 });
 
 app.use('/api/pos/auth', authRouter);
 app.use('/api/pos', posRouter);
+app.use((error: unknown, req: express.Request, res: express.Response, _next: express.NextFunction) => (
+  respondWithServerError(req, res, error, 'Unhandled backend request failure')
+));
 
 async function startServer() {
   await ensureLocalSchemaCompat();
@@ -53,7 +56,7 @@ async function startServer() {
       try {
         await syncWithUpstream({ deviceId, terminalId });
       } catch (error) {
-        console.error('Background local sync failed', error);
+        await reportBackgroundServerError(error, 'backend.sync.background', { deviceId, terminalId });
       }
     };
 
@@ -65,9 +68,16 @@ async function startServer() {
 }
 
 if (require.main === module) {
+  process.on('uncaughtException', (error) => {
+    void reportBackgroundServerError(error, 'backend.process.uncaught-exception')
+      .finally(() => process.exit(1));
+  });
+  process.on('unhandledRejection', (reason) => {
+    void reportBackgroundServerError(reason, 'backend.process.unhandled-rejection');
+  });
   startServer().catch((error) => {
-    console.error('Failed to start backend server', error);
-    process.exitCode = 1;
+    void reportBackgroundServerError(error, 'backend.startup')
+      .finally(() => { process.exitCode = 1; });
   });
 }
 

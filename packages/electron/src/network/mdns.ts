@@ -1,5 +1,6 @@
 import dgram, { type RemoteInfo } from 'dgram';
 import os from 'os';
+import { reportElectronError } from '../errorReporter';
 
 const MDNS_ADDRESS = '224.0.0.251';
 const MDNS_PORT = 5353;
@@ -263,7 +264,10 @@ export class JinglesMdnsService {
     if (this.socket) return;
     const socket = dgram.createSocket({ type: 'udp4', reuseAddr: true });
     this.socket = socket;
-    socket.on('error', (error) => console.warn('[mDNS] Socket error', error));
+    socket.on('error', (error) => {
+      reportElectronError(error, 'electron.mdns.socket');
+      console.warn('[mDNS] Socket error', error);
+    });
     socket.on('message', (packet, remote) => this.handlePacket(packet, remote));
     socket.bind(MDNS_PORT, () => {
       try {
@@ -271,6 +275,7 @@ export class JinglesMdnsService {
         socket.setMulticastTTL(255);
         socket.setMulticastLoopback(true);
       } catch (error) {
+        reportElectronError(error, 'electron.mdns.join-multicast');
         console.warn('[mDNS] Failed to join multicast group', error);
       }
       this.announce();
@@ -324,7 +329,10 @@ export class JinglesMdnsService {
     const socket = this.socket;
     if (!socket) return;
     socket.send(packet, MDNS_PORT, MDNS_ADDRESS, (error) => {
-      if (error) console.warn('[mDNS] Failed to send packet', error);
+      if (error) {
+        reportElectronError(error, 'electron.mdns.send');
+        console.warn('[mDNS] Failed to send packet', error);
+      }
     });
   }
 

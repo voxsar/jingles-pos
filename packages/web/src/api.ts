@@ -48,6 +48,7 @@ function buildResponseError(payload: ApiErrorPayload, status: number) {
 	const requestError = new Error(
 		diagnosticId ? `${message} (Diagnostic ID: ${diagnosticId})` : message,
 	);
+	(requestError as Error & { posApiStatus?: number }).posApiStatus = status;
 	if (payload.diagnostic?.stack) {
 		requestError.stack = [
 			requestError.stack,

@@ -20,6 +20,7 @@ import type {
   POSPrinterLanguage,
   POSPrinterRole,
 } from '@jingles/shared';
+import { reportElectronError } from '../errorReporter';
 
 /**
  * The slice of Electron's WebContents this module needs. Narrowing it keeps
@@ -241,6 +242,7 @@ export async function discoverPrinters(
   const warnings: string[] = [];
 
   const systemPrinters = await listSystemPrinters(webContents).catch((error: unknown) => {
+    reportElectronError(error, 'electron.printer.discovery-system');
     warnings.push(`Could not read installed printers: ${error instanceof Error ? error.message : String(error)}`);
     return [] as POSDiscoveredPrinter[];
   });
@@ -250,6 +252,7 @@ export async function discoverPrinters(
   }
 
   const network = await scanNetworkPrinters().catch((error: unknown) => {
+    reportElectronError(error, 'electron.printer.discovery-network');
     warnings.push(`Network scan failed: ${error instanceof Error ? error.message : String(error)}`);
     return { printers: [] as POSDiscoveredPrinter[], subnets: [] as string[], warnings: [] as string[] };
   });

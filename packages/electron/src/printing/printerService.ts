@@ -13,6 +13,7 @@ import { readDesktopSettings } from '../desktopSettings';
 import { encodeDrawerKick, encodeReceipt } from './escpos';
 import { encodeLabel, encodeZplTestLabel } from './zpl';
 import { probePrinter, sendToPrinter } from './transport';
+import { reportElectronError } from '../errorReporter';
 
 function describeError(error: unknown) {
   return error instanceof Error ? error.message : String(error);
@@ -101,6 +102,7 @@ export async function printDocument(
   try {
     return await print(printer, document);
   } catch (error) {
+    reportElectronError(error, 'electron.print.document', { printerId: printer.id, transport: printer.transport, role });
     return {
       ok: false,
       printerId: printer.id,
@@ -126,6 +128,7 @@ export async function printLabel(
   try {
     return await print(printer, document);
   } catch (error) {
+    reportElectronError(error, 'electron.print.label', { printerId: printer.id, transport: printer.transport });
     return {
       ok: false,
       printerId: printer.id,
@@ -164,6 +167,7 @@ export async function testPrinter(printer: POSPrinterConfig): Promise<POSPrintRe
   try {
     await probePrinter(printer);
   } catch (error) {
+    reportElectronError(error, 'electron.printer.test-probe', { printerId: printer.id, transport: printer.transport });
     return {
       ok: false,
       printerId: printer.id,
@@ -180,6 +184,7 @@ export async function testPrinter(printer: POSPrinterConfig): Promise<POSPrintRe
     const bytesSent = await sendToPrinter(payload, printer, 'Jingles POS printer test');
     return { ok: true, printerId: printer.id, printerName: printer.name, bytesSent };
   } catch (error) {
+    reportElectronError(error, 'electron.printer.test-print', { printerId: printer.id, transport: printer.transport });
     return {
       ok: false,
       printerId: printer.id,
@@ -205,6 +210,7 @@ export async function openCashDrawer(printerId?: string): Promise<POSPrintResult
     const bytesSent = await sendToPrinter(encodeDrawerKick(), printer, 'Jingles POS drawer');
     return { ok: true, printerId: printer.id, printerName: printer.name, bytesSent };
   } catch (error) {
+    reportElectronError(error, 'electron.cash-drawer.open', { printerId: printer.id, transport: printer.transport });
     return {
       ok: false,
       printerId: printer.id,
