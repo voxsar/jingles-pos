@@ -149,6 +149,7 @@ import { receiptQrSvg } from './utils/receiptQrCode';
 import { useBarcodeScanner } from './useBarcodeScanner';
 import {
   addCounts,
+  appendScanToPendingBarcodeModifier,
   buildCashDeclaration,
   buildProductScanCodeIndex,
   calcCartTotals,
@@ -409,6 +410,7 @@ export default function PosWorkstation() {
   const [notice, setNotice] = useState<Notice>(null);
 
   const [isSearchOpen, setIsSearchOpen] = useState(false);
+  const [searchInitialQuery, setSearchInitialQuery] = useState('');
   const [isHelpOpen, setIsHelpOpen] = useState(false);
   const [variantSelection, setVariantSelection] = useState<VariantSelectionRequest | null>(null);
   const [unitSelection, setUnitSelection] = useState<UnitSelectionRequest | null>(null);
@@ -1696,6 +1698,21 @@ export default function PosWorkstation() {
       setReturnReceiptScan((previous) => ({ code: sale.receiptNumber, sequence: (previous?.sequence ?? 0) + 1 }));
       return;
     }
+
+    // Receipt numbers and receipt QR values are deliberately outside the
+    // product-code namespace. Recognise an exact sale match from the main
+    // scanner field and take the cashier straight into that bill's refund
+    // screen; ordinary SKU/barcode scans continue through to product lookup.
+    const receiptSaleMatch = findSaleByReceiptScan(visibleSales, code);
+    if (receiptSaleMatch) {
+      setReturnReceiptScan((previous) => ({
+        code: receiptSaleMatch.receiptNumber,
+        sequence: (previous?.sequence ?? 0) + 1,
+      }));
+      setIsReturnOpen(true);
+      return;
+    }
+
     // Sales staff type "qty*code" or "qty@code" ahead of the product code to
     // add a known quantity in one shot, the shorthand the previous POS used.
     const prefixed = parseQuantityPrefixedCode(code);
@@ -1718,20 +1735,30 @@ export default function PosWorkstation() {
     // now, after a direct match has already failed, because a real SKU or
     // barcode can itself contain the separator (a product coded "7-Up" must
     // still resolve as itself, not "price 7 for Up").
-    if (prefixed == null && priceOverrideSettings.enabled) {
-      const pricePrefixed = parsePricePrefixedCode(code, priceOverrideSettings.separator);
+    if (priceOverrideSettings.enabled) {
+      // Quantity and price can be combined: `5*150-barcode` means five units
+      // at Rs 150. Strip quantity first, then interpret the configured price
+      // separator only after the whole remaining code failed an exact match.
+      const pricePrefixed = parsePricePrefixedCode(lookupCode, priceOverrideSettings.separator);
       const priceMatch = pricePrefixed && productsByScanCode.get(pricePrefixed.code.trim().toLowerCase());
       if (pricePrefixed && priceMatch) {
         if (priceMatch.variant) {
-          addPriceOverrideToCart(priceMatch.product, priceMatch.variant, pricePrefixed.price);
+          addPriceOverrideToCart(priceMatch.product, priceMatch.variant, pricePrefixed.price, prefixed?.quantity ?? 1);
         } else {
-          handleProductPick(priceMatch.product, { priceOverride: pricePrefixed.price });
+          handleProductPick(priceMatch.product, {
+            quantity: prefixed?.quantity,
+            priceOverride: pricePrefixed.price,
+          });
         }
         return;
       }
     }
 
-    showNotice('error', `No product matches scanned code ${code}.`);
+    // An exact scan adds immediately. Anything less exact now follows the
+    // same local/server product-search path as F3, with the cashier's entry
+    // preserved (including quantity/price modifiers) in the search box.
+    setSearchInitialQuery(code);
+    setIsSearchOpen(true);
   }, [
     addPriceOverrideToCart,
     addProductToCart,
@@ -1767,7 +1794,21 @@ export default function PosWorkstation() {
     // search overlay opts in separately through data-scanner-passthrough.
     enabled: session != null && !isSettingsOpen && !isHelpOpen,
     settings: scannerSettings,
-    onScan: handleBarcodeScan,
+    onScan: (scannedCode) => {
+      const barcodeInput = barcodeInputRef.current;
+      const submission = isReturnOpen
+        ? scannedCode
+        : appendScanToPendingBarcodeModifier(
+          barcodeInput?.value ?? '',
+          scannedCode,
+          priceOverrideSettings.enabled ? priceOverrideSettings.separator : null,
+        );
+
+      // Scanner capture owns this submission. Clear the pending modifier just
+      // like pressing Enter in the barcode field does after a manual entry.
+      if (barcodeInput) barcodeInput.value = '';
+      handleBarcodeScan(submission);
+    },
   });
 
   /** Surfaces the outcome of a print job, including the browser-dialog fallback. */
@@ -2410,6 +2451,7 @@ export default function PosWorkstation() {
         setIsOrdersOpen(true);
         return;
       case 'search':
+        setSearchInitialQuery('');
         setIsSearchOpen(true);
         return;
       case 'hold':
@@ -2708,7 +2750,10 @@ export default function PosWorkstation() {
             setActiveCategoryId(nextCategory);
             setActiveSubcategory(null);
           }}
-          onOpenSearch={() => setIsSearchOpen(true)}
+          onOpenSearch={() => {
+            setSearchInitialQuery('');
+            setIsSearchOpen(true);
+          }}
           onHideOutOfStockChange={setHideOutOfStock}
           onSubcategoryChange={setActiveSubcategory}
           products={visibleProducts}
@@ -2818,13 +2863,18 @@ export default function PosWorkstation() {
         <SearchOverlay
           canPrintLabels={hasLabelPrinter}
           hideOutOfStock={hideOutOfStock}
+          initialQuery={searchInitialQuery}
           priceOverrideSettings={priceOverrideSettings}
           products={products}
           terminalId={currentTerminalId}
           shortcuts={actionShortcuts}
-          onClose={() => setIsSearchOpen(false)}
+          onClose={() => {
+            setIsSearchOpen(false);
+            setSearchInitialQuery('');
+          }}
           onPick={(product, quantity, priceOverride) => {
             setIsSearchOpen(false);
+            setSearchInitialQuery('');
             handleProductPick(product, (quantity != null || priceOverride != null) ? { quantity, priceOverride } : undefined);
           }}
           onPrintLabel={(product) => {
@@ -3482,10 +3532,9 @@ function ProductPanel(props: ProductPanelProps) {
           <input
             ref={props.barcodeInputRef}
             className="glass-input barcode-focus-input"
-            data-scanner-passthrough
             aria-label="Barcode entry"
             placeholder="Scan or enter barcode"
-            title="Lead with qty*code to add that many, or price-code (e.g. 150-GENERAL) to set a price for this sale."
+            title="Use qty*code, price-code, or combine both as qty*price-code (for example 5*150-GENERAL)."
             onKeyDown={(event) => {
               if (event.key !== 'Enter') return;
               event.preventDefault();
@@ -4084,6 +4133,71 @@ function ModalShell(
       </div>
     </div>
   );
+}
+
+/** Measures which picker choices are genuinely visible on this screen. */
+function useMeasuredPickerWindow(itemCount: number) {
+  const viewportRef = useRef<HTMLDivElement>(null);
+  const [visibleIndices, setVisibleIndices] = useState<number[]>(() => (
+    Array.from({ length: Math.min(9, itemCount) }, (_, index) => index)
+  ));
+  const [hasOverflow, setHasOverflow] = useState(itemCount > 9);
+
+  const measure = useCallback(() => {
+    const viewport = viewportRef.current;
+    if (!viewport) return;
+    const items = [...viewport.querySelectorAll<HTMLElement>('[data-picker-item="true"]')];
+    const viewportRect = viewport.getBoundingClientRect();
+    const measured = items
+      .map((item, index) => ({ index, rect: item.getBoundingClientRect() }))
+      .filter(({ rect }) => rect.bottom > viewportRect.top + 1 && rect.top < viewportRect.bottom - 1)
+      .map(({ index }) => index)
+      .slice(0, 9);
+    const nextVisible = measured.length > 0
+      ? measured
+      : Array.from({ length: Math.min(9, items.length) }, (_, index) => index);
+
+    setVisibleIndices((current) => (
+      current.length === nextVisible.length && current.every((value, index) => value === nextVisible[index])
+        ? current
+        : nextVisible
+    ));
+    setHasOverflow(viewport.scrollHeight > viewport.clientHeight + 1 || items.length > nextVisible.length);
+  }, []);
+
+  useEffect(() => {
+    const viewport = viewportRef.current;
+    if (!viewport) return undefined;
+    viewport.scrollTop = 0;
+    const frame = window.requestAnimationFrame(measure);
+    const handleScroll = () => window.requestAnimationFrame(measure);
+    const resizeObserver = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(measure);
+    resizeObserver?.observe(viewport);
+    viewport.addEventListener('scroll', handleScroll, { passive: true });
+    window.addEventListener('resize', measure);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      resizeObserver?.disconnect();
+      viewport.removeEventListener('scroll', handleScroll);
+      window.removeEventListener('resize', measure);
+    };
+  }, [itemCount, measure]);
+
+  const scrollByArrow = useCallback((direction: -1 | 1) => {
+    const viewport = viewportRef.current;
+    if (!viewport || !hasOverflow) return false;
+    const items = [...viewport.querySelectorAll<HTMLElement>('[data-picker-item="true"]')];
+    const rowTops = [...new Set(items.map((item) => item.offsetTop))].sort((left, right) => left - right);
+    const currentTop = viewport.scrollTop;
+    const target = direction > 0
+      ? rowTops.find((top) => top > currentTop + 1)
+      : [...rowTops].reverse().find((top) => top < currentTop - 1);
+    const fallback = Math.max(72, Math.round(viewport.clientHeight / 3));
+    viewport.scrollTo({ top: target ?? currentTop + (direction * fallback), behavior: 'smooth' });
+    return true;
+  }, [hasOverflow]);
+
+  return { hasOverflow, scrollByArrow, viewportRef, visibleIndices };
 }
 
 function SettingsModal(
@@ -5728,6 +5842,7 @@ function SearchOverlay(
   props: {
     canPrintLabels: boolean;
     hideOutOfStock: boolean;
+    initialQuery: string;
     priceOverrideSettings: POSPriceOverrideSettings;
     products: Product[];
     terminalId: string;
@@ -5737,7 +5852,7 @@ function SearchOverlay(
     onPrintLabel: (product: Product) => void;
   },
 ) {
-  const [query, setQuery] = useState('');
+  const [query, setQuery] = useState(props.initialQuery);
   const [scope, setScope] = useState<'all' | 'sku' | 'name' | 'category' | 'subcategory'>('all');
   const [results, setResults] = useState<Product[]>(props.products.slice(0, 12));
   const [isSearching, setIsSearching] = useState(false);
@@ -5755,6 +5870,7 @@ function SearchOverlay(
   // the same shorthand the barcode field accepts, while the digits before
   // it are stripped so the search itself still runs against the code alone.
   const prefixedQuery = useMemo(() => parseQuantityPrefixedCode(query), [query]);
+  const queryWithoutQuantity = prefixedQuery?.code ?? query;
 
   // "150-code" / "150-barcode" rings a result up at that price the moment
   // it's picked, the same shorthand the barcode field accepts. Unlike the
@@ -5762,13 +5878,13 @@ function SearchOverlay(
   // "7-Up", "3M tape"), so this is only ever used as a fallback below, once
   // the typed text has already come up empty as itself.
   const pricePrefixedQuery = useMemo(() => (
-    prefixedQuery || !props.priceOverrideSettings.enabled
+    !props.priceOverrideSettings.enabled
       ? null
-      : parsePricePrefixedCode(query, props.priceOverrideSettings.separator)
-  ), [prefixedQuery, props.priceOverrideSettings, query]);
+      : parsePricePrefixedCode(queryWithoutQuantity, props.priceOverrideSettings.separator)
+  ), [props.priceOverrideSettings, queryWithoutQuantity]);
 
   useEffect(() => {
-    const rawTerm = (prefixedQuery?.code ?? query).trim().toLowerCase();
+    const rawTerm = queryWithoutQuantity.trim().toLowerCase();
     const fallbackTerm = pricePrefixedQuery?.code.trim().toLowerCase();
 
     function filterByScope(rows: Product[], term: string) {
@@ -5852,15 +5968,23 @@ function SearchOverlay(
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [prefixedQuery, pricePrefixedQuery, props.hideOutOfStock, props.products, props.terminalId, query, scope]);
+  }, [pricePrefixedQuery, props.hideOutOfStock, props.products, props.terminalId, queryWithoutQuantity, scope]);
 
   const priceOverride = isPriceFallback ? pricePrefixedQuery?.price : undefined;
+  const pickerWindow = useMeasuredPickerWindow(results.length);
 
   useEffect(() => {
     const handlePickerKey = (event: KeyboardEvent) => {
       if (bindingMatchesEvent(props.shortcuts.closePopup, event)) {
         event.preventDefault();
         props.onClose();
+        return;
+      }
+      if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+        if (pickerWindow.scrollByArrow(event.key === 'ArrowDown' ? 1 : -1)) {
+          event.preventDefault();
+          event.stopPropagation();
+        }
         return;
       }
       // Jumping to a result only answers to the numpad, never the number row
@@ -5870,14 +5994,15 @@ function SearchOverlay(
       if (event.ctrlKey || event.altKey || event.shiftKey || event.metaKey) return;
       const match = /^Numpad([1-9])$/.exec(event.code);
       if (!match) return;
-      const index = Number(match[1]) - 1;
+      const index = pickerWindow.visibleIndices[Number(match[1]) - 1];
+      if (index == null) return;
       if (!results[index]) return;
       event.preventDefault();
       props.onPick(results[index], prefixedQuery?.quantity, priceOverride);
     };
     window.addEventListener('keydown', handlePickerKey, true);
     return () => window.removeEventListener('keydown', handlePickerKey, true);
-  }, [prefixedQuery, priceOverride, props, results]);
+  }, [pickerWindow, prefixedQuery, priceOverride, props, results]);
 
   return (
     <ModalShell onClose={props.onClose} title="Search products" width="wide">
@@ -5889,7 +6014,7 @@ function SearchOverlay(
             // Scans typed here should populate the box instead of jumping
             // straight into the cart, so the global capture stands down.
             data-scanner-passthrough="true"
-            placeholder="Search by SKU, barcode, name, or subcategory - or type qty*code, e.g. 25*3RL"
+            placeholder="Search SKU, barcode or name - use qty*price-code to combine quantity and price"
             value={query}
             onChange={(event) => setQuery(event.target.value)}
             onKeyDown={(event) => {
@@ -5908,6 +6033,7 @@ function SearchOverlay(
             <>
               {' '}Or lead with a price - 150{props.priceOverrideSettings.separator}GENERAL - to ring it up at that
               price; tried only once the text as typed matches nothing on its own.
+              {' '}Combine both as 5*150{props.priceOverrideSettings.separator}barcode.
             </>
           )}
         </div>
@@ -5924,16 +6050,18 @@ function SearchOverlay(
           ))}
         </div>
 
-        <div className="search-results">
+        <div ref={pickerWindow.viewportRef} className="search-results keyboard-picker-viewport">
           {isSearching && (
             <div className="inline-alert info">
               Searching local SQLite index...
             </div>
           )}
           {results.map((product, index) => (
-            <div key={product.id} className="search-result-row">
+            <div key={product.id} className="search-result-row" data-picker-item="true">
               <button className="search-result-main" onClick={() => props.onPick(product)}>
-                {index < 9 && <kbd className="picker-number">{index + 1}</kbd>}
+                {pickerWindow.visibleIndices.includes(index) && (
+                  <kbd className="picker-number">{pickerWindow.visibleIndices.indexOf(index) + 1}</kbd>
+                )}
                 <div className="product-thumb compact">{getCategoryToken(product.subcategory || product.name)}</div>
                 <div className="search-result-copy">
                   <div>{product.name}</div>
@@ -5961,6 +6089,7 @@ function SearchOverlay(
             </div>
           )}
         </div>
+        {pickerWindow.hasOverflow && <div className="quick-picker-help">Use Up / Down to reveal more products. Number keys follow the visible rows.</div>}
       </div>
     </ModalShell>
   );
@@ -6091,8 +6220,15 @@ function PriceOverrideModal(props: {
   useEffect(() => {
     const handleKey = (event: KeyboardEvent) => {
       if (props.isSaving) return;
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        event.stopPropagation();
+        props.onClose();
+        return;
+      }
       if (bindingMatchesEvent(props.shortcuts.closePopup, event)) {
         event.preventDefault();
+        event.stopPropagation();
         props.onClose();
         return;
       }
@@ -6166,7 +6302,7 @@ function PriceOverrideModal(props: {
           </button>
         </div>
         <div className="quick-picker-help">
-          Use ←/→ or ↑/↓ to choose Yes or No, Tab to move, and Enter to confirm.
+          Use ←/→ or ↑/↓ to choose Yes or No, Tab to move, Enter to confirm, or Escape to keep this sale only.
         </div>
       </div>
     </ModalShell>
@@ -6180,7 +6316,8 @@ function StaffSelectionModal(props: {
   onSelect: (salesperson: POSUser) => void;
 }) {
   const [query, setQuery] = useState('');
-  const visible = props.salespeople.filter((person) => `${person.name} ${person.initials}`.toLowerCase().includes(query.toLowerCase())).slice(0, 9);
+  const visible = props.salespeople.filter((person) => `${person.name} ${person.initials}`.toLowerCase().includes(query.toLowerCase()));
+  const pickerWindow = useMeasuredPickerWindow(visible.length);
 
   useEffect(() => {
     const handleKey = (event: KeyboardEvent) => {
@@ -6189,27 +6326,38 @@ function StaffSelectionModal(props: {
         props.onClose();
         return;
       }
-      const index = popupNumberIndex(event);
+      if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+        if (pickerWindow.scrollByArrow(event.key === 'ArrowDown' ? 1 : -1)) {
+          event.preventDefault();
+          event.stopPropagation();
+        }
+        return;
+      }
+      const digitIndex = popupNumberIndex(event);
+      const index = digitIndex == null ? null : pickerWindow.visibleIndices[digitIndex];
       if (index == null || !visible[index]) return;
       event.preventDefault();
       props.onSelect(visible[index]);
     };
     window.addEventListener('keydown', handleKey, true);
     return () => window.removeEventListener('keydown', handleKey, true);
-  }, [props, visible]);
+  }, [pickerWindow, props, visible]);
 
   return (
     <ModalShell onClose={props.onClose} title="Choose staff for last product" width="wide">
       <div className="quick-picker-stack">
         <input autoFocus className="glass-input" placeholder="Search staff" value={query} onChange={(event) => setQuery(event.target.value)} />
-        <div className="quick-picker-grid">
+        <div ref={pickerWindow.viewportRef} className="quick-picker-grid keyboard-picker-viewport">
           {visible.map((person, index) => (
-            <button className="quick-picker-card" key={person.id} onClick={() => props.onSelect(person)}>
-              <kbd className="picker-number">{index + 1}</kbd>
+            <button className="quick-picker-card" data-picker-item="true" key={person.id} onClick={() => props.onSelect(person)}>
+              {pickerWindow.visibleIndices.includes(index) && (
+                <kbd className="picker-number">{pickerWindow.visibleIndices.indexOf(index) + 1}</kbd>
+              )}
               <b>{person.name}</b><span>{person.initials}</span>
             </button>
           ))}
         </div>
+        {pickerWindow.hasOverflow && <div className="quick-picker-help">Use Up / Down for more staff. Number keys select the visible cards.</div>}
       </div>
     </ModalShell>
   );
@@ -6258,7 +6406,8 @@ function CustomerSelectionModal(props: {
   const [query, setQuery] = useState('');
   const visible = props.customers.filter((customer) => (
     `${customer.name} ${customer.code} ${customer.phone ?? ''}`.toLowerCase().includes(query.toLowerCase())
-  )).slice(0, 9);
+  ));
+  const pickerWindow = useMeasuredPickerWindow(visible.length);
 
   useEffect(() => {
     const handleKey = (event: KeyboardEvent) => {
@@ -6267,27 +6416,38 @@ function CustomerSelectionModal(props: {
         props.onClose();
         return;
       }
-      const index = popupNumberIndex(event);
+      if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+        if (pickerWindow.scrollByArrow(event.key === 'ArrowDown' ? 1 : -1)) {
+          event.preventDefault();
+          event.stopPropagation();
+        }
+        return;
+      }
+      const digitIndex = popupNumberIndex(event);
+      const index = digitIndex == null ? null : pickerWindow.visibleIndices[digitIndex];
       if (index == null || !visible[index]) return;
       event.preventDefault();
       props.onSelect(visible[index]);
     };
     window.addEventListener('keydown', handleKey, true);
     return () => window.removeEventListener('keydown', handleKey, true);
-  }, [props, visible]);
+  }, [pickerWindow, props, visible]);
 
   return (
     <ModalShell onClose={props.onClose} title="Choose customer" width="wide">
       <div className="quick-picker-stack">
         <input autoFocus className="glass-input" placeholder="Search name, code or phone" value={query} onChange={(event) => setQuery(event.target.value)} />
-        <div className="quick-picker-grid">
+        <div ref={pickerWindow.viewportRef} className="quick-picker-grid keyboard-picker-viewport">
           {visible.map((customer, index) => (
-            <button className={`quick-picker-card ${customer.id === props.selectedCustomerId ? 'active' : ''}`} key={customer.id} onClick={() => props.onSelect(customer)}>
-              <kbd className="picker-number">{index + 1}</kbd>
+            <button className={`quick-picker-card ${customer.id === props.selectedCustomerId ? 'active' : ''}`} data-picker-item="true" key={customer.id} onClick={() => props.onSelect(customer)}>
+              {pickerWindow.visibleIndices.includes(index) && (
+                <kbd className="picker-number">{pickerWindow.visibleIndices.indexOf(index) + 1}</kbd>
+              )}
               <b>{customer.name}</b><span>{customer.code} - {customer.tier}</span>
             </button>
           ))}
         </div>
+        {pickerWindow.hasOverflow && <div className="quick-picker-help">Use Up / Down for more customers. Number keys select the visible cards.</div>}
       </div>
     </ModalShell>
   );
@@ -6573,6 +6733,7 @@ function VariantSelectionModal(
   const [selectedValues, setSelectedValues] = useState<Record<string, string>>(() => (
     buildVariantSelectionMap(resolvedInitialVariant)
   ));
+  const pickerWindow = useMeasuredPickerWindow(isSingleAxis ? variants.length : 0);
 
   useEffect(() => {
     setSelectedVariantId(resolvedInitialVariant?.id ?? null);
@@ -6599,14 +6760,22 @@ function VariantSelectionModal(
         props.onClose();
         return;
       }
-      const index = popupNumberIndex(event);
+      if (isSingleAxis && (event.key === 'ArrowDown' || event.key === 'ArrowUp')) {
+        if (pickerWindow.scrollByArrow(event.key === 'ArrowDown' ? 1 : -1)) {
+          event.preventDefault();
+          event.stopPropagation();
+        }
+        return;
+      }
+      const digitIndex = popupNumberIndex(event);
+      const index = digitIndex == null ? null : pickerWindow.visibleIndices[digitIndex];
       if (index == null || !variants[index]) return;
       event.preventDefault();
       props.onConfirm(variants[index]);
     };
     window.addEventListener('keydown', handleKey, true);
     return () => window.removeEventListener('keydown', handleKey, true);
-  }, [props, variants]);
+  }, [isSingleAxis, pickerWindow, props, variants]);
 
   const handleAttributePick = useCallback((attributeId: string, valueId: string) => {
     const nextSelection = {
@@ -6638,16 +6807,19 @@ function VariantSelectionModal(
             </div>
 
             {isSingleAxis ? (
-              <div className="variant-tile-grid">
+              <div ref={pickerWindow.viewportRef} className="variant-tile-grid keyboard-picker-viewport">
                 {variants.map((variant, index) => {
                   const label = getProductVariantLabel(variant);
                   return (
                     <button
                       key={variant.id}
+                      data-picker-item="true"
                       className={`variant-choice-tile ${selectedVariant?.id === variant.id ? 'active' : ''}`}
                       onClick={() => handleDirectVariantPick(variant)}
                     >
-                      {index < 9 && <kbd className="picker-number">{index + 1}</kbd>}
+                      {pickerWindow.visibleIndices.includes(index) && (
+                        <kbd className="picker-number">{pickerWindow.visibleIndices.indexOf(index) + 1}</kbd>
+                      )}
                       <div className="variant-choice-head">
                         <span>{label}</span>
                         <span className="variant-choice-stock">Stock {formatStockQuantity(variant.stockOnHand)}</span>
@@ -6693,6 +6865,10 @@ function VariantSelectionModal(
                   </section>
                 ))}
               </div>
+            )}
+
+            {isSingleAxis && pickerWindow.hasOverflow && (
+              <div className="quick-picker-help">Use Up / Down for more variants. Number keys select the visible cards.</div>
             )}
 
             <div className="variant-selection-card">
@@ -9113,6 +9289,7 @@ function ReceiptModal(
   },
 ) {
   const [isPrinting, setIsPrinting] = useState(false);
+  const receiptScrollRef = useRef<HTMLDivElement>(null);
 
   const handlePrint = async () => {
     setIsPrinting(true);
@@ -9126,6 +9303,15 @@ function ReceiptModal(
   useEffect(() => {
     const handleKey = (event: KeyboardEvent) => {
       if (event.ctrlKey || event.altKey || event.metaKey) return;
+      if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+        const preview = receiptScrollRef.current;
+        if (preview && preview.scrollHeight > preview.clientHeight + 1) {
+          event.preventDefault();
+          event.stopPropagation();
+          preview.scrollBy({ top: event.key === 'ArrowDown' ? 96 : -96, behavior: 'smooth' });
+        }
+        return;
+      }
       if (event.code !== 'KeyP') return;
       event.preventDefault();
       event.stopPropagation();
@@ -9150,8 +9336,10 @@ function ReceiptModal(
   const salespersonLabel = salespeople.length ? salespeople.join(', ') : 'N/A';
 
   return (
-    <ModalShell onClose={props.onClose} title="Receipt" width="narrow">
-      <div className="receipt-paper">
+    <ModalShell onClose={props.onClose} title="Receipt" width="payment">
+      <div className="receipt-review-layout">
+        <div ref={receiptScrollRef} className="receipt-preview-scroll" aria-label="Scrollable receipt preview" tabIndex={0}>
+          <div className="receipt-paper">
         <div className="receipt-header">
           <div className="receipt-brand">{DEFAULT_RECEIPT_BRANDING.name}</div>
           {DEFAULT_RECEIPT_BRANDING.addressLines.map((line) => <div key={line}>{line}</div>)}
@@ -9271,6 +9459,52 @@ function ReceiptModal(
           <div>{props.sale.receiptNumber}</div>
           {DEFAULT_RECEIPT_BRANDING.footerLines.map((line) => <div key={line}>{line}</div>)}
         </div>
+          </div>
+        </div>
+
+        <aside className="receipt-screen-summary" aria-label="Receipt totals and payment summary">
+          <div className="receipt-screen-summary-title">Bill summary</div>
+          <div className="receipt-screen-amount">
+            <span>Subtotal</span>
+            <strong>{formatCurrency(props.sale.subtotal)}</strong>
+          </div>
+          {props.sale.discountTotal > 0 && (
+            <div className="receipt-screen-detail">
+              <span>Discount</span>
+              <strong>-{formatCurrency(props.sale.discountTotal)}</strong>
+            </div>
+          )}
+          {props.sale.taxTotal > 0 && (
+            <div className="receipt-screen-detail">
+              <span>Tax</span>
+              <strong>{formatCurrency(props.sale.taxTotal)}</strong>
+            </div>
+          )}
+          <div className="receipt-screen-amount total">
+            <span>Total</span>
+            <strong>{formatCurrency(props.sale.total)}</strong>
+          </div>
+          <div className="receipt-screen-payments">
+            <div className="receipt-screen-summary-title">Payments</div>
+            {props.sale.payments.map((payment, index) => (
+              <div className="receipt-screen-detail" key={`${payment.method}-summary-${index}`}>
+                <span>{PAYMENT_OPTIONS.find((option) => option.method === payment.method)?.label ?? payment.method}</span>
+                <strong>{formatCurrency(payment.amount)}</strong>
+              </div>
+            ))}
+          </div>
+          <div className={`receipt-screen-balance ${balanceDue === 0 ? 'settled' : ''}`}>
+            <span>Balance</span>
+            <strong>{formatCurrency(balanceDue)}</strong>
+          </div>
+          {changeDue > 0 && (
+            <div className="receipt-screen-change">
+              <span>Change</span>
+              <strong>{formatCurrency(changeDue)}</strong>
+            </div>
+          )}
+          <div className="quick-picker-help">Use Up / Down to scroll the receipt preview.</div>
+        </aside>
       </div>
 
       <div className="modal-actions">

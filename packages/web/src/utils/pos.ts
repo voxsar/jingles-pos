@@ -85,6 +85,39 @@ export function parseQuantityPrefixedCode(input: string): { quantity: number; co
 const RESERVED_PRICE_PREFIX_SEPARATORS = new Set(['*', '@']);
 
 /**
+ * Joins a keyboard-wedge scan to a quantity/price prefix already waiting in
+ * the barcode box. Scanner capture normally submits a burst as one isolated
+ * code, so without this bridge typing `5*` and then pulling the trigger would
+ * lose the multiplier. Ordinary text is intentionally ignored: only a valid,
+ * incomplete POS modifier may augment the scan.
+ */
+export function appendScanToPendingBarcodeModifier(
+  pendingInput: string,
+  scannedCode: string,
+  priceSeparator: string | null = '-',
+): string {
+  const code = scannedCode.trim();
+  const pending = pendingInput.trim();
+  if (!code || !pending) return code;
+
+  const quantityMatch = /^(\d+)\s*[*@]\s*$/.exec(pending);
+  if (quantityMatch && Number(quantityMatch[1]) > 0) {
+    return `${pending}${code}`;
+  }
+
+  const separator = priceSeparator?.trim().slice(0, 1) ?? '';
+  if (!separator || RESERVED_PRICE_PREFIX_SEPARATORS.has(separator)) return code;
+
+  const escaped = separator.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const priceMatch = new RegExp(`^(\\d+(?:\\.\\d+)?)\\s*${escaped}\\s*$`).exec(pending);
+  if (priceMatch && Number(priceMatch[1]) > 0) {
+    return `${pending}${code}`;
+  }
+
+  return code;
+}
+
+/**
  * Parses the "<price><separator><code>" shorthand for ringing an item up at a
  * hand-typed price instead of its normal tier — e.g. "150-GENERAL" or
  * "150-1234567890123" for the General Item, carried over from the previous

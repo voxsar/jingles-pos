@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { CartLine, PaymentMethod, Product, UserRole } from '@jingles/shared';
 import {
+  appendScanToPendingBarcodeModifier,
   calcCartTotals,
   buildProductScanCodeIndex,
   createCartLine,
@@ -14,6 +15,24 @@ import {
   recalculateCartLine,
   saleIncludesCash,
 } from '../utils/pos';
+
+describe('appendScanToPendingBarcodeModifier', () => {
+  it('appends a scan to a pending quantity multiplier', () => {
+    expect(appendScanToPendingBarcodeModifier('5*', '1234567890123')).toBe('5*1234567890123');
+    expect(appendScanToPendingBarcodeModifier('12 @ ', 'SKU-1')).toBe('12 @SKU-1');
+  });
+
+  it('appends a scan to a pending enabled price override', () => {
+    expect(appendScanToPendingBarcodeModifier('150-', '1234567890123')).toBe('150-1234567890123');
+    expect(appendScanToPendingBarcodeModifier('99.50 # ', 'GENERAL', '#')).toBe('99.50 #GENERAL');
+  });
+
+  it('does not append arbitrary input or a disabled price modifier', () => {
+    expect(appendScanToPendingBarcodeModifier('partial', '1234567890123')).toBe('1234567890123');
+    expect(appendScanToPendingBarcodeModifier('150-', '1234567890123', null)).toBe('1234567890123');
+    expect(appendScanToPendingBarcodeModifier('0*', '1234567890123')).toBe('1234567890123');
+  });
+});
 
 describe('buildProductScanCodeIndex', () => {
   it('matches every saved barcode and preserves exact variant scans', () => {
