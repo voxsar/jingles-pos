@@ -569,6 +569,131 @@ export async function validateSharedVoucher(context: any) {
   };
 }
 
+export interface SharedPriceOverrideInput {
+  code: string;
+  price: number;
+  tierLabel: string;
+  tierPrices?: Record<string, number>;
+  terminalId?: string;
+  cashierName?: string;
+  receiptReference?: string;
+}
+
+/**
+ * Direct-DB counterpart to the cloud host's `POST /api/pos/pricing/override`
+ * (see `quantum-shelf/packages/backend/src/routes/pos.ts`), for the
+ * "shared" deployment where this backend talks to the inventory Postgres
+ * itself rather than syncing through HTTP. Writes a new `batches` row the
+ * same way `batchService.createBatch` does on the inventory side, since
+ * `buildPriceTiers` above (and its inventory-side twin) both resolve a
+ * product's current price from the most recently created active batch.
+ */
+export async function recordSharedPriceOverride(input: SharedPriceOverrideInput) {
+  const inventory = getSharedInventoryPool();
+  const code = input.code.trim();
+  const price = input.price;
+  const tierLabel = input.tierLabel?.trim() || 'Retail';
+  const tierKey = tierLabel.toLowerCase();
+  if (!code) throw new Error('code is required');
+  if (!Number.isFinite(price) || price <= 0) throw new Error('price must be a positive, finite number');
+  if (!['retail', 'wholesale', 'bulk'].includes(tierKey)) throw new Error(`Unsupported price tier ${tierLabel}`);
+
+  const bySkuBarcode = (await inventory.query<{ sku_id: string; variant_id: string | null }>(
+    `SELECT sku_id, variant_id FROM product_barcodes WHERE barcode = $1 LIMIT 1`,
+    [code],
+  )).rows[0];
+
+  let skuId: string;
+  let variantId: string | null;
+  let skuCode: string;
+  let skuName: string;
+  let variantCode: string | null = null;
+
+  if (bySkuBarcode) {
+    skuId = bySkuBarcode.sku_id;
+    variantId = bySkuBarcode.variant_id;
+    const sku = (await inventory.query<{ sku_code: string; name: string }>(
+      `SELECT sku_code, name FROM skus WHERE id = $1`,
+      [skuId],
+    )).rows[0];
+    if (!sku) throw new Error(`No product matches code ${code}`);
+    skuCode = sku.sku_code;
+    skuName = sku.name;
+    if (variantId) {
+      const variant = (await inventory.query<{ variant_code: string }>(
+        `SELECT variant_code FROM sku_variants WHERE id = $1`,
+        [variantId],
+      )).rows[0];
+      variantCode = variant?.variant_code ?? null;
+    }
+  } else {
+    const bySkuCode = (await inventory.query<{ id: string; sku_code: string; name: string }>(
+      `SELECT id, sku_code, name FROM skus WHERE sku_code = $1 AND is_active = TRUE LIMIT 1`,
+      [code],
+    )).rows[0];
+    if (bySkuCode) {
+      skuId = bySkuCode.id;
+      variantId = null;
+      skuCode = bySkuCode.sku_code;
+      skuName = bySkuCode.name;
+    } else {
+      const byVariantCode = (await inventory.query<{ id: string; sku_id: string; variant_code: string; sku_code: string; sku_name: string }>(
+        `SELECT v.id, v.sku_id, v.variant_code, s.sku_code, s.name AS sku_name
+         FROM sku_variants v INNER JOIN skus s ON s.id = v.sku_id
+         WHERE v.variant_code = $1 AND v.is_active = TRUE LIMIT 1`,
+        [code],
+      )).rows[0];
+      if (!byVariantCode) throw new Error(`No product matches code ${code}`);
+      skuId = byVariantCode.sku_id;
+      variantId = byVariantCode.id;
+      skuCode = byVariantCode.sku_code;
+      skuName = byVariantCode.sku_name;
+      variantCode = byVariantCode.variant_code;
+    }
+  }
+
+  const lastSequence = (await inventory.query<{ next_sequence: number }>(
+    `SELECT COALESCE(MAX(sequence_number), 0) + 1 AS next_sequence FROM batches
+     WHERE sku_id = $1 AND variant_id IS NOT DISTINCT FROM $2`,
+    [skuId, variantId],
+  )).rows[0]!;
+  const sequenceNumber = Number(lastSequence.next_sequence);
+  const batchNumber = `${variantCode ?? skuCode}-B${String(sequenceNumber).padStart(3, '0')}`;
+
+  const notes = [
+    'POS price override',
+    `tier ${tierLabel}`,
+    input.terminalId && `terminal ${input.terminalId}`,
+    input.cashierName && `by ${input.cashierName}`,
+    input.receiptReference && `sale ${input.receiptReference}`,
+    new Date().toISOString(),
+  ].filter(Boolean).join(' - ');
+
+  const batchId = randomUUID();
+  const tierPrices = {
+    sellingPrice: tierKey === 'retail' ? price : Number(input.tierPrices?.retail) || null,
+    wholesalePrice: tierKey === 'wholesale' ? price : Number(input.tierPrices?.wholesale) || null,
+    bulkPrice: tierKey === 'bulk' ? price : Number(input.tierPrices?.bulk) || null,
+  };
+  const created = (await inventory.query<{ id: string; batch_number: string; selling_price: number | null; wholesale_price: number | null; bulk_price: number | null; created_at: string }>(
+    `INSERT INTO batches (id, batch_number, sku_id, variant_id, sequence_number, selling_price, wholesale_price, bulk_price, currency, notes, is_active, created_at, updated_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'LKR', $9, TRUE, NOW(), NOW())
+     RETURNING id, batch_number, selling_price, wholesale_price, bulk_price, created_at`,
+    [batchId, batchNumber, skuId, variantId, sequenceNumber, tierPrices.sellingPrice, tierPrices.wholesalePrice, tierPrices.bulkPrice, notes],
+  )).rows[0]!;
+
+  return {
+    sku: { id: skuId, skuCode, name: skuName },
+    variant: variantId ? { id: variantId, variantCode: variantCode ?? '' } : null,
+    batch: {
+      id: created.id,
+      batchNumber: created.batch_number,
+      sellingPrice: created.selling_price,
+      createdAt: created.created_at,
+    },
+  };
+}
+
 async function syncProjection(snapshot: SharedCatalogSnapshot): Promise<void> {
   await prisma.$transaction(async (tx) => {
     for (const branch of snapshot.branches ?? []) {

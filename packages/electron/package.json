@@ -1,6 +1,6 @@
 {
   "name": "@jingles/electron",
-  "version": "1.0.18",
+  "version": "1.0.20",
   "description": "Offline-capable Federation Commerce point-of-sale desktop application",
   "author": "The Red Sun",
   "main": "dist/main.js",
@@ -14,6 +14,7 @@
     "test": "jest",
     "native:rebuild": "node scripts/native-abi.cjs electron",
     "electron:pack": "electron-builder --win nsis",
+    "verify:release": "node scripts/verify-release.cjs",
     "build:update": "node scripts/build-update.cjs JINGLES_POS_UPDATE_URL"
   },
   "dependencies": {

@@ -245,6 +245,33 @@ export async function searchProducts(query: string, terminalId?: string): Promis
 	return getJson<Product[]>(`${'/products/search'}?${params.toString()}`);
 }
 
+export interface PriceOverrideSubmission {
+	code: string;
+	price: number;
+	tierLabel: string;
+	tierPrices: Record<string, number>;
+	terminalId?: string;
+	cashierName?: string;
+	receiptReference?: string;
+}
+
+export interface PriceOverrideResult {
+	sku: { id: string; skuCode: string; name: string };
+	variant: { id: string; variantCode: string } | null;
+	batch: { id: string; batchNumber: string; sellingPrice: number | null; createdAt: string };
+}
+
+/**
+ * Makes a "<price>-<code>" checkout shorthand price permanent by recording a
+ * new batch-pricing entry upstream. Never called on the path that finishes a
+ * sale - this is a separate, best-effort request the caller fires after the
+ * cart line is already in, so a slow or failed request here never holds up
+ * the receipt.
+ */
+export async function submitPriceOverride(input: PriceOverrideSubmission): Promise<PriceOverrideResult> {
+	return postJson<PriceOverrideResult>('/pricing/override', input);
+}
+
 export async function openShift(input: ShiftOpenInput): Promise<ShiftSummary> {
 	return postJson<ShiftSummary>('/shifts/open', input);
 }

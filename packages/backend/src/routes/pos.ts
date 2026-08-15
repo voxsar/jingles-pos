@@ -35,10 +35,11 @@ import {
   confirmPlayback,
   getServerVectorClock,
   playbackEvents,
+  submitPriceOverride,
   syncWithUpstream,
   validateUpstreamVoucher,
 } from '../services/posSync';
-import { syncSharedCatalogProjection, validateSharedVoucher } from '../sharedInventory';
+import { recordSharedPriceOverride, syncSharedCatalogProjection, validateSharedVoucher } from '../sharedInventory';
 import {
   getLocalCatalogSnapshot,
   searchLocalCatalog,
@@ -616,6 +617,26 @@ router.post('/vouchers/validate', async (req: Request, res: Response) => {
     return res.status(result.isValid ? 200 : 422).json(result);
   } catch (error) {
     return res.status(503).json({ error: error instanceof Error ? error.message : 'Voucher validation unavailable' });
+  }
+});
+
+/**
+ * Makes the "<price>-<code>" checkout shorthand permanent: records it as a
+ * new batch-pricing entry on the inventory side instead of writing to this
+ * terminal's own local SQLite, because every local `BatchPrice` row is
+ * wholesale-replaced from the cloud catalog snapshot on every sync cycle - a
+ * local-only write would silently revert within ~20 seconds. Fire-and-forget
+ * from the cashier's point of view: this never touches the sale itself, so a
+ * slow or failed request here can't hold up the receipt.
+ */
+router.post('/pricing/override', async (req: Request, res: Response) => {
+  try {
+    const result = isLocalPosBackendMode()
+      ? await submitPriceOverride(req.body)
+      : await recordSharedPriceOverride(req.body);
+    return res.status(201).json(result);
+  } catch (error) {
+    return res.status(502).json({ error: error instanceof Error ? error.message : 'Price override was not saved' });
   }
 });
 

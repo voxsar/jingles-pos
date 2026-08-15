@@ -90,6 +90,7 @@ import {
   saveHeldSale,
   searchProducts,
   subscribeSyncStatus,
+  submitPriceOverride,
   syncNow,
   updateCustomer,
   voidSale,
@@ -244,6 +245,21 @@ type UnitSelectionRequest = {
   variant?: ProductVariant;
 };
 
+/**
+ * A price typed at the till via the "<price>-<code>" shorthand, offered as a
+ * one-click "make this permanent" prompt once the line is already in the
+ * cart. Deliberately just enough to identify the line and place the request
+ * - no date or remark fields, because those are auto-filled server-side and
+ * a sale in progress can't wait on a form.
+ */
+type PriceOverridePrompt = {
+  code: string;
+  price: number;
+  productName: string;
+  tiers: ProductPriceTier[];
+  variantLabel?: string;
+};
+
 const DEFAULT_CATALOG_PANE_WIDTH = 62;
 const MIN_CATALOG_PANE_WIDTH = 38;
 const MAX_CATALOG_PANE_WIDTH = 72;
@@ -396,6 +412,8 @@ export default function PosWorkstation() {
   const [isHelpOpen, setIsHelpOpen] = useState(false);
   const [variantSelection, setVariantSelection] = useState<VariantSelectionRequest | null>(null);
   const [unitSelection, setUnitSelection] = useState<UnitSelectionRequest | null>(null);
+  const [priceOverridePrompt, setPriceOverridePrompt] = useState<PriceOverridePrompt | null>(null);
+  const [isSavingPriceOverride, setIsSavingPriceOverride] = useState(false);
   const [isStaffPickerOpen, setIsStaffPickerOpen] = useState(false);
   const [isStaffDirectoryOpen, setIsStaffDirectoryOpen] = useState(false);
   const [isCustomerPickerOpen, setIsCustomerPickerOpen] = useState(false);
@@ -1551,7 +1569,41 @@ export default function PosWorkstation() {
     } else {
       addProductToCart({ ...product, priceTiers: [customTier] }, undefined, requestedQuantity, customTier.label);
     }
+
+    // Ask whether to make the price permanent in the same focused popup style
+    // as the unit picker. The line is already safely in the current sale.
+    setPriceOverridePrompt({
+      code: variant?.variantCode ?? product.sku,
+      price: roundedPrice,
+      productName: product.name,
+      tiers: sortPriceTiers(variant?.priceTiers?.length ? variant.priceTiers : product.priceTiers)
+        .filter((tier) => ['retail', 'wholesale', 'bulk'].includes(tier.label.trim().toLowerCase())),
+      variantLabel: variant ? getProductVariantLabel(variant) : undefined,
+    });
   }, [addProductToCart]);
+
+  const handleMakePriceOverridePermanent = useCallback(async (tier: ProductPriceTier) => {
+    if (!priceOverridePrompt) return;
+    const prompt = priceOverridePrompt;
+    setIsSavingPriceOverride(true);
+    try {
+      await submitPriceOverride({
+        code: prompt.code,
+        price: prompt.price,
+        tierLabel: tier.label,
+        tierPrices: Object.fromEntries(prompt.tiers.map((entry) => [entry.label.trim().toLowerCase(), entry.price])),
+        terminalId: session?.terminalId,
+        cashierName: session?.user.name,
+      });
+      showNotice('success', `${prompt.productName} ${tier.label} will use Rs ${prompt.price} from the next catalog sync.`);
+      setPriceOverridePrompt(null);
+    } catch (error) {
+      reportCaughtClientError(error, 'pos.pricing.override');
+      showNotice('error', 'Could not save that price permanently - this sale is unaffected, but try again later.');
+    } finally {
+      setIsSavingPriceOverride(false);
+    }
+  }, [priceOverridePrompt, session, showNotice]);
 
   const updateCartLineById = useCallback((lineId: string, updater: (line: CartLine) => CartLine | null) => {
     setCart((previous) => previous.flatMap((line) => {
@@ -2766,13 +2818,14 @@ export default function PosWorkstation() {
         <SearchOverlay
           canPrintLabels={hasLabelPrinter}
           hideOutOfStock={hideOutOfStock}
+          priceOverrideSettings={priceOverrideSettings}
           products={products}
           terminalId={currentTerminalId}
           shortcuts={actionShortcuts}
           onClose={() => setIsSearchOpen(false)}
-          onPick={(product, quantity) => {
+          onPick={(product, quantity, priceOverride) => {
             setIsSearchOpen(false);
-            handleProductPick(product, quantity != null ? { quantity } : undefined);
+            handleProductPick(product, (quantity != null || priceOverride != null) ? { quantity, priceOverride } : undefined);
           }}
           onPrintLabel={(product) => {
             void handlePrintProductLabel(product);
@@ -2800,6 +2853,16 @@ export default function PosWorkstation() {
             addProductQuantityToCart(unitSelection.product, unitSelection.variant, quantity, tierLabel);
             setUnitSelection(null);
           }}
+        />
+      )}
+
+      {priceOverridePrompt != null && (
+        <PriceOverrideModal
+          isSaving={isSavingPriceOverride}
+          onClose={() => setPriceOverridePrompt(null)}
+          onMakePermanent={(tier) => { void handleMakePriceOverridePermanent(tier); }}
+          prompt={priceOverridePrompt}
+          shortcuts={actionShortcuts}
         />
       )}
 
@@ -5665,11 +5728,12 @@ function SearchOverlay(
   props: {
     canPrintLabels: boolean;
     hideOutOfStock: boolean;
+    priceOverrideSettings: POSPriceOverrideSettings;
     products: Product[];
     terminalId: string;
     shortcuts: POSActionShortcuts;
     onClose: () => void;
-    onPick: (product: Product, quantity?: number) => void;
+    onPick: (product: Product, quantity?: number, priceOverride?: number) => void;
     onPrintLabel: (product: Product) => void;
   },
 ) {
@@ -5677,6 +5741,10 @@ function SearchOverlay(
   const [scope, setScope] = useState<'all' | 'sku' | 'name' | 'category' | 'subcategory'>('all');
   const [results, setResults] = useState<Product[]>(props.products.slice(0, 12));
   const [isSearching, setIsSearching] = useState(false);
+  // True when the current `results` came from the price-shorthand fallback
+  // below rather than the typed text itself, so a stale price never rides
+  // along once the search moves on to something else.
+  const [isPriceFallback, setIsPriceFallback] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -5688,10 +5756,22 @@ function SearchOverlay(
   // it are stripped so the search itself still runs against the code alone.
   const prefixedQuery = useMemo(() => parseQuantityPrefixedCode(query), [query]);
 
-  useEffect(() => {
-    const term = (prefixedQuery?.code ?? query).trim().toLowerCase();
+  // "150-code" / "150-barcode" rings a result up at that price the moment
+  // it's picked, the same shorthand the barcode field accepts. Unlike the
+  // quantity shorthand, a hyphen can be part of a real SKU or name (e.g.
+  // "7-Up", "3M tape"), so this is only ever used as a fallback below, once
+  // the typed text has already come up empty as itself.
+  const pricePrefixedQuery = useMemo(() => (
+    prefixedQuery || !props.priceOverrideSettings.enabled
+      ? null
+      : parsePricePrefixedCode(query, props.priceOverrideSettings.separator)
+  ), [prefixedQuery, props.priceOverrideSettings, query]);
 
-    function filterByScope(rows: Product[]) {
+  useEffect(() => {
+    const rawTerm = (prefixedQuery?.code ?? query).trim().toLowerCase();
+    const fallbackTerm = pricePrefixedQuery?.code.trim().toLowerCase();
+
+    function filterByScope(rows: Product[], term: string) {
       return rows.filter((product) => {
         if (props.hideOutOfStock && product.stockOnHand <= 0) {
           return false;
@@ -5725,8 +5805,9 @@ function SearchOverlay(
       });
     }
 
-    if (!term) {
-      setResults(filterByScope(props.products).slice(0, 12));
+    if (!rawTerm) {
+      setResults(filterByScope(props.products, rawTerm).slice(0, 12));
+      setIsPriceFallback(false);
       setIsSearching(false);
       return;
     }
@@ -5735,16 +5816,29 @@ function SearchOverlay(
     setIsSearching(true);
 
     const timer = window.setTimeout(() => {
-      void searchProducts(term, props.terminalId)
-        .then((rows) => {
-          if (!cancelled) {
-            setResults(filterByScope(rows).slice(0, 24));
+      void searchProducts(rawTerm, props.terminalId)
+        .then(async (rows) => {
+          if (cancelled) return;
+          const primary = filterByScope(rows, rawTerm).slice(0, 24);
+          if (primary.length > 0 || !fallbackTerm) {
+            setResults(primary);
+            setIsPriceFallback(false);
+            return;
           }
+
+          // The text as typed matched nothing at all - retry as the price
+          // shorthand's code/barcode, now that it's clear it wasn't a real
+          // SKU or name in its own right.
+          const fallbackRows = await searchProducts(fallbackTerm, props.terminalId).catch(() => props.products);
+          if (cancelled) return;
+          setResults(filterByScope(fallbackRows, fallbackTerm).slice(0, 24));
+          setIsPriceFallback(true);
         })
         .catch((error) => {
           reportCaughtClientError(error, 'pos.product-search.load');
           if (!cancelled) {
-            setResults(filterByScope(props.products).slice(0, 24));
+            setResults(filterByScope(props.products, rawTerm).slice(0, 24));
+            setIsPriceFallback(false);
           }
         })
         .finally(() => {
@@ -5758,7 +5852,9 @@ function SearchOverlay(
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [prefixedQuery, props.hideOutOfStock, props.products, props.terminalId, query, scope]);
+  }, [prefixedQuery, pricePrefixedQuery, props.hideOutOfStock, props.products, props.terminalId, query, scope]);
+
+  const priceOverride = isPriceFallback ? pricePrefixedQuery?.price : undefined;
 
   useEffect(() => {
     const handlePickerKey = (event: KeyboardEvent) => {
@@ -5777,11 +5873,11 @@ function SearchOverlay(
       const index = Number(match[1]) - 1;
       if (!results[index]) return;
       event.preventDefault();
-      props.onPick(results[index], prefixedQuery?.quantity);
+      props.onPick(results[index], prefixedQuery?.quantity, priceOverride);
     };
     window.addEventListener('keydown', handlePickerKey, true);
     return () => window.removeEventListener('keydown', handlePickerKey, true);
-  }, [prefixedQuery, props, results]);
+  }, [prefixedQuery, priceOverride, props, results]);
 
   return (
     <ModalShell onClose={props.onClose} title="Search products" width="wide">
@@ -5798,7 +5894,7 @@ function SearchOverlay(
             onChange={(event) => setQuery(event.target.value)}
             onKeyDown={(event) => {
               if (event.key === 'Enter' && results[0]) {
-                props.onPick(results[0], prefixedQuery?.quantity);
+                props.onPick(results[0], prefixedQuery?.quantity, priceOverride);
               }
             }}
           />
@@ -5808,6 +5904,12 @@ function SearchOverlay(
         <div className="field-hint">
           Numpad 1-9 jumps to a result. The number row types normally, so SKUs and names starting with a digit search fine.
           {' '}Lead with a quantity - 25*3RL or 5@barcode - to add that many the moment a result is picked.
+          {props.priceOverrideSettings.enabled && (
+            <>
+              {' '}Or lead with a price - 150{props.priceOverrideSettings.separator}GENERAL - to ring it up at that
+              price; tried only once the text as typed matches nothing on its own.
+            </>
+          )}
         </div>
 
         <div className="scope-row">
@@ -5961,6 +6063,110 @@ function UnitSelectionModal(props: {
           Top number row 1-9 selects a suggestion. Use the numpad for a custom quantity.
           {tiers.length > 1 ? ` ${formatBinding(props.shortcuts.tier)} cycles the price tier.` : ''}
           {' '}{formatBinding(props.shortcuts.closePopup)} closes.
+        </div>
+      </div>
+    </ModalShell>
+  );
+}
+
+function PriceOverrideModal(props: {
+  isSaving: boolean;
+  onClose: () => void;
+  onMakePermanent: (tier: ProductPriceTier) => void;
+  prompt: PriceOverridePrompt;
+  shortcuts: POSActionShortcuts;
+}) {
+  const yesButtonRef = useRef<HTMLButtonElement>(null);
+  const noButtonRef = useRef<HTMLButtonElement>(null);
+  const tiers = props.prompt.tiers.length > 0
+    ? props.prompt.tiers
+    : [{ id: 'retail-fallback', label: 'Retail', price: 0, priority: 0, minQty: 0, isDefault: true }];
+  const [tierIndex, setTierIndex] = useState(() => Math.max(0, tiers.findIndex((tier) => tier.isDefault)));
+  const [choiceIndex, setChoiceIndex] = useState(0);
+  const selectedTier = tiers[tierIndex] ?? tiers[0]!;
+  const priceDifference = Math.round((props.prompt.price - selectedTier.price) * 100) / 100;
+  const differenceDirection = priceDifference > 0 ? 'up' : priceDifference < 0 ? 'down' : 'unchanged';
+  const productLabel = `${props.prompt.productName}${props.prompt.variantLabel ? ` (${props.prompt.variantLabel})` : ''}`;
+
+  useEffect(() => {
+    const handleKey = (event: KeyboardEvent) => {
+      if (props.isSaving) return;
+      if (bindingMatchesEvent(props.shortcuts.closePopup, event)) {
+        event.preventDefault();
+        props.onClose();
+        return;
+      }
+      if (bindingMatchesEvent(props.shortcuts.tier, event)) {
+        event.preventDefault();
+        setTierIndex((previous) => (previous + 1) % tiers.length);
+        return;
+      }
+      if (['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key)) {
+        event.preventDefault();
+        const nextChoice = choiceIndex === 0 ? 1 : 0;
+        setChoiceIndex(nextChoice);
+        (nextChoice === 0 ? yesButtonRef : noButtonRef).current?.focus();
+        return;
+      }
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        if (choiceIndex === 0) props.onMakePermanent(selectedTier);
+        else props.onClose();
+      }
+    };
+    window.addEventListener('keydown', handleKey, true);
+    return () => window.removeEventListener('keydown', handleKey, true);
+  }, [choiceIndex, props, selectedTier, tiers.length]);
+
+  return (
+    <ModalShell
+      initialFocusRef={yesButtonRef}
+      onClose={() => { if (!props.isSaving) props.onClose(); }}
+      title="Keep this new price?"
+      trapFocus
+      width="wide"
+    >
+      <div className="quick-picker-stack price-override-popup">
+        <div className="price-override-summary">
+          <span>{productLabel}</span>
+          <div className="price-override-price-flow">
+            <span><small>Current {selectedTier.label}</small><b>{formatCurrency(selectedTier.price)}</b></span>
+            <i aria-hidden="true">→</i>
+            <span><small>New {selectedTier.label}</small><b>{formatCurrency(props.prompt.price)}</b></span>
+          </div>
+          <strong className={`price-override-difference ${differenceDirection}`}>
+            {differenceDirection === 'up' && `↑ Up ${formatCurrency(Math.abs(priceDifference))}`}
+            {differenceDirection === 'down' && `↓ Down ${formatCurrency(Math.abs(priceDifference))}`}
+            {differenceDirection === 'unchanged' && 'No price change'}
+          </strong>
+          <small>Press {formatBinding(props.shortcuts.tier)} to change the target tier. This sale already uses {formatCurrency(props.prompt.price)}.</small>
+        </div>
+        <div className="quick-picker-grid price-override-options">
+          <button
+            className={`quick-picker-card ${choiceIndex === 0 ? 'active' : ''}`}
+            disabled={props.isSaving}
+            onClick={() => props.onMakePermanent(selectedTier)}
+            onFocus={() => setChoiceIndex(0)}
+            ref={yesButtonRef}
+          >
+            <kbd className="picker-number">Yes</kbd>
+            <b>{props.isSaving ? 'Saving new price...' : `Change ${selectedTier.label} price`}</b>
+            <span>Use {formatCurrency(props.prompt.price)} for this tier going forward.</span>
+          </button>
+          <button
+            className={`quick-picker-card ${choiceIndex === 1 ? 'active' : ''}`}
+            disabled={props.isSaving}
+            onClick={props.onClose}
+            onFocus={() => setChoiceIndex(1)}
+            ref={noButtonRef}
+          >
+            <kbd className="picker-number">No</kbd>
+            <b>Keep this sale only</b>
+            <span>Keep the existing catalog price for future sales.</span>
+          </button>
+        </div>
+        <div className="quick-picker-help">
+          Use ←/→ or ↑/↓ to choose Yes or No, Tab to move, and Enter to confirm.
         </div>
       </div>
     </ModalShell>

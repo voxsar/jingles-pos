@@ -1688,6 +1688,40 @@ export async function refreshLocalCatalogFromUpstream(): Promise<SharedCatalogSn
   return snapshot;
 }
 
+export interface PriceOverrideSubmission {
+  code: string;
+  price: number;
+  tierLabel: string;
+  tierPrices: Record<string, number>;
+  terminalId?: string;
+  cashierName?: string;
+  receiptReference?: string;
+}
+
+export interface PriceOverrideResult {
+  sku: { id: string; skuCode: string; name: string };
+  variant: { id: string; variantCode: string } | null;
+  batch: { id: string; batchNumber: string; sellingPrice: number | null; createdAt: string };
+}
+
+/**
+ * Makes a "<price>-<code>" checkout shorthand permanent, by asking the cloud
+ * to record it as a new batch-pricing entry (see the matching route in
+ * `packages/backend/src/routes/pos.ts` on the inventory side). Every local
+ * `BatchPrice` row is wholesale-replaced from the cloud snapshot on every
+ * sync (`replaceLocalCatalogSnapshot`), so writing this only to the local
+ * SQLite would silently revert within the next sync cycle - this has to
+ * reach the cloud to actually stick, and cloudOnly here reflects that (a
+ * LAN-hub peer cannot accept it either, per the matching endpoint).
+ */
+export async function submitPriceOverride(input: PriceOverrideSubmission): Promise<PriceOverrideResult> {
+  return fetchUpstreamJson<PriceOverrideResult>('/api/pos/pricing/override', {
+    method: 'POST',
+    body: input,
+    cloudOnly: true,
+  });
+}
+
 type LegacyRecordPage = {
   page: number;
   pageSize: number;
