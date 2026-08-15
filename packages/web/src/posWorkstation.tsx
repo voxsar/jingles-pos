@@ -3954,7 +3954,6 @@ function SettingsModal(
     customerDisplayStatus: POSCustomerDisplayStatus;
     hasPrintingBridge: boolean;
     products: Product[];
-    terminalId: string;
   },
 ) {
   const settings = props.draft;
@@ -5450,6 +5449,7 @@ function SearchOverlay(
     canPrintLabels: boolean;
     hideOutOfStock: boolean;
     products: Product[];
+    terminalId: string;
     shortcuts: POSActionShortcuts;
     onClose: () => void;
     onPick: (product: Product) => void;
