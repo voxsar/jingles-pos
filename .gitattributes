@@ -1,0 +1,5 @@
+# Shell scripts run through bash (locally on Windows via git-bash, and after
+# `git pull` on the Linux server) - CRLF line endings break heredocs (the
+# terminator line stops matching) and can produce "$'\r': command not found"
+# errors, so these are always checked out with LF regardless of core.autocrlf.
+*.sh text eol=lf
