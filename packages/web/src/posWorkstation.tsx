@@ -41,6 +41,7 @@ import {
   ZReportSlot,
   POSActionShortcutId,
   POSActionShortcuts,
+  POSCartLineOrder,
   POSCashSalesVisibilitySettings,
   POSQuickKey,
   POSShiftReconciliationSettings,
@@ -62,6 +63,7 @@ import {
   TENDER_TOTAL_KEY,
   DECLARABLE_TENDER_METHODS,
   DEFAULT_POS_ACTION_SHORTCUTS,
+  DEFAULT_POS_CART_LINE_ORDER,
   DEFAULT_POS_CASH_SALES_VISIBILITY,
   DEFAULT_POS_CUSTOMER_DISPLAY,
   DEFAULT_POS_PRICE_OVERRIDE_SETTINGS,
@@ -793,6 +795,20 @@ export default function PosWorkstation() {
 
   const totals = useMemo(() => calcCartTotals(cart, billDiscount), [billDiscount, cart]);
 
+  const cartLineOrder: POSCartLineOrder = desktopSettings?.cartLineOrder ?? DEFAULT_POS_CART_LINE_ORDER;
+
+  /**
+   * The cart list's draw order. `cart` itself stays in add order (oldest
+   * first) so recency-based logic elsewhere - the "last line" a staff pick or
+   * quick-add lands on - keeps working regardless of this setting. Every
+   * place that shows the cashier numbered lines (the cart panel, line-delete
+   * mode, the per-line discount picker) reads through this instead, so a
+   * digit key always targets what is on screen at that position.
+   */
+  const displayCart = useMemo(() => (
+    cartLineOrder === 'newestFirst' ? [...cart].reverse() : cart
+  ), [cart, cartLineOrder]);
+
   const customerDisplaySettings = desktopSettings?.customerDisplay ?? DEFAULT_POS_CUSTOMER_DISPLAY;
 
   const customerDisplayContext = useMemo<CustomerDisplayContext>(() => ({
@@ -1372,7 +1388,7 @@ export default function PosWorkstation() {
       if (index == null) return;
       event.preventDefault();
       event.stopPropagation();
-      const line = cart[index];
+      const line = displayCart[index];
       if (line == null) return;
       setVoidLineId(line.uid);
       setIsVoidOpen(true);
@@ -1381,7 +1397,7 @@ export default function PosWorkstation() {
 
     window.addEventListener('keydown', handleKey, true);
     return () => window.removeEventListener('keydown', handleKey, true);
-  }, [cart, isLineDeleteMode]);
+  }, [displayCart, isLineDeleteMode]);
 
   const handleStartSession = useCallback(() => {
     if (bootstrapData == null || authUser == null) {
@@ -2826,7 +2842,7 @@ export default function PosWorkstation() {
           activeHeldSaleId={activeHeldSaleId}
           activeShift={activeShift}
           billDiscount={billDiscount}
-          cart={cart}
+          cart={displayCart}
           customerId={selectedCustomer?.id ?? ''}
           customerSelectRef={customerSelectRef}
           customers={customers}
@@ -3002,7 +3018,7 @@ export default function PosWorkstation() {
 
       {isDiscountOpen && (
         <DiscountModal
-          cart={cart}
+          cart={displayCart}
           currentAmount={billDiscount}
           subtotal={Math.max(0, totals.rawSubtotal - totals.lineDiscountTotal)}
           shortcuts={actionShortcuts}
@@ -4595,6 +4611,12 @@ function SettingsModal(
                 onChange={(priceOverride) => updateDraft('priceOverride', priceOverride)}
               />
 
+              <CartOrderSettingsCard
+                disabled={props.isSaving}
+                order={settings.cartLineOrder}
+                onChange={(cartLineOrder) => updateDraft('cartLineOrder', cartLineOrder)}
+              />
+
               <CustomerDisplayCard
                 disabled={props.isSaving}
                 hasDesktopBridge={props.hasDesktopBridge}
@@ -5295,6 +5317,50 @@ function PriceOverrideSettingsCard(
       <div className="field-hint">
         The hyphen on the digit row beside backtick, not the numpad's - both type the same character here.
         Cannot be "*" or "@": those are already claimed by the "qty*code" quantity shorthand.
+      </div>
+    </section>
+  );
+}
+
+/**
+ * Where a freshly scanned or tapped line lands in the cart list. The chosen
+ * order also drives the numbering line-delete mode and the per-line discount
+ * picker use, so a digit key always matches what is on screen.
+ */
+function CartOrderSettingsCard(
+  props: {
+    disabled: boolean;
+    order: POSCartLineOrder;
+    onChange: (order: POSCartLineOrder) => void;
+  },
+) {
+  return (
+    <section className="settings-card">
+      <div className="settings-card-head">
+        <div>
+          <div className="section-kicker">Sales</div>
+          <div className="section-title">Cart line order</div>
+        </div>
+        <div className="report-chip mono">Newest first by default</div>
+      </div>
+
+      <div className="theme-option-row">
+        <button
+          className={`theme-option ${props.order === 'newestFirst' ? 'active' : ''}`}
+          disabled={props.disabled}
+          onClick={() => props.onChange('newestFirst')}
+        >
+          <span className="theme-option-title">Newest first</span>
+          <span className="theme-option-copy">The item just scanned or tapped appears at the top of the cart.</span>
+        </button>
+        <button
+          className={`theme-option ${props.order === 'oldestFirst' ? 'active' : ''}`}
+          disabled={props.disabled}
+          onClick={() => props.onChange('oldestFirst')}
+        >
+          <span className="theme-option-title">Oldest first</span>
+          <span className="theme-option-copy">Lines stay in the order they were added, oldest at the top.</span>
+        </button>
       </div>
     </section>
   );

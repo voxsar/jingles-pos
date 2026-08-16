@@ -687,6 +687,17 @@ export interface POSPriceOverrideSettings {
   separator: string;
 }
 
+/**
+ * Where a freshly added line lands in the cart list. `newestFirst` puts the
+ * item just scanned or tapped at the top, visible without scrolling on a long
+ * bill; `oldestFirst` keeps the till's traditional top-to-bottom add order.
+ * This only reorders how the list is drawn — line numbers used by keyboard
+ * pickers (line-delete, per-line discount) follow the same order shown on
+ * screen, so a digit key always targets what the cashier sees at that
+ * position.
+ */
+export type POSCartLineOrder = 'newestFirst' | 'oldestFirst';
+
 /** A printer offered to the user by discovery, not yet configured. */
 export interface POSDiscoveredPrinter {
   name: string;
@@ -943,6 +954,7 @@ export interface POSDesktopSettings {
   shiftReconciliation: POSShiftReconciliationSettings;
   customerDisplay: POSCustomerDisplaySettings;
   cashSalesVisibility: POSCashSalesVisibilitySettings;
+  cartLineOrder: POSCartLineOrder;
 }
 
 /**
@@ -1044,6 +1056,9 @@ export const DEFAULT_POS_PRICE_OVERRIDE_SETTINGS: POSPriceOverrideSettings = {
   // the same character here, but this is the one a scanner label prints.
   separator: '-',
 };
+
+/** New lines land at the top of the cart list by default. */
+export const DEFAULT_POS_CART_LINE_ORDER: POSCartLineOrder = 'newestFirst';
 
 export const DEFAULT_POS_PRINTER_CONFIG: Omit<POSPrinterConfig, 'id' | 'name'> = {
   role: 'receipt',

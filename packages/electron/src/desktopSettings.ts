@@ -6,6 +6,7 @@ import {
   DEFAULT_POS_PRINTER_CONFIG,
   DEFAULT_POS_SCANNER_SETTINGS,
   DEFAULT_POS_SESSION_LOCK_MINUTES,
+  normalizeCartLineOrder,
   normalizeCashSalesVisibility,
   normalizeCustomerDisplaySettings,
   normalizePriceOverrideSettings,
@@ -193,6 +194,7 @@ function toSnapshot(value: StoredDesktopSettings | null | undefined): POSDesktop
     shiftReconciliation: normalizeShiftReconciliation(value?.shiftReconciliation),
     customerDisplay: normalizeCustomerDisplaySettings(value?.customerDisplay),
     cashSalesVisibility: normalizeCashSalesVisibility(value?.cashSalesVisibility),
+    cartLineOrder: normalizeCartLineOrder(value?.cartLineOrder),
   };
 }
 

@@ -1,4 +1,5 @@
 import {
+  DEFAULT_POS_CART_LINE_ORDER,
   DEFAULT_POS_CASH_SALES_VISIBILITY,
   DEFAULT_POS_PRICE_OVERRIDE_SETTINGS,
   DEFAULT_POS_PRINTER_CONFIG,
@@ -85,6 +86,7 @@ export function buildFallbackDesktopSettings(themeMode: POSThemeMode): POSDeskto
     // honour is kept in local storage instead of defaulting on every reload.
     customerDisplay: readStoredCustomerDisplaySettings(),
     cashSalesVisibility: { ...DEFAULT_POS_CASH_SALES_VISIBILITY },
+    cartLineOrder: DEFAULT_POS_CART_LINE_ORDER,
   };
 }
 

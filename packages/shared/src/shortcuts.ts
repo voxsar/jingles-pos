@@ -15,12 +15,14 @@
 import {
   DECLARABLE_TENDER_METHODS,
   DEFAULT_POS_ACTION_SHORTCUTS,
+  DEFAULT_POS_CART_LINE_ORDER,
   DEFAULT_POS_CASH_SALES_VISIBILITY,
   DEFAULT_POS_PRICE_OVERRIDE_SETTINGS,
   DEFAULT_POS_SHIFT_RECONCILIATION,
   TENDER_TOTAL_KEY,
   type POSActionShortcutId,
   type POSActionShortcuts,
+  type POSCartLineOrder,
   type POSCashSalesVisibilitySettings,
   type POSKeyBinding,
   type POSPriceOverrideSettings,
@@ -309,4 +311,8 @@ export function normalizePriceOverrideSettings(value: unknown): POSPriceOverride
     enabled: source.enabled !== false,
     separator,
   };
+}
+
+export function normalizeCartLineOrder(value: unknown): POSCartLineOrder {
+  return value === 'oldestFirst' ? 'oldestFirst' : DEFAULT_POS_CART_LINE_ORDER;
 }
