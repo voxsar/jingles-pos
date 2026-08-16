@@ -15,6 +15,7 @@
 		"electron:run": "npm run build:desktop && npm run start --workspace=packages/electron",
 		"electron:exe": "npm run build:desktop && npm run electron:pack --workspace=packages/electron && npm run verify:release --workspace=packages/electron",
 		"release:update:pos": "npm run build:desktop && npm run build:update --workspace=packages/electron && npm run verify:release --workspace=packages/electron",
+		"release:pos": "bash scripts/release-pos.sh",
 		"build": "npm run build:shared && npm run build:backend && npm run build:web && npm run build --workspace=packages/electron",
 		"test": "npm run test --workspaces --if-present",
 		"test:backend": "npm run test --workspace=packages/backend",
