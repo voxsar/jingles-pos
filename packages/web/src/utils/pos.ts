@@ -85,8 +85,15 @@ export interface ParsedModifiedProductCode {
   order: ProductCodeModifier[];
 }
 
-/** Parses quantity and price modifiers in either order. Try an exact code first. */
-export function parseModifiedProductCode(input: string, priceSeparator = '-'): ParsedModifiedProductCode | null {
+/**
+ * Returns every syntactically valid modifier interpretation, most specific
+ * first. A catalog lookup can then disambiguate real codes that themselves
+ * contain the configured price separator.
+ */
+export function parseModifiedProductCodeCandidates(
+  input: string,
+  priceSeparator = '-',
+): ParsedModifiedProductCode[] {
   const separator = priceSeparator.trim().slice(0, 1);
   const number = '(\\d+(?:\\.\\d+)?)';
   const quantitySeparator = '([*@])';
@@ -111,6 +118,7 @@ export function parseModifiedProductCode(input: string, priceSeparator = '-'): P
     patterns.push({ regex: new RegExp(`^\\s*${number}\\s*${escapedPriceSeparator}\\s*(.+)$`), order: ['price'], priceGroup: 1, codeGroup: 2 });
   }
 
+  const candidates: ParsedModifiedProductCode[] = [];
   for (const pattern of patterns) {
     const match = pattern.regex.exec(input);
     if (!match) continue;
@@ -119,7 +127,34 @@ export function parseModifiedProductCode(input: string, priceSeparator = '-'): P
     const code = match[pattern.codeGroup]?.trim() ?? '';
     if (!code || (quantity != null && (!Number.isFinite(quantity) || quantity <= 0))) continue;
     if (price != null && (!Number.isFinite(price) || price <= 0)) continue;
-    return { code, quantity, price, order: pattern.order };
+    candidates.push({ code, quantity, price, order: pattern.order });
+  }
+  return candidates;
+}
+
+/** Parses quantity and price modifiers in either order. Try an exact code first. */
+export function parseModifiedProductCode(input: string, priceSeparator = '-'): ParsedModifiedProductCode | null {
+  return parseModifiedProductCodeCandidates(input, priceSeparator)[0] ?? null;
+}
+
+/** Resolves ambiguous modifier syntax against real catalog codes. */
+export function resolveModifiedProductScan<T>(
+  input: string,
+  index: ReadonlyMap<string, T>,
+  priceSeparator = '-',
+): { modified: ParsedModifiedProductCode; match: T } | null {
+  // Prefer the interpretation with fewer modifiers when its complete suffix
+  // is itself a real code. This preserves codes such as "1002361-5" inside
+  // "2.5*1002361-5", while combined forms still win when that suffix is not
+  // present (for example "3-500*285").
+  const candidates = parseModifiedProductCodeCandidates(input, priceSeparator)
+    .map((modified, position) => ({ modified, position }))
+    .sort((left, right) => left.modified.order.length - right.modified.order.length
+      || left.position - right.position);
+
+  for (const { modified } of candidates) {
+    const match = index.get(modified.code.trim().toLowerCase());
+    if (match != null) return { modified, match };
   }
   return null;
 }
@@ -225,8 +260,9 @@ export function buildProductScanCodeIndex(products: Product[]) {
   };
 
   for (const product of products) {
-    register(product.sku, { product });
-
+    // Register exact variants first. Legacy catalogs commonly repeat the
+    // first variant's code/barcode at product level; the specific variant is
+    // the more useful and precise scan result in that overlap.
     for (const variant of product.variants ?? []) {
       register(variant.variantCode, { product, variant });
       for (const barcode of variant.barcodes ?? []) register(barcode, { product, variant });
@@ -234,6 +270,7 @@ export function buildProductScanCodeIndex(products: Product[]) {
 
     // Variant aliases win over the product-wide list so a scan can select the
     // exact variant while every other alias still resolves to the product.
+    register(product.sku, { product });
     for (const barcode of product.barcodes ?? []) register(barcode, { product });
     register(product.barcode, { product });
   }

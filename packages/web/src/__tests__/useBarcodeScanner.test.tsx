@@ -4,13 +4,18 @@ import { describe, expect, it, vi } from 'vitest';
 import { DEFAULT_POS_SCANNER_SETTINGS, type POSScannerSettings } from '@jingles/shared';
 import { useBarcodeScanner } from '../useBarcodeScanner';
 
-function Harness(props: { settings?: Partial<POSScannerSettings>; onScan: (code: string) => void }) {
+function Harness(props: {
+  settings?: Partial<POSScannerSettings>;
+  onScan: (code: string) => void;
+  isKnownCode?: (code: string) => boolean;
+}) {
   const [value, setValue] = useState('');
 
   useBarcodeScanner({
     enabled: true,
     settings: { ...DEFAULT_POS_SCANNER_SETTINGS, ...props.settings },
     onScan: props.onScan,
+    isKnownCode: props.isKnownCode,
   });
 
   return (
@@ -117,6 +122,26 @@ describe('useBarcodeScanner', () => {
       enter = pressKey('Enter', clock);
     });
 
+    expect(onScan).not.toHaveBeenCalled();
+    expect(enter!.defaultPrevented).toBe(false);
+  });
+
+  it('accepts a short machine-speed code only when it exists in the catalog', () => {
+    const onScan = vi.fn();
+    render(<Harness onScan={onScan} isKnownCode={(code) => code === '285'} />);
+
+    let clock = typeBurst('285', 4_500, 8);
+    act(() => {
+      pressKey('Enter', clock);
+    });
+    expect(onScan).toHaveBeenCalledWith('285');
+
+    onScan.mockClear();
+    clock = typeBurst('286', 4_600, 8);
+    let enter: KeyboardEvent | null = null;
+    act(() => {
+      enter = pressKey('Enter', clock);
+    });
     expect(onScan).not.toHaveBeenCalled();
     expect(enter!.defaultPrevented).toBe(false);
   });

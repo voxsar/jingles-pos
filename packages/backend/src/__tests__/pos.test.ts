@@ -1,4 +1,4 @@
-import { CashCountMode, UserRole } from '@jingles/shared';
+import { CashCountMode, SyncConflictPolicy, SyncEventState, SyncEventType, UserRole } from '@jingles/shared';
 
 const mockTx = {
   syncDeviceState: {
@@ -8,9 +8,15 @@ const mockTx = {
   },
   syncEvent: {
     count: jest.fn(),
+    findFirst: jest.fn(),
+    findMany: jest.fn(),
+    create: jest.fn(),
   },
   syncConflict: {
     count: jest.fn(),
+    findFirst: jest.fn(),
+    create: jest.fn(),
+    update: jest.fn(),
   },
   configEntry: {
     findUnique: jest.fn(),
@@ -18,6 +24,7 @@ const mockTx = {
   pOSShift: {
     findFirst: jest.fn(),
     findUnique: jest.fn(),
+    upsert: jest.fn(),
   },
   pOSUser: {
     findMany: jest.fn(),
@@ -27,8 +34,12 @@ const mockTx = {
   },
   customer: {
     findFirst: jest.fn(),
+    findUnique: jest.fn(),
     update: jest.fn(),
     create: jest.fn(),
+  },
+  creditPayment: {
+    findUnique: jest.fn(),
   },
 };
 
@@ -43,10 +54,11 @@ jest.mock('../prisma', () => ({
     pOSShift: mockTx.pOSShift,
     pOSUser: mockTx.pOSUser,
     customer: mockTx.customer,
+    creditPayment: mockTx.creditPayment,
   },
 }));
 
-const { buildDrawerContents, buildZReport, confirmPlayback, getLocalSyncStatus, getServerVectorClock } = require('../services/posSync') as typeof import('../services/posSync');
+const { buildDrawerContents, buildZReport, confirmPlayback, getLocalSyncStatus, getServerVectorClock, playbackEvents } = require('../services/posSync') as typeof import('../services/posSync');
 const { authenticate, resolveUnlockMode } = require('../routes/auth') as typeof import('../routes/auth');
 const { mergeHandshakeReferenceData, respondWithExistingOpenShift } = require('../routes/pos') as typeof import('../routes/pos');
 const { buildFtsQuery } = require('../services/localCatalog') as typeof import('../services/localCatalog');
@@ -557,5 +569,95 @@ describe('event sourced POS backend services', () => {
   it('sanitizes dotted local catalog FTS queries', () => {
     expect(buildFtsQuery('1.5 mm')).toBe('1 5 mm*');
     expect(buildFtsQuery('...')).toBe('');
+  });
+
+  describe('playback event isolation', () => {
+    it('keeps applying independent events in a batch after one event is rejected', async () => {
+      mockTx.syncEvent.findFirst.mockResolvedValue(null);
+      mockTx.syncEvent.findMany.mockResolvedValue([]);
+      mockTx.syncEvent.create.mockImplementation(async ({ data }: any) => ({
+        ...data,
+        createdAt: new Date('2026-08-14T10:00:00.000Z'),
+      }));
+      mockTx.pOSShift.findUnique.mockResolvedValue(null);
+      mockTx.pOSShift.findFirst.mockResolvedValue(null);
+      mockTx.pOSShift.upsert.mockResolvedValue({});
+      mockTx.syncDeviceState.findUnique.mockResolvedValue(null);
+      mockTx.syncDeviceState.findMany.mockResolvedValue([]);
+      mockTx.syncDeviceState.upsert.mockResolvedValue({});
+      mockTx.creditPayment.findUnique.mockResolvedValue(null);
+      mockTx.customer.findUnique.mockResolvedValue(null);
+      mockTx.syncConflict.findFirst.mockResolvedValue(null);
+      mockTx.syncConflict.create.mockImplementation(async ({ data }: any) => ({
+        ...data,
+        createdAt: new Date('2026-08-14T10:05:00.000Z'),
+        resolvedAt: null,
+      }));
+
+      // A batch that mixes two unrelated, valid shift events with one
+      // credit-payment event referencing a customer that does not exist.
+      // The bad event must be rejected and recorded as a conflict without
+      // rolling back or skipping the valid shift events around it.
+      const events = [
+        {
+          id: 'event-shift-1',
+          aggregateType: 'shift',
+          aggregateId: 'shift-ok-1',
+          eventType: SyncEventType.SHIFT_OPENED,
+          payload: { terminalId: 't1', branchId: 'b1', cashierId: 'cashier-1', openingFloat: 100 },
+          deviceId: 'device-1',
+          sequenceNum: 1,
+          lamport: 1,
+          vectorClock: { 'device-1': 1 },
+          conflictPolicy: SyncConflictPolicy.LAST_WRITE_WINS,
+          state: SyncEventState.PENDING,
+          createdAt: '2026-08-14T09:59:00.000Z',
+        },
+        {
+          id: 'event-payment-bad',
+          aggregateType: 'credit-payment',
+          aggregateId: 'payment-bad-1',
+          eventType: SyncEventType.CREDIT_PAYMENT_RECORDED,
+          payload: { customerId: 'missing-customer', amount: 100 },
+          deviceId: 'device-1',
+          sequenceNum: 2,
+          lamport: 2,
+          vectorClock: { 'device-1': 2 },
+          conflictPolicy: SyncConflictPolicy.SERVER_WINS,
+          state: SyncEventState.PENDING,
+          createdAt: '2026-08-14T09:59:30.000Z',
+        },
+        {
+          id: 'event-shift-2',
+          aggregateType: 'shift',
+          aggregateId: 'shift-ok-2',
+          eventType: SyncEventType.SHIFT_OPENED,
+          payload: { terminalId: 't2', branchId: 'b1', cashierId: 'cashier-2', openingFloat: 50 },
+          deviceId: 'device-1',
+          sequenceNum: 3,
+          lamport: 3,
+          vectorClock: { 'device-1': 3 },
+          conflictPolicy: SyncConflictPolicy.LAST_WRITE_WINS,
+          state: SyncEventState.PENDING,
+          createdAt: '2026-08-14T10:00:00.000Z',
+        },
+      ];
+
+      const result = await playbackEvents({
+        deviceId: 'device-1',
+        terminalId: 't1',
+        vectorClock: {},
+        events: events as any,
+      });
+
+      expect(result.acceptedEventIds).toEqual(['event-shift-1', 'event-shift-2']);
+      expect(result.conflicts).toHaveLength(1);
+      expect(result.conflicts[0]).toMatchObject({
+        remoteEventId: 'event-payment-bad',
+        policy: 'SYNC_ERROR',
+        status: 'OPEN',
+      });
+      expect(mockTx.pOSShift.upsert).toHaveBeenCalledTimes(2);
+    });
   });
 });

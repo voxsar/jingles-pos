@@ -1340,42 +1340,98 @@ export async function applyLocalEvent(
   });
 }
 
+/**
+ * Records (or refreshes) an "apply failed" conflict for an event that threw
+ * while being applied, keyed on the event's own id so a terminal that keeps
+ * resending the same still-pending event every sync cycle updates one row
+ * instead of piling up a fresh conflict every five minutes.
+ */
+async function recordEventApplyFailure(event: SyncEvent, message: string): Promise<SyncConflict> {
+  const detail = json({
+    reason: 'APPLY_ERROR',
+    message,
+    eventType: event.eventType,
+    deviceId: event.deviceId,
+    sequenceNum: event.sequenceNum,
+  });
+
+  const existing = await prisma.syncConflict.findFirst({
+    where: { remoteEventId: event.id, policy: 'SYNC_ERROR', status: SyncConflictStatus.OPEN },
+  });
+
+  const conflict = existing
+    ? await prisma.syncConflict.update({ where: { id: existing.id }, data: { detail } })
+    : await prisma.syncConflict.create({
+        data: {
+          id: uuidv4(),
+          aggregateType: event.aggregateType,
+          aggregateId: event.aggregateId,
+          localEventId: null,
+          remoteEventId: event.id,
+          policy: 'SYNC_ERROR',
+          status: SyncConflictStatus.OPEN,
+          detail,
+        },
+      });
+
+  return toConflictDto(conflict);
+}
+
 export async function playbackEvents(input: SyncPlaybackRequest): Promise<SyncPlaybackResponse> {
-  return prisma.$transaction(async (tx) => {
-    const acceptedEventIds: string[] = [];
-    const conflicts: SyncConflict[] = [];
+  const acceptedEventIds: string[] = [];
+  const conflicts: SyncConflict[] = [];
 
-    const sortedIncoming = [...input.events].sort((left, right) =>
-      compareEventOrder(left.sequenceNum, left.deviceId, right.sequenceNum, right.deviceId),
-    );
+  const sortedIncoming = [...input.events].sort((left, right) =>
+    compareEventOrder(left.sequenceNum, left.deviceId, right.sequenceNum, right.deviceId),
+  );
 
-    for (const event of sortedIncoming) {
-      const normalizedEvent: SyncEvent = {
-        ...event,
-        conflictPolicy: event.conflictPolicy ?? resolveConflictPolicy(event.eventType),
-        state: event.state ?? SyncEventState.PENDING,
-      };
+  // Every event gets its own transaction. A batch mixes independent
+  // "tables" (shifts, sales, returns, customers, credit payments) - one
+  // malformed or rejected event must never roll back events that already
+  // applied cleanly earlier in the same playback call. A failure is
+  // recorded as an open conflict and playback continues with the rest.
+  for (const event of sortedIncoming) {
+    const normalizedEvent: SyncEvent = {
+      ...event,
+      conflictPolicy: event.conflictPolicy ?? resolveConflictPolicy(event.eventType),
+      state: event.state ?? SyncEventState.PENDING,
+    };
 
-      const result = await appendEvent(tx, normalizedEvent);
+    try {
+      const result = await prisma.$transaction((tx) => appendEvent(tx, normalizedEvent));
       acceptedEventIds.push(result.storedEvent.id);
       if (result.conflict) {
         conflicts.push(result.conflict);
       }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown sync error';
+      void reportBackgroundServerError(error, 'backend.sync.playback-event-failed', {
+        eventId: normalizedEvent.id,
+        eventType: normalizedEvent.eventType,
+        aggregateId: normalizedEvent.aggregateId,
+      });
+      console.warn('[POS sync] Event application was rejected; continuing with the remaining events', {
+        eventId: normalizedEvent.id,
+        eventType: normalizedEvent.eventType,
+        aggregateId: normalizedEvent.aggregateId,
+        message,
+      });
+      conflicts.push(await recordEventApplyFailure(normalizedEvent, message));
     }
+  }
 
-    const serverVectorClock = await getServerVectorClock(tx);
-    const allEvents = await tx.syncEvent.findMany({ orderBy: [{ createdAt: 'asc' }] });
-    const remoteEvents = allEvents
-      .filter((event) => event.sequenceNum > (input.vectorClock[event.deviceId] ?? 0))
-      .map(toStoredEventDto);
+  const serverVectorClock = await getServerVectorClock();
+  const allEvents = await prisma.syncEvent.findMany({ orderBy: [{ createdAt: 'asc' }] });
+  const remoteEvents = allEvents
+    .filter((event) => event.sequenceNum > (input.vectorClock[event.deviceId] ?? 0))
+    .map(toStoredEventDto);
 
-    return {
-      acceptedEventIds,
-      remoteEvents,
-      serverVectorClock,
-      conflicts,
-    };
-  });
+  return {
+    acceptedEventIds,
+    remoteEvents,
+    serverVectorClock,
+    conflicts,
+  };
 }
 
 export async function confirmPlayback(input: SyncConfirmRequest): Promise<VectorClock> {
@@ -1611,6 +1667,45 @@ export async function appendRemoteEventsFromServer(
     }
 
     return conflicts;
+  });
+}
+
+/**
+ * Mirrors conflicts the upstream inventory server reported for this
+ * playback call into the local conflict table, keyed on `remoteEventId` so
+ * a conflict that is still open the next sync cycle (the offending event is
+ * still pending and gets resent) is refreshed in place rather than
+ * duplicated. Without this, a conflict returned by the server's playback
+ * response was only ever visible as a transient count on the caller of
+ * `syncWithUpstream()` and never reached the sync dashboard.
+ */
+async function persistServerReportedConflicts(conflicts: SyncConflict[]): Promise<void> {
+  if (conflicts.length === 0) {
+    return;
+  }
+
+  await prisma.$transaction(async (tx) => {
+    for (const conflict of conflicts) {
+      const data = {
+        aggregateType: conflict.aggregateType,
+        aggregateId: conflict.aggregateId,
+        localEventId: conflict.localEventId ?? null,
+        remoteEventId: conflict.remoteEventId ?? null,
+        policy: conflict.policy,
+        status: conflict.status,
+        detail: json(conflict.detail ?? {}),
+      };
+
+      const existing = conflict.remoteEventId
+        ? await tx.syncConflict.findFirst({ where: { remoteEventId: conflict.remoteEventId } })
+        : null;
+
+      if (existing) {
+        await tx.syncConflict.update({ where: { id: existing.id }, data });
+      } else {
+        await tx.syncConflict.create({ data: { id: conflict.id, ...data } });
+      }
+    }
   });
 }
 
@@ -1903,6 +1998,7 @@ async function runSyncWithUpstream(options?: {
       remoteApplied: playback.remoteEvents.length,
     });
     const remoteConflicts = await appendRemoteEventsFromServer(playback.remoteEvents);
+    await persistServerReportedConflicts(playback.conflicts);
     await markLocalEventsConfirmed(playback.acceptedEventIds, playback.serverVectorClock, deviceId, terminalId);
 
     updateSyncProgress({

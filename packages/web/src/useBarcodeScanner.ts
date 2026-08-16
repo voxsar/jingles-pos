@@ -109,17 +109,21 @@ export function useBarcodeScanner(options: {
   enabled: boolean;
   settings: POSScannerSettings;
   onScan: (code: string) => void;
+  /** Allows real catalog codes shorter than the scanner's generic safety limit. */
+  isKnownCode?: (code: string) => boolean;
 }) {
   const { enabled, settings } = options;
 
   // Kept in refs so the window listener is installed once and never misses a
   // keystroke while React re-renders between characters of a burst.
   const onScanRef = useRef(options.onScan);
+  const isKnownCodeRef = useRef(options.isKnownCode);
   const settingsRef = useRef(settings);
   const runRef = useRef<ScanRun | null>(null);
   const flushTimerRef = useRef<number | null>(null);
 
   onScanRef.current = options.onScan;
+  isKnownCodeRef.current = options.isKnownCode;
   settingsRef.current = settings;
 
   useEffect(() => {
@@ -183,6 +187,12 @@ export function useBarcodeScanner(options: {
         : raw;
     };
 
+    const isLongEnoughOrKnown = (run: ScanRun) => {
+      const code = resolveCode(run);
+      return code.length >= settingsRef.current.minLength
+        || isKnownCodeRef.current?.(code) === true;
+    };
+
     const completeRun = (run: ScanRun) => {
       runRef.current = null;
       clearFlushTimer();
@@ -212,7 +222,7 @@ export function useBarcodeScanner(options: {
           return;
         }
 
-        if (resolveCode(run).length >= settingsRef.current.minLength) {
+        if (isLongEnoughOrKnown(run)) {
           completeRun(run);
         } else {
           abandonRun(run);
@@ -242,7 +252,7 @@ export function useBarcodeScanner(options: {
         }
 
         const withinBurst = event.timeStamp - run.lastKeyAt <= current.maxInterKeyMs;
-        if (!withinBurst || resolveCode(run).length < current.minLength) {
+        if (!withinBurst || !isLongEnoughOrKnown(run)) {
           // Not a scan. Let the key do its normal job — submitting the payment
           // form, moving focus — instead of swallowing it.
           abandonRun();

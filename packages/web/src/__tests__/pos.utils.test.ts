@@ -10,8 +10,10 @@ import {
   formatShiftReference,
   generateReceiptNumber,
   parseModifiedProductCode,
+  parseModifiedProductCodeCandidates,
   parsePricePrefixedCode,
   parseQuantityPrefixedCode,
+  resolveModifiedProductScan,
   pickPriceTier,
   recalculateCartLine,
   saleIncludesCash,
@@ -47,7 +49,7 @@ describe('buildProductScanCodeIndex', () => {
       categoryId: 'cat-1', subcategory: 'Tools', packSize: 1, unitLabel: 'pcs', stockOnHand: 10,
       priceTiers: [],
       variants: [{
-        id: 'variant-1', productId: 'prod-1', variantCode: 'SKU-1-BLUE', barcodes: ['333'],
+        id: 'variant-1', productId: 'prod-1', variantCode: 'SKU-1', barcodes: ['333'],
         stockOnHand: 2, attributes: [],
       }],
     } satisfies Product;
@@ -56,6 +58,7 @@ describe('buildProductScanCodeIndex', () => {
 
     expect(index.get('222')?.product.id).toBe('prod-1');
     expect(index.get('333')?.variant?.id).toBe('variant-1');
+    expect(index.get('sku-1')?.variant?.id).toBe('variant-1');
   });
 });
 
@@ -89,6 +92,21 @@ describe('parseModifiedProductCode', () => {
   it('detects quantity and price in either order without losing the product code', () => {
     expect(parseModifiedProductCode('2.5*150-285')).toEqual({ code: '285', quantity: 2.5, price: 150, order: ['quantity', 'price'] });
     expect(parseModifiedProductCode('3-500*285')).toEqual({ code: '285', quantity: 500, price: 3, order: ['price', 'quantity'] });
+  });
+
+  it('uses the actual catalog to preserve hyphenated codes without losing combined modifiers', () => {
+    const index = new Map([
+      ['5', 'short-code'],
+      ['285', 'ordinary-code'],
+      ['1002361-5', 'hyphenated-code'],
+    ]);
+
+    expect(resolveModifiedProductScan('2.5*1002361-5', index)?.match).toBe('hyphenated-code');
+    expect(parseModifiedProductCodeCandidates('2.5*1002361-5')).toHaveLength(2);
+    expect(resolveModifiedProductScan('3-500*285', index)).toMatchObject({
+      match: 'ordinary-code',
+      modified: { price: 3, quantity: 500, code: '285' },
+    });
   });
 });
 

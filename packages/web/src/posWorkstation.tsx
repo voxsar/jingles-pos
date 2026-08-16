@@ -173,6 +173,7 @@ import {
   NON_CASH_PAYMENT_METHODS,
   PAYMENT_METHOD_LABELS,
   parseModifiedProductCode,
+  resolveModifiedProductScan,
   pickPriceTier,
   recalculateCartLine,
   resolveDefaultCustomerId,
@@ -181,6 +182,7 @@ import {
   suggestChangeBreakdowns,
   suggestTenderTopUps,
   summarizeShiftReconciliation,
+  type ProductCodeModifier,
   type ShiftReconciliation,
 } from './utils/pos';
 import {
@@ -1743,11 +1745,13 @@ export default function PosWorkstation() {
       return;
     }
 
-    const modified = parseModifiedProductCode(
+    const resolvedModified = resolveModifiedProductScan(
       code,
+      productsByScanCode,
       priceOverrideSettings.enabled ? priceOverrideSettings.separator : '',
     );
-    const match = modified && productsByScanCode.get(modified.code.trim().toLowerCase());
+    const modified = resolvedModified?.modified;
+    const match = resolvedModified?.match;
 
     if (match) {
       if (match.variant) {
@@ -1790,6 +1794,13 @@ export default function PosWorkstation() {
   ]);
 
   const scannerSettings = desktopSettings?.scanner ?? DEFAULT_POS_SCANNER_SETTINGS;
+  const activePriceSeparator = priceOverrideSettings.enabled ? priceOverrideSettings.separator : '';
+  const resolveBarcodeModifierOrder = useCallback((input: string) => {
+    if (productsByScanCode.has(input.trim().toLowerCase())) return [];
+    return resolveModifiedProductScan(input, productsByScanCode, activePriceSeparator)
+      ?.modified.order
+      ?? detectProductCodeModifierOrder(input, activePriceSeparator);
+  }, [activePriceSeparator, productsByScanCode]);
   const shortcutSettings: POSShortcutSettings = desktopSettings?.shortcuts ?? DEFAULT_POS_SHORTCUT_SETTINGS;
   const actionShortcuts = shortcutSettings.actions;
   const shiftReconciliationSettings: POSShiftReconciliationSettings =
@@ -1813,6 +1824,11 @@ export default function PosWorkstation() {
     // search overlay opts in separately through data-scanner-passthrough.
     enabled: session != null && !isSettingsOpen && !isHelpOpen,
     settings: scannerSettings,
+    isKnownCode: (scannedCode) => {
+      const normalized = scannedCode.trim().toLowerCase();
+      return productsByScanCode.has(normalized)
+        || findSaleByReceiptScan(visibleSales, scannedCode) != null;
+    },
     onScan: (scannedCode) => {
       const barcodeInput = barcodeInputRef.current;
       const submission = isReturnOpen
@@ -2784,6 +2800,7 @@ export default function PosWorkstation() {
           }}
           onHideOutOfStockChange={setHideOutOfStock}
           priceSeparator={priceOverrideSettings.enabled ? priceOverrideSettings.separator : ''}
+          resolveModifierOrder={resolveBarcodeModifierOrder}
           onSubcategoryChange={setActiveSubcategory}
           products={visibleProducts}
           subcategories={subcategoryTiles}
@@ -3536,6 +3553,7 @@ type ProductPanelProps = {
   onOpenSearch: () => void;
   onSubcategoryChange: (nextSubcategory: string | null) => void;
   priceSeparator: string;
+  resolveModifierOrder: (input: string) => ProductCodeModifier[];
   products: Product[];
   subcategories: CatalogSubcategoryTile[];
 };
@@ -3543,8 +3561,8 @@ type ProductPanelProps = {
 function ProductPanel(props: ProductPanelProps) {
   const [barcodeEntry, setBarcodeEntry] = useState('');
   const modifierOrder = useMemo(
-    () => detectProductCodeModifierOrder(barcodeEntry, props.priceSeparator),
-    [barcodeEntry, props.priceSeparator],
+    () => props.resolveModifierOrder(barcodeEntry),
+    [barcodeEntry, props.resolveModifierOrder],
   );
   const isRootView = props.activeCategoryId === 'all';
   const isSubcategoryView = props.activeSubcategory != null;
