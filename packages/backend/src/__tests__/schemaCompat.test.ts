@@ -44,4 +44,65 @@ describe('desktop schema compatibility', () => {
       'ALTER TABLE "Product" ADD COLUMN "barcodes_json" TEXT',
     );
   });
+
+  describe('decimal quantity columns', () => {
+    // Column types the default beforeEach mock doesn't cover, keyed the same
+    // way ensureDecimalQuantityColumns looks them up: "<table>.<column>".
+    const declareColumnTypes = (types: Record<string, string>) => {
+      queryRawUnsafe.mockImplementation(async (sql: string, tableName?: string) => {
+        if (sql.startsWith('SELECT name FROM sqlite_master')) {
+          return [{ name: tableName }];
+        }
+
+        const tableMatch = /PRAGMA table_info\("(\w+)"\)/.exec(sql);
+        const table = tableMatch?.[1];
+        const rows = Object.entries(types)
+          .filter(([key]) => key.startsWith(`${table}.`))
+          .map(([key, type]) => ({ name: key.slice(table!.length + 1), type }));
+
+        return rows.length > 0 ? rows : [{ name: 'existing_column', type: 'TEXT' }];
+      });
+    };
+
+    it('rebuilds only the tables still carrying an INTEGER quantity column', async () => {
+      declareColumnTypes({
+        'Product.stockOnHand': 'INTEGER',
+        'BatchPrice.minQty': 'REAL',
+        'InventoryEvent.quantity': 'REAL',
+        'SaleLine.quantity': 'INTEGER',
+        'HeldSaleLine.quantity': 'REAL',
+        'ReturnLine.quantity': 'REAL',
+      });
+
+      await ensureLocalSchemaCompat();
+
+      expect(executeRawUnsafe).toHaveBeenCalledWith('PRAGMA foreign_keys=OFF');
+      expect(executeRawUnsafe).toHaveBeenCalledWith('DROP TABLE "Product"');
+      expect(executeRawUnsafe).toHaveBeenCalledWith('ALTER TABLE "new_Product" RENAME TO "Product"');
+      expect(executeRawUnsafe).toHaveBeenCalledWith('DROP TABLE "SaleLine"');
+      expect(executeRawUnsafe).toHaveBeenCalledWith('ALTER TABLE "new_SaleLine" RENAME TO "SaleLine"');
+      expect(executeRawUnsafe).toHaveBeenCalledWith('PRAGMA foreign_keys=ON');
+
+      expect(executeRawUnsafe).not.toHaveBeenCalledWith('DROP TABLE "BatchPrice"');
+      expect(executeRawUnsafe).not.toHaveBeenCalledWith('DROP TABLE "InventoryEvent"');
+      expect(executeRawUnsafe).not.toHaveBeenCalledWith('DROP TABLE "HeldSaleLine"');
+      expect(executeRawUnsafe).not.toHaveBeenCalledWith('DROP TABLE "ReturnLine"');
+    });
+
+    it('is a no-op once every quantity column is already REAL', async () => {
+      declareColumnTypes({
+        'Product.stockOnHand': 'REAL',
+        'BatchPrice.minQty': 'REAL',
+        'InventoryEvent.quantity': 'REAL',
+        'SaleLine.quantity': 'REAL',
+        'HeldSaleLine.quantity': 'REAL',
+        'ReturnLine.quantity': 'REAL',
+      });
+
+      await ensureLocalSchemaCompat();
+
+      expect(executeRawUnsafe).not.toHaveBeenCalledWith('PRAGMA foreign_keys=OFF');
+      expect(executeRawUnsafe).not.toHaveBeenCalledWith('DROP TABLE "Product"');
+    });
+  });
 });
