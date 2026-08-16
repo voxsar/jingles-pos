@@ -106,8 +106,11 @@ npm install --workspaces --if-present
 npm run build
 
 cd packages/backend
-DB_URL=\$(grep DATABASE_URL .env | cut -d'"' -f2)
-DATABASE_URL="\$DB_URL" npx prisma migrate deploy
+# Prisma's CLI auto-loads DATABASE_URL from packages/backend/.env - no need
+# to parse it out ourselves (that .env stores it unquoted, unlike the other
+# vars here, so a quote-delimited extraction silently produces an empty
+# value and fails the "file:" scheme check).
+npx prisma migrate deploy
 cd "$APP_DIR"
 
 pm2 restart "$PM2_APP" --update-env
